@@ -1,0 +1,31 @@
+# Public ALB front door for the broker. Mirrors the sandbox-router Ingress
+# (same ACM cert pattern, same TLS policy). Replace the certificate-arn
+# with the cert for broker.jicomusic.com.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aio-sandbox-broker
+  namespace: default
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-west-2:820537372947:certificate/512d4375-500e-4854-808e-6d645a65aef6
+    alb.ingress.kubernetes.io/healthcheck-path: /ping
+    alb.ingress.kubernetes.io/healthcheck-port: traffic-port
+    alb.ingress.kubernetes.io/backend-protocol: HTTP
+spec:
+  ingressClassName: alb
+  rules:
+    - host: broker.jicomusic.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: aio-sandbox-broker-svc
+                port:
+                  number: 8080
