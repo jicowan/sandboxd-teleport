@@ -18,6 +18,8 @@ is gated by Keycloak group membership.
 
 See **[ARCHITECTURE.md](./ARCHITECTURE.md)** for the full design, auth/authz
 flow, and swim-lane diagram. See
+**[docs/HOWTO-tool-access-and-quotas.md](./docs/HOWTO-tool-access-and-quotas.md)**
+for how to filter which tools each user can use and how to configure quotas. See
 **[docs/POSTMORTEM-agentcore-vs-agentgateway.md](./docs/POSTMORTEM-agentcore-vs-agentgateway.md)**
 for why this uses agentgateway rather than AWS Bedrock AgentCore Gateway.
 
