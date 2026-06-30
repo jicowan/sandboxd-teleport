@@ -188,7 +188,7 @@ above is the **coarsest** tier and ships first.
 |---|---|---|
 | ALB + ACM + R53 | exists | `agent-sandbox` bundle `auth/40-router-ingress.yaml` |
 | oauth2-proxy sidecar | exists | `auth/20-router-deployment-patch.yaml` |
-| Keycloak `sandbox` realm + `sandbox-router-cli` client | exists | `auth/00-keycloak-sandbox-realm.yaml` |
+| Keycloak `sandbox` realm + `aio-sandbox-client` client | exists | `auth/00-keycloak-sandbox-realm.yaml` |
 | sandbox-router | exists, unchanged | upstream `agent-sandbox` |
 | **sandbox broker** | **to build** | this repo, `broker/` |
 | lifecycle logic | port from `claim.py`/`release.py` | this repo, `broker/` |

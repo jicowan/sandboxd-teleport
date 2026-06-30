@@ -19,7 +19,7 @@ Reference values used below (replace for your environment):
 ## 0. Prerequisites already in place
 
 - `aio-sandbox-template` SandboxTemplate + `aio-sandbox-warmpool` SandboxWarmPool.
-- Keycloak `sandbox` realm with the `sandbox-router-cli` public device-flow
+- Keycloak `sandbox` realm with the `aio-sandbox-client` public device-flow
   client and the `sandbox` client scope.
 - The router behind its own ALB + oauth2-proxy sidecar.
 
@@ -173,7 +173,7 @@ docker run -it --rm \
   --user "$(id -u):$(id -g)" \
   -v "$HOME/.config/aio-sandbox:/config" \
   -e AIO_OIDC_ISSUER=https://keycloak.jicomusic.com/realms/sandbox \
-  -e AIO_OIDC_CLIENT_ID=sandbox-router-cli \
+  -e AIO_OIDC_CLIENT_ID=aio-sandbox-client \
   jicowan/aio-sandbox-proxy:latest login
 ```
 
@@ -192,7 +192,7 @@ claude mcp add aio-sandbox \
   --env AIO_BROKER_URL=https://broker.jicomusic.com \
   --env AIO_ROUTER_URL=https://sandbox-router.jicomusic.com \
   --env AIO_OIDC_ISSUER=https://keycloak.jicomusic.com/realms/sandbox \
-  --env AIO_OIDC_CLIENT_ID=sandbox-router-cli \
+  --env AIO_OIDC_CLIENT_ID=aio-sandbox-client \
   -- docker run -i --rm \
        --user "$(id -u):$(id -g)" \
        -v "$HOME/.config/aio-sandbox:/config" \

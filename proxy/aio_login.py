@@ -11,7 +11,7 @@ token is valid.
 Run before the first Claude Code MCP tool call:
 
     AIO_OIDC_ISSUER=https://keycloak.jicomusic.com/realms/sandbox \
-    AIO_OIDC_CLIENT_ID=sandbox-router-cli \
+    AIO_OIDC_CLIENT_ID=aio-sandbox-client \
     python3 aio_login.py
 
 Re-run any time the cached refresh token is expired or revoked.

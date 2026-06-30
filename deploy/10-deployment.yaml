@@ -55,7 +55,7 @@ spec:
             - --extra-jwt-issuers=https://keycloak.jicomusic.com/realms/sandbox=sandbox-router
             - --provider=keycloak-oidc
             - --oidc-issuer-url=https://keycloak.jicomusic.com/realms/sandbox
-            - --client-id=sandbox-router-cli
+            - --client-id=aio-sandbox-client
             - --client-secret=unused
             - --email-domain=*
             # Authorization gate: a valid token is not enough — the caller
