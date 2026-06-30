@@ -116,7 +116,35 @@ A **Streamable HTTP MCP server** that:
 Stage-1 lifecycle code is reused verbatim; only the front (REST → MCP server)
 and the token validation (X-Auth-Request-* → OBO JWT) change.
 
-## Identity model — DECIDED: gateway-level (CLIENT_CREDENTIALS)
+## Identity propagation — the full map (empirically established)
+
+Whether the broker can learn the END-USER identity (vs. just the gateway's
+service identity) depends on the gateway-target's outbound grant type AND the
+target's tool-discovery mode. All four combinations were tested against the
+live gateway; results:
+
+| Outbound grant | Target discovery | End-user identity at broker? | Result |
+|---|---|---|---|
+| `CLIENT_CREDENTIALS` | live introspection | No — gateway M2M identity only | **WORKS (shipped)** |
+| `TOKEN_EXCHANGE` (OBO) | live introspection | Would carry user | **FAILS** — target FAILED at create; no user exists at creation-time `tools/list`, so OBO has no subject_token → can't mint outbound token → can't connect. Verified twice (incl. correct `grantType: TOKEN_EXCHANGE` + `customParameters: {requested_token_use: on_behalf_of}`). |
+| `TOKEN_EXCHANGE` (OBO) | static `mcpToolSchema` | — | **REJECTED** by API: *"mcpToolSchema is only supported for MCP Server targets with AUTHORIZATION_CODE grant type."* |
+| `AUTHORIZATION_CODE` (3LO) | static `mcpToolSchema` | Yes — per-user token | **VIABLE** but gated: API requires *"MCP version 2025-11-25 or later"* (our gateway is 2025-03-26), needs interactive user consent, and loses live tool transparency. See `docs/3LO-PLAN.md`. |
+
+Corrections to earlier claims in this doc's history (recorded for honesty):
+- "OBO grant type doesn't exist for gateway targets" — WRONG; it was a stale
+  CLI model (2.33.2). The real enum (CLI 2.35.12) is
+  `[CLIENT_CREDENTIALS, AUTHORIZATION_CODE, TOKEN_EXCHANGE]`.
+- "OBO is structurally impossible for MCP-server targets" — IMPRECISE. OBO
+  fails specifically for **live-introspection** MCP targets (no user at
+  creation). It is not offered with static-schema MCP targets either (API ties
+  static schema to AUTHORIZATION_CODE). Per-user identity is reachable only via
+  the 3LO + static-schema path.
+
+Why Lambda/OpenAPI targets propagate identity fine: their schema is declared,
+so the gateway never introspects the backend at creation → no token needed
+until a real per-request user call → OBO/3LO works at invoke time.
+
+## Identity model — SHIPPED: gateway-level (CLIENT_CREDENTIALS)
 
 The clean per-user OBO path does **not exist** at the Gateway→target layer.
 The AWS API enum `OAuthGrantType` is `['CLIENT_CREDENTIALS','AUTHORIZATION_CODE']`
