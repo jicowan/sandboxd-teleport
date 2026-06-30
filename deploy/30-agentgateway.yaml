@@ -39,6 +39,11 @@ data:
                 keycloak: {}
               resourceMetadata:
                 resource: https://agentgateway.jicomusic.com/mcp
+                # Point clients at Keycloak as the OAuth authorization server
+                # (RFC 9728). Without this, agentgateway defaults authorization_servers
+                # to the resource URL, and Claude Code's discovery fails.
+                authorization_servers:
+                  - https://keycloak.jicomusic.com/realms/sandbox
                 scopesSupported: [openid, sandbox]
                 bearerMethodsSupported: [header]
             # Forward the validated user JWT unchanged to the broker.
