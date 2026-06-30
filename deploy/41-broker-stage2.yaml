@@ -27,7 +27,7 @@ spec:
       serviceAccountName: aio-sandbox-broker
       containers:
         - name: broker
-          image: jicowan/aio-sandbox-broker:0.2.1
+          image: jicowan/aio-sandbox-broker:0.2.3
           env:
             - { name: BROKER_APP,        value: mcp }
             - { name: AIO_TEMPLATE_NAME, value: aio-sandbox-template }

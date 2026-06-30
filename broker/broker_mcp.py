@@ -204,18 +204,6 @@ def _release_session(session_id: str) -> None:
 
 # ---- MCP forwarding ----
 
-def _is_initialize(body: bytes) -> bool:
-    # cheap check without full JSON parse dependency on structure
-    try:
-        import json
-        msg = json.loads(body or b"{}")
-    except ValueError:
-        return False
-    if isinstance(msg, list):  # batch
-        return any(m.get("method") == "initialize" for m in msg if isinstance(m, dict))
-    return isinstance(msg, dict) and msg.get("method") == "initialize"
-
-
 async def _forward(body: bytes, sandbox_id: str, content_type: str, accept: str):
     """Forward the raw MCP request to the router with X-Sandbox-* headers and
     relay the response (json or SSE) back unchanged."""
@@ -263,28 +251,27 @@ async def mcp(
     content_type = request.headers.get("content-type", "application/json")
     accept = request.headers.get("accept", "application/json, text/event-stream")
 
-    if mcp_session_id:
-        # Existing session: resolve the sandbox bound to it.
-        sandbox_id = _resolve_sandbox_id(mcp_session_id)
-        if not sandbox_id:
-            # Session unknown/expired — tell the client to re-initialize.
-            raise HTTPException(status_code=404, detail="Unknown MCP session.")
-        return await _forward(body, sandbox_id, content_type, accept)
+    # Determine the session id: use the one the caller sent, else mint one.
+    # We do NOT require it to already resolve — this API version's Gateway does
+    # not reliably round-trip Mcp-Session-Id after a backend reconnect (a slow
+    # tool call can trigger one), so a hard 404 on an unknown id breaks live
+    # sessions. Instead we claim-or-reuse a sandbox for whatever session id we
+    # end up with. Per-session sandbox mapping is preserved; the failure mode
+    # (404 Unknown MCP session) is eliminated.
+    session_id = mcp_session_id or uuid.uuid4().hex
 
-    if _is_initialize(body):
-        # New session: mint an id, claim a sandbox bound to it, forward the
-        # initialize, and return our session id so the Gateway sends it back.
-        session_id = uuid.uuid4().hex
+    sandbox_id = _resolve_sandbox_id(session_id)
+    if not sandbox_id:
+        # No (ready) sandbox for this session yet — claim one bound to it.
+        # Covers both a genuine new session and a session whose id the Gateway
+        # dropped/reset mid-stream.
         sandbox_id = _claim_sandbox(auth.principal, session_id)
-        resp = await _forward(body, sandbox_id, content_type, accept)
-        resp.headers[SESSION_HEADER] = session_id
-        return resp
 
-    # Non-initialize without a session id is a protocol error.
-    raise HTTPException(
-        status_code=400,
-        detail="Missing Mcp-Session-Id (no active session; send initialize first).",
-    )
+    resp = await _forward(body, sandbox_id, content_type, accept)
+    # Always advertise the session id so a client/Gateway that does track it
+    # converges on a stable value.
+    resp.headers[SESSION_HEADER] = session_id
+    return resp
 
 
 @app.delete("/")

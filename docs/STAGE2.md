@@ -185,6 +185,55 @@ Gotchas resolved during bring-up (all now in DEPLOY notes):
 - **Target creation latency**: ~5 min while the privateEndpoint (VPC Lattice)
   provisions; CREATING is normal, not a failure.
 
+## KNOWN ISSUE — session affinity (investigated 2026-06-30)
+
+Symptom: after a `browser_navigate` to a heavy page timed out, subsequent tool
+calls failed with `{"detail":"Unknown MCP session"}` (HTTP 404), and the
+client retried (looked like a hang). Leaked claims accumulated (no DELETE).
+
+Isolation test (hitting the broker DIRECTLY, bypassing the Gateway, from
+inside the broker pod): `initialize` → 200 with `Mcp-Session-Id`; `tools/list`
+WITH that id → 200. **The broker's session→claim logic is correct.**
+
+Conclusion: the break is at the **Gateway hop**. This API version's Gateway has
+no session management; it opens its own backend session to the broker and does
+not reliably resurface the broker's `Mcp-Session-Id` after a backend
+connection reset (which the navigation *timeout* triggered). The broker then
+receives either a stale id it never issued or a fresh initialize, and 404s /
+spawns a new claim.
+
+### Resolution (broker 0.2.3)
+
+Tried principal-keying first; reverted it — it caused per-call sandbox churn
+(a new claim per request, prior ones torn down → "Could not connect to backend
+sandbox"). Reverted to **session-keyed** mapping with one change that removes
+the brittleness: **on an unresolved/absent session id, claim-or-reuse instead
+of returning 404.** So `_resolve_sandbox_id(sid)` miss → `_claim_sandbox(sid)`
+rather than `HTTPException(404)`. Per-session sandbox mapping is preserved; the
+"Unknown MCP session" failure mode is gone.
+
+Verified after deploy:
+- Claims persist (probed: a claim stayed stable >20s; not a lifecycle bug —
+  the earlier "vanishing claims" was churn from the broken per-call logic +
+  stray DELETEs, now gone).
+- `_resolve_sandbox_id` returns the bound sandbox for a known session, None for
+  unknown (→ claim path).
+- Gateway end-to-end: initialize + 3 sequential bash calls → no 404s, exactly
+  1 claim, no leak. Broker logs show only 200/202 (+ a 204 on DELETE).
+
+### Still flaky: Gateway↔AIO re-initialize latency (NOT a broker bug)
+
+Intermittently a call fails with `MCP server did not respond to the initialize
+request within 40 seconds`. Broker logs show **no broker error** on these — the
+Gateway periodically opens a *fresh backend MCP session* (a new initialize, seen
+as a 202), and the AIO hub sometimes takes >40s to answer that re-initialize.
+The 40s budget is the Gateway's backend-initialize timeout; the latency is the
+AIO hub cold-initializing. The next call typically succeeds against the same
+sandbox. Largely outside the broker's control; mitigations to explore: a
+warm/keepalive ping to keep the AIO hub session hot, or check whether the
+Gateway's backend timeout is tunable. Heavy pages (buzzfeed) also exceed
+`browser_navigate`'s own budget — separate from this.
+
 ## Build plan (incremental, verify-first)
 
 1. **OBO token-exchange in Keycloak — DONE/VERIFIED.** `sandbox-gateway-outbound`
