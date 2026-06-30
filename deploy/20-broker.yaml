@@ -33,7 +33,7 @@ spec:
           - { name: ndots, value: "3" }
       containers:
         - name: broker
-          image: jicowan/aio-sandbox-broker:0.3.1
+          image: jicowan/aio-sandbox-broker:0.4.0
           env:
             - { name: BROKER_APP,        value: mcp }
             - { name: AIO_TEMPLATE_NAME, value: aio-sandbox-template }
@@ -49,6 +49,10 @@ spec:
             # the public login client. Per-user identity + group gate enforced here.
             - { name: AIO_GATEWAY_AZP,       value: "aio-sandbox-client" }
             - { name: AIO_REQUIRED_GROUP,    value: "sandbox-users" }
+            # Per-user concurrent-sandbox cap (the create gate). The broker is
+            # the only component that can create claims, so this can't be
+            # bypassed by opening more MCP sessions. 0 disables the cap.
+            - { name: AIO_MAX_SANDBOXES_PER_USER, value: "3" }
           ports:
             - { name: http, containerPort: 8080 }
           # Tolerant probes: the broker is single-worker uvicorn and its

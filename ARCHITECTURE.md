@@ -68,9 +68,11 @@ token validation and authorization on every MCP call.
      │                   │ validate JWT:        │                    │                    │
      │                   │  iss/aud/exp + sig ──▶│ (JWKS, cached)     │                    │
      │                   │◀─────────────────────│                    │                    │
-     │                   │ [authz: optional     │                    │                    │
-     │                   │  mcpAuthorization CEL │                    │                    │
-     │                   │  on tool name/claims] │                    │                    │
+     │                   │ AUTHZ (mcpAuthz CEL): │                    │                    │
+     │                   │  is mcp.tool.name     │                    │                    │
+     │                   │  allowed for          │                    │                    │
+     │                   │  jwt.groups? else     │                    │                    │
+     │                   │  filter / deny tool   │                    │                    │
      │                   │ passthrough SAME JWT  │                    │                    │
      │                   │─────────────────────────────────────────▶│                    │
      │                   │                      │  re-validate JWT    │                    │
@@ -81,8 +83,10 @@ token validation and authorization on every MCP call.
      │                   │                      │   else 403          │                    │
      │                   │                      │  principal =        │                    │
      │                   │                      │   preferred_username│                    │
+     │                   │                      │  quota: claims <    │                    │
+     │                   │                      │   MAX? else 429     │                    │
      │                   │                      │                     │ claim/reuse sandbox│
-     │                   │                      │                     │  (per session id)  │
+     │                   │                      │                     │ (session+principal)│
      │                   │                      │                     │ forward tools/call │
      │                   │                      │                     │  + X-Sandbox-* ───▶│ run in pod
      │                   │                      │                     │◀───────────────────│ result
@@ -102,23 +106,46 @@ token validation and authorization on every MCP call.
   (independent of the gateway), and asserts `azp == aio-sandbox-client` to
   confirm the token came through the expected login client.
 
-### Authorization — what you may do
-- **Coarse, today:** the broker requires the JWT's `groups` claim to contain
-  `sandbox-users` (`AIO_REQUIRED_GROUP`), else `403`. Membership is managed in
-  Keycloak. This gates *whether you can get a sandbox at all*.
-- **Fine-grained, planned:** agentgateway's `mcpAuthorization` (CEL) can gate
-  *individual tools* on JWT claims — e.g. only `sandbox-power` may call
-  `sandbox_execute_bash`, or require `scope` `sandbox:browser` for `browser_*`.
-  Enforced at the gateway, before the broker.
+Authorization happens at **two** layers — *may you get a sandbox at all*
+(broker) and *which tools you may call* (gateway):
 
-### Identity → sandbox mapping
+**1. Can you create / use a sandbox? (broker)**
+- **Group gate:** the broker requires the JWT's `groups` claim to contain
+  `sandbox-users` (`AIO_REQUIRED_GROUP`), else `403`. Membership is managed in
+  Keycloak.
+- **Per-user quota:** before claiming a *new* sandbox, the broker counts the
+  caller's existing claims (by `principal` label) and returns `429` once it
+  reaches `AIO_MAX_SANDBOXES_PER_USER` (default `3`). Because the broker holds
+  the only RBAC to create claims, this can't be bypassed by opening more MCP
+  sessions.
+
+**2. Which tools may you call? (gateway — `mcpAuthorization`)**
+- agentgateway evaluates CEL `rules` (OR'd) against the passed-through JWT on
+  every `tools/call`, and **also filters `tools/list`** so unauthorized tools
+  are invisible. Tiers:
+  - `sandbox-power` → every tool, including `sandbox_execute_bash` /
+    `sandbox_execute_code`.
+  - `sandbox-users` (standard) → `browser_*` + non-exec `sandbox_*` (files,
+    editor, markdown, context, packages, skill loader). Exec tools are filtered
+    out of `tools/list` and rejected on call (`-32602 Unknown tool`).
+- Verified live: a standard-tier user sees 30 tools (no exec); a power-tier
+  user sees 32 and can run shell. Rules live in `deploy/30-agentgateway.yaml`.
+
+### Identity → sandbox mapping (multi-tenancy)
 - The broker derives the **principal** from `preferred_username` (falls back to
   `email`/`sub`).
 - A `SandboxClaim` is labelled with both the **principal** and the **MCP
   session id**. One MCP session ⇒ one sandbox (reused across calls). A new
   session for the same user ⇒ another sandbox — so a user can have **N concurrent
-  sandboxes**, while different users are isolated by principal. Per-user quota is
-  a future policy check over the principal label.
+  sandboxes**, while different users are isolated by principal.
+- **Tenant isolation:** the session→claim lookup is scoped by **both**
+  `session-id` AND `principal` labels, so a session id (even if guessed or
+  leaked) can never resolve to another user's sandbox. Sandboxes are never
+  shared across principals; the router dispatches each request to a single
+  addressed pod by `X-Sandbox-ID`.
+- **Per-user quota:** `N` is capped at `AIO_MAX_SANDBOXES_PER_USER` (default 3)
+  — the broker counts the principal's claims before creating a new one and
+  returns `429` past the cap.
 
 ## Request lifecycle inside the broker
 

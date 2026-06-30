@@ -49,6 +49,35 @@ data:
             # Forward the validated user JWT unchanged to the broker.
             backendAuth:
               passthrough: {}
+            # Tool-level authorization (tiered by Keycloak group claim in the
+            # passed-through JWT). Rules are OR'd: a tool call is allowed if ANY
+            # rule matches. Unauthorized tools are ALSO filtered out of the
+            # tools/list response, so standard users never see exec tools.
+            #
+            # Tiers:
+            #   - sandbox-power : everything (incl. shell + code execution)
+            #   - sandbox-users : browser_* + non-exec sandbox_* (files, editor,
+            #                     markdown, context, packages, skill loader);
+            #                     NOT sandbox_execute_bash / sandbox_execute_code
+            #
+            # mcp.tool.name is the bare tool name (e.g. "sandbox_execute_bash")
+            # as published by the AIO hub and passed through by the broker.
+            mcpAuthorization:
+              rules:
+              # Power users: any tool.
+              - '"sandbox-power" in jwt.groups'
+              # Standard users: web browsing.
+              - 'mcp.tool.name.startsWith("browser_")'
+              # Standard users: non-exec sandbox tools.
+              - 'mcp.tool.name == "sandbox_file_operations"'
+              - 'mcp.tool.name == "sandbox_str_replace_editor"'
+              - 'mcp.tool.name == "sandbox_convert_to_markdown"'
+              - 'mcp.tool.name == "sandbox_get_context"'
+              - 'mcp.tool.name == "sandbox_get_packages"'
+              - 'mcp.tool.name == "sandbox_load_skill"'
+              # NOTE: sandbox_execute_bash and sandbox_execute_code are
+              # intentionally NOT listed here, so only sandbox-power may call
+              # (or even see) them.
           backends:
           - mcp:
               targets:

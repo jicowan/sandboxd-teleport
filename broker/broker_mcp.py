@@ -70,7 +70,12 @@ EXPECTED_AUDIENCE = os.environ.get("AIO_EXPECTED_AUDIENCE", "sandbox-router")
 # token came via the expected client (defense-in-depth; agentgateway already
 # validated the signature/issuer/audience inbound).
 GATEWAY_AZP = os.environ.get("AIO_GATEWAY_AZP", "aio-sandbox-client")
+# Coarse "may you get a sandbox at all" gate: the JWT must carry this group.
 REQUIRED_GROUP = os.environ.get("AIO_REQUIRED_GROUP", "sandbox-users")
+# Per-user quota: the maximum number of concurrent sandboxes a single principal
+# may hold. The broker is the only component that can create claims, so this is
+# the enforcement point. 0 disables the cap.
+MAX_SANDBOXES_PER_USER = int(os.environ.get("AIO_MAX_SANDBOXES_PER_USER", "3"))
 
 JWKS_URL = f"{OIDC_ISSUER}/protocol/openid-connect/certs"
 
@@ -81,7 +86,7 @@ LABEL_PRINCIPAL = "aio-sandbox.broker/principal"
 
 SESSION_HEADER = "mcp-session-id"
 
-app = FastAPI(title="aio-sandbox-broker-mcp", version="0.2.0")
+app = FastAPI(title="aio-sandbox-broker-mcp", version="0.4.0")
 
 # Use certifi's CA bundle explicitly so JWKS fetching works regardless of the
 # base image / OS trust store configuration. Cache keys long and tolerate
@@ -187,9 +192,26 @@ def _list_claims(client: SandboxClient, selector: str) -> list:
     return resp.get("items", [])
 
 
-def _claim_for_session(client: SandboxClient, session_id: str) -> Optional[dict]:
-    items = _list_claims(client, f"{LABEL_SESSION}={_label_safe(session_id)}")
+def _claim_for_session(
+    client: SandboxClient, session_id: str, principal: str
+) -> Optional[dict]:
+    # Scope the lookup by BOTH session id and principal. The session id is a
+    # random UUID, but binding it to the authenticated principal makes the
+    # mapping defense-in-depth: a session id can never resolve to another
+    # user's sandbox even if one were guessed/leaked (tenant isolation).
+    selector = (
+        f"{LABEL_SESSION}={_label_safe(session_id)},"
+        f"{LABEL_PRINCIPAL}={_label_safe(principal)}"
+    )
+    items = _list_claims(client, selector)
     return items[0] if items else None
+
+
+def _count_claims_for_principal(client: SandboxClient, principal: str) -> int:
+    selector = (
+        f"{LABEL_MANAGED}=true,{LABEL_PRINCIPAL}={_label_safe(principal)}"
+    )
+    return len(_list_claims(client, selector))
 
 
 def _sandbox_headers(sandbox_id: str) -> dict:
@@ -202,8 +224,24 @@ def _sandbox_headers(sandbox_id: str) -> dict:
 
 def _claim_sandbox(principal: str, session_id: str) -> str:
     """Claim a template-backed, warmpool-adopted sandbox; label it with the
-    session id and principal. Returns the sandbox_id."""
+    session id and principal. Returns the sandbox_id.
+
+    Enforces the per-user quota: a principal may hold at most
+    MAX_SANDBOXES_PER_USER concurrent sandboxes. Since this is the only place a
+    claim is created, the cap can't be bypassed by opening more MCP sessions.
+    """
     client = _client()
+    if MAX_SANDBOXES_PER_USER > 0:
+        current = _count_claims_for_principal(client, principal)
+        if current >= MAX_SANDBOXES_PER_USER:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Sandbox quota reached: {current}/{MAX_SANDBOXES_PER_USER} "
+                    f"for '{principal}'. Release a sandbox (DELETE the MCP "
+                    f"session) or wait for one to expire."
+                ),
+            )
     sandbox = client.create_sandbox(
         template=TEMPLATE_NAME,
         namespace=NAMESPACE,
@@ -219,17 +257,17 @@ def _claim_sandbox(principal: str, session_id: str) -> str:
     return sandbox.sandbox_id
 
 
-def _resolve_sandbox_id(session_id: str) -> Optional[str]:
+def _resolve_sandbox_id(session_id: str, principal: str) -> Optional[str]:
     client = _client()
-    claim = _claim_for_session(client, session_id)
+    claim = _claim_for_session(client, session_id, principal)
     if not claim:
         return None
     return (claim.get("status", {}) or {}).get("sandbox", {}).get("name")
 
 
-def _release_session(session_id: str) -> None:
+def _release_session(session_id: str, principal: str) -> None:
     client = _client()
-    claim = _claim_for_session(client, session_id)
+    claim = _claim_for_session(client, session_id, principal)
     if not claim:
         return
     try:
@@ -370,7 +408,7 @@ def _synthetic_initialize(req_id) -> dict:
         "result": {
             "protocolVersion": ADVERTISED_PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "aio-sandbox-broker", "version": "0.3.0"},
+            "serverInfo": {"name": "aio-sandbox-broker", "version": "0.4.0"},
         },
     }
 
@@ -410,7 +448,7 @@ async def mcp(
         return resp
 
     # Real work (tools/list, tools/call, ...) — ensure a sandbox, then forward.
-    sandbox_id = await run_in_threadpool(_resolve_sandbox_id, session_id)
+    sandbox_id = await run_in_threadpool(_resolve_sandbox_id, session_id, auth.principal)
     if not sandbox_id:
         sandbox_id = await run_in_threadpool(_claim_sandbox, auth.principal, session_id)
 
@@ -424,7 +462,7 @@ async def mcp_delete(
     authorization: Optional[str] = Header(default=None),
     mcp_session_id: Optional[str] = Header(default=None, alias="Mcp-Session-Id"),
 ) -> Response:
-    await run_in_threadpool(_authenticate, authorization)
+    auth = await run_in_threadpool(_authenticate, authorization)
     if mcp_session_id:
-        await run_in_threadpool(_release_session, mcp_session_id)
+        await run_in_threadpool(_release_session, mcp_session_id, auth.principal)
     return Response(status_code=204)

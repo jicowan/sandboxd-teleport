@@ -37,8 +37,9 @@ for why this uses agentgateway rather than AWS Bedrock AgentCore Gateway.
   controller, and a `SandboxTemplate` + `SandboxWarmPool` (`aio-sandbox-template` /
   `aio-sandbox-warmpool`).
 - Keycloak reachable at `keycloak.jicomusic.com` with the `sandbox` realm
-  (public `aio-sandbox-client`, `sandbox-users` group, the scope mappers in
-  `docs/` — `sub`, `preferred_username`, `groups`, `aud=sandbox-router`).
+  (public `aio-sandbox-client`; `sandbox-users` group gates access and
+  `sandbox-power` grants the exec tools; the scope mappers in `docs/` —
+  `sub`, `preferred_username`, `groups`, `aud=sandbox-router`).
 - Route 53 zone for the public hostname + an ACM cert for
   `agentgateway.jicomusic.com`.
 - `kubectl`, `docker buildx`, `aws` CLI, and `claude` (Claude Code).
@@ -126,5 +127,13 @@ ARCHITECTURE.md the design + auth/authz swim-lane
   `docs/DESIGN-agentgateway.md`.
 - **Karpenter**: broker, agentgateway, and sandbox pods carry
   `karpenter.sh/do-not-disrupt` so consolidation doesn't drain them.
-- **Tool-level authz** (gate individual tools by `sub`/`scope`/`groups`) is a
-  planned enhancement via agentgateway's `mcpAuthorization` CEL policy.
+- **Tool tiering** (implemented): agentgateway's `mcpAuthorization` CEL policy
+  in `deploy/30-agentgateway.yaml` gates individual tools by Keycloak group.
+  `sandbox-power` members get all tools (incl. `sandbox_execute_bash` /
+  `sandbox_execute_code`); plain `sandbox-users` get browsing + non-exec
+  sandbox tools, and the exec tools are filtered out of `tools/list` entirely.
+  Create a `sandbox-power` group in Keycloak and add the relevant users.
+- **Create gate + per-user quota** (implemented): the broker requires the
+  `sandbox-users` group to get a sandbox at all, and caps concurrent sandboxes
+  per user at `AIO_MAX_SANDBOXES_PER_USER` (default 3), returning `429` past
+  the cap. Each user gets their own isolated sandbox(es); they are never shared.
