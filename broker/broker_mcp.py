@@ -1,29 +1,32 @@
-"""AIO Sandbox Broker — Stage 2 (MCP server behind AgentCore Gateway).
+"""AIO Sandbox Broker — Streamable HTTP MCP server behind agentgateway.
 
-Reshapes the Stage-1 REST broker into a Streamable HTTP MCP server that sits
-as the Gateway's MCP-server target:
+  Claude Code --MCP+OAuth--> agentgateway --(passthrough user JWT)--> THIS
+      --> sandbox-router --> AIO pod
 
-  Claude Code --MCP+OAuth--> AgentCore Gateway --OBO Bearer--> THIS --> router --> AIO pod
+agentgateway validates the inbound Keycloak user JWT and forwards that SAME
+token to this broker (backendAuth: passthrough), so the broker sees the real
+end-user identity. (This replaced an AgentCore Gateway design whose OBO/3LO
+identity propagation could not work for a transparent live MCP target — see
+docs/POSTMORTEM-agentcore-vs-agentgateway.md.)
 
 Responsibilities:
-  1. OAuth2 resource server: validate the inbound Bearer (the Gateway's OBO
-     token) against Keycloak's JWKS — iss, aud, exp, and azp == the gateway
-     outbound client. Unlike Stage 1 (which trusted an oauth2-proxy sidecar),
-     this validates the signature itself.
+  1. OAuth2 resource server: validate the passed-through user JWT against
+     Keycloak's JWKS — iss, aud, exp, and azp == the expected client. Tolerates
+     intermittent JWKS-fetch DNS failures (cache + retry).
   2. Identity + authz: read preferred_username (principal) and groups; require
      membership in AIO_REQUIRED_GROUP.
-  3. Lifecycle: on MCP `initialize`, claim-or-reuse a sandbox and label the
-     SandboxClaim with the session id so the broker stays stateless (any
-     replica reconstructs session->claim with a label lookup). Release on
-     MCP session DELETE; the claim TTL is the backstop.
-  4. Transparent forwarding: relay MCP JSON-RPC to the sandbox-router with the
-     X-Sandbox-* headers; stream the response (json or SSE) back unchanged, so
-     the AIO hub's tools pass through verbatim.
+  3. Lifecycle: answer MCP `initialize` locally (instant — no AIO round trip);
+     on the first real tool call, claim-or-reuse a sandbox labelled with the
+     MCP session id (stateless: any replica reconstructs session->claim by
+     label). Release on DELETE; the claim TTL is the backstop.
+  4. Transparent forwarding: relay tools/list and tools/call to the
+     sandbox-router with X-Sandbox-* headers; stream the response (json or SSE)
+     back unchanged so the AIO hub's tools pass through verbatim.
 
-Stage 1 (broker.py, REST) remains in the repo as the portable, Gateway-free
-fallback (see docs/adr/0002).
+Stage 1 (broker.py, REST) remains in the repo as the portable fallback.
 """
 
+import json
 import os
 import ssl
 import uuid
@@ -34,6 +37,7 @@ import httpx
 import jwt
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from jwt import PyJWKClient
 
 from k8s_agent_sandbox import SandboxClient
@@ -61,9 +65,11 @@ ROUTER_URL = os.environ.get("AIO_ROUTER_URL", "http://sandbox-router-svc.default
 OIDC_ISSUER = os.environ.get("AIO_OIDC_ISSUER", "https://keycloak.jicomusic.com/realms/sandbox").rstrip("/")
 # The audience the token must carry (the router resource).
 EXPECTED_AUDIENCE = os.environ.get("AIO_EXPECTED_AUDIENCE", "sandbox-router")
-# The OBO actor: the Gateway's outbound client. We assert the token was minted
-# through it (azp), proving it arrived via the Gateway's token-exchange.
-GATEWAY_AZP = os.environ.get("AIO_GATEWAY_AZP", "sandbox-gateway-outbound")
+# With agentgateway passthrough the token is the user's own token, minted by
+# the public client the user logged in through. Assert azp to confirm the
+# token came via the expected client (defense-in-depth; agentgateway already
+# validated the signature/issuer/audience inbound).
+GATEWAY_AZP = os.environ.get("AIO_GATEWAY_AZP", "aio-sandbox-client")
 REQUIRED_GROUP = os.environ.get("AIO_REQUIRED_GROUP", "sandbox-users")
 
 JWKS_URL = f"{OIDC_ISSUER}/protocol/openid-connect/certs"
@@ -78,8 +84,38 @@ SESSION_HEADER = "mcp-session-id"
 app = FastAPI(title="aio-sandbox-broker-mcp", version="0.2.0")
 
 # Use certifi's CA bundle explicitly so JWKS fetching works regardless of the
-# base image / OS trust store configuration.
-_jwks_client = PyJWKClient(JWKS_URL, ssl_context=ssl.create_default_context(cafile=certifi.where()))
+# base image / OS trust store configuration. Cache keys long and tolerate
+# transient JWKS-fetch failures (this cluster's DNS is intermittently flaky;
+# a cold or mid-flight resolution error must not fail an otherwise-valid token).
+_jwks_client = PyJWKClient(
+    JWKS_URL,
+    ssl_context=ssl.create_default_context(cafile=certifi.where()),
+    cache_keys=True,
+    lifespan=3600,
+)
+
+
+@app.on_event("startup")
+def _warm_jwks():
+    # Best-effort: populate the JWKS cache at startup so the first request
+    # doesn't race flaky DNS. Failures here are non-fatal.
+    try:
+        _jwks_client.get_signing_keys()
+    except Exception:
+        pass
+
+
+def _signing_key(token: str):
+    """Fetch the JWT signing key, retrying transient JWKS-fetch errors (DNS)."""
+    import time as _t
+    last = None
+    for attempt in range(4):
+        try:
+            return _jwks_client.get_signing_key_from_jwt(token).key
+        except Exception as exc:  # PyJWKClientError wraps DNS/URL errors
+            last = exc
+            _t.sleep(0.5 * (attempt + 1))
+    raise last
 
 
 # ---- auth: validate the OBO token as a resource server ----
@@ -95,7 +131,7 @@ def _authenticate(authorization: Optional[str]) -> AuthContext:
         raise HTTPException(status_code=401, detail="Missing bearer token.")
     token = authorization.split(None, 1)[1]
     try:
-        signing_key = _jwks_client.get_signing_key_from_jwt(token).key
+        signing_key = _signing_key(token)
         claims = jwt.decode(
             token,
             signing_key,
@@ -204,16 +240,82 @@ def _release_session(session_id: str) -> None:
 
 # ---- MCP forwarding ----
 
+# The MCP protocol version this broker advertises to the Gateway. A
+# 2025-11-25 gateway requires the backend to speak 2025-11-25 end-to-end, but
+# the AIO hub negotiates an older version. Since the broker is the MCP server
+# the Gateway talks to, we override the initialize response's protocolVersion
+# to this value. Tool-call forwarding is version-agnostic JSON-RPC passthrough.
+ADVERTISED_PROTOCOL_VERSION = os.environ.get("AIO_MCP_PROTOCOL_VERSION", "2025-11-25")
+
+
+def _is_initialize(body: bytes) -> bool:
+    try:
+        msg = json.loads(body or b"{}")
+    except ValueError:
+        return False
+    if isinstance(msg, list):
+        return any(isinstance(m, dict) and m.get("method") == "initialize" for m in msg)
+    return isinstance(msg, dict) and msg.get("method") == "initialize"
+
+
+def _rewrite_init_version(payload: bytes) -> bytes:
+    """Rewrite result.protocolVersion in an initialize response (json or SSE)."""
+    text = payload.decode("utf-8", errors="replace")
+
+    def _fix_json_obj(obj):
+        if isinstance(obj, dict) and isinstance(obj.get("result"), dict) \
+                and "protocolVersion" in obj["result"]:
+            obj["result"]["protocolVersion"] = ADVERTISED_PROTOCOL_VERSION
+        return obj
+
+    # SSE frames: rewrite each `data:` JSON line; else treat whole body as JSON.
+    if "data:" in text:
+        out = []
+        for line in text.splitlines(keepends=True):
+            s = line.strip()
+            if s.startswith("data:"):
+                frag = s[5:].strip()
+                try:
+                    out.append("data: " + json.dumps(_fix_json_obj(json.loads(frag))) + "\n")
+                    continue
+                except ValueError:
+                    pass
+            out.append(line)
+        return "".join(out).encode()
+    try:
+        return json.dumps(_fix_json_obj(json.loads(text))).encode()
+    except ValueError:
+        return payload
+
+
 async def _forward(body: bytes, sandbox_id: str, content_type: str, accept: str):
-    """Forward the raw MCP request to the router with X-Sandbox-* headers and
-    relay the response (json or SSE) back unchanged."""
+    """Forward the raw MCP request to the router with X-Sandbox-* headers.
+
+    For initialize, buffer the response and rewrite protocolVersion so the
+    Gateway's end-to-end version check passes. For everything else, relay the
+    response stream unchanged (transparent passthrough)."""
     headers = _sandbox_headers(sandbox_id)
     headers["Content-Type"] = content_type or "application/json"
     if accept:
         headers["Accept"] = accept
+    rewrite = _is_initialize(body)
     client = httpx.AsyncClient(timeout=httpx.Timeout(300.0))
     req = client.build_request("POST", f"{ROUTER_URL}/mcp", content=body, headers=headers)
     resp = await client.send(req, stream=True)
+
+    relay_headers = {
+        k: v for k, v in resp.headers.items()
+        if k.lower() not in ("content-length", "transfer-encoding", "connection")
+    }
+
+    if rewrite:
+        raw = await resp.aread()
+        await resp.aclose()
+        await client.aclose()
+        return Response(
+            content=_rewrite_init_version(raw), status_code=resp.status_code,
+            headers=relay_headers, media_type=resp.headers.get("content-type"),
+        )
 
     async def _gen():
         try:
@@ -223,10 +325,6 @@ async def _forward(body: bytes, sandbox_id: str, content_type: str, accept: str)
             await resp.aclose()
             await client.aclose()
 
-    relay_headers = {
-        k: v for k, v in resp.headers.items()
-        if k.lower() not in ("content-length", "transfer-encoding", "connection")
-    }
     return StreamingResponse(
         _gen(), status_code=resp.status_code,
         headers=relay_headers, media_type=resp.headers.get("content-type"),
@@ -240,36 +338,83 @@ def healthz() -> dict:
     return {"status": "ok", "template": TEMPLATE_NAME, "router": ROUTER_URL}
 
 
+def _mcp_method(body: bytes) -> Optional[str]:
+    try:
+        msg = json.loads(body or b"{}")
+    except ValueError:
+        return None
+    if isinstance(msg, list):
+        return next((m.get("method") for m in msg if isinstance(m, dict) and m.get("method")), None)
+    return msg.get("method") if isinstance(msg, dict) else None
+
+
+def _msg_id(body: bytes):
+    try:
+        msg = json.loads(body or b"{}")
+        return msg.get("id") if isinstance(msg, dict) else None
+    except ValueError:
+        return None
+
+
+def _synthetic_initialize(req_id) -> dict:
+    """Answer MCP initialize locally — instantly — without touching the AIO hub.
+
+    The handshake doesn't need a sandbox; we claim lazily on the first real
+    tool call. This decouples the (slow, sometimes >20s) AIO-hub init from the
+    MCP handshake, which front proxies (agentgateway, AgentCore Gateway) time
+    out on. The sandbox tools still pass through transparently on tools/list
+    and tools/call."""
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "result": {
+            "protocolVersion": ADVERTISED_PROTOCOL_VERSION,
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": {"name": "aio-sandbox-broker", "version": "0.3.0"},
+        },
+    }
+
+
 @app.post("/")
 async def mcp(
     request: Request,
     authorization: Optional[str] = Header(default=None),
     mcp_session_id: Optional[str] = Header(default=None, alias="Mcp-Session-Id"),
 ):
-    auth = _authenticate(authorization)
+    # _authenticate + the SandboxClient calls below are BLOCKING (JWKS HTTP,
+    # k8s API). Run them in the threadpool so they don't stall the single
+    # uvicorn event loop (which would starve /healthz and serialize requests).
+    auth = await run_in_threadpool(_authenticate, authorization)
     body = await request.body()
     content_type = request.headers.get("content-type", "application/json")
     accept = request.headers.get("accept", "application/json, text/event-stream")
+    method = _mcp_method(body)
 
-    # Determine the session id: use the one the caller sent, else mint one.
-    # We do NOT require it to already resolve — this API version's Gateway does
-    # not reliably round-trip Mcp-Session-Id after a backend reconnect (a slow
-    # tool call can trigger one), so a hard 404 on an unknown id breaks live
-    # sessions. Instead we claim-or-reuse a sandbox for whatever session id we
-    # end up with. Per-session sandbox mapping is preserved; the failure mode
-    # (404 Unknown MCP session) is eliminated.
+    # One sandbox per session; claim-or-reuse so a dropped/reset session id
+    # doesn't hard-fail. session id is echoed back on every response.
     session_id = mcp_session_id or uuid.uuid4().hex
 
-    sandbox_id = _resolve_sandbox_id(session_id)
+    # MCP lifecycle messages the broker answers itself — no sandbox needed,
+    # no AIO-hub round trip, so the handshake is instant.
+    if method == "initialize":
+        resp = Response(
+            content=json.dumps(_synthetic_initialize(_msg_id(body))).encode(),
+            media_type="application/json",
+        )
+        resp.headers[SESSION_HEADER] = session_id
+        return resp
+    if method in ("notifications/initialized", "ping"):
+        # notifications get no JSON-RPC response body
+        resp = Response(status_code=202)
+        resp.headers[SESSION_HEADER] = session_id
+        return resp
+
+    # Real work (tools/list, tools/call, ...) — ensure a sandbox, then forward.
+    sandbox_id = await run_in_threadpool(_resolve_sandbox_id, session_id)
     if not sandbox_id:
-        # No (ready) sandbox for this session yet — claim one bound to it.
-        # Covers both a genuine new session and a session whose id the Gateway
-        # dropped/reset mid-stream.
-        sandbox_id = _claim_sandbox(auth.principal, session_id)
+        sandbox_id = await run_in_threadpool(_claim_sandbox, auth.principal, session_id)
 
     resp = await _forward(body, sandbox_id, content_type, accept)
-    # Always advertise the session id so a client/Gateway that does track it
-    # converges on a stable value.
     resp.headers[SESSION_HEADER] = session_id
     return resp
 
@@ -279,7 +424,7 @@ async def mcp_delete(
     authorization: Optional[str] = Header(default=None),
     mcp_session_id: Optional[str] = Header(default=None, alias="Mcp-Session-Id"),
 ) -> Response:
-    _authenticate(authorization)
+    await run_in_threadpool(_authenticate, authorization)
     if mcp_session_id:
-        _release_session(mcp_session_id)
+        await run_in_threadpool(_release_session, mcp_session_id)
     return Response(status_code=204)

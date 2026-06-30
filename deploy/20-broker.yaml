@@ -1,0 +1,92 @@
+# Broker: Streamable HTTP MCP server behind agentgateway.
+#
+# agentgateway validates the inbound Keycloak user JWT and forwards that token
+# (backendAuth: passthrough) to this broker, which re-validates it as a
+# resource server, enforces the sandbox-users group, claims a sandbox, and
+# forwards MCP to the ClusterIP router. No oauth2-proxy sidecar; no AWS gateway.
+#
+# Apply:
+#   kubectl apply -f 20-broker.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aio-sandbox-broker
+  namespace: default
+  labels:
+    app: aio-sandbox-broker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: aio-sandbox-broker
+  template:
+    metadata:
+      labels:
+        app: aio-sandbox-broker
+      annotations:
+        # Don't let Karpenter drain the broker during node consolidation.
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      serviceAccountName: aio-sandbox-broker
+      dnsConfig:
+        options:
+          - { name: ndots, value: "3" }
+      containers:
+        - name: broker
+          image: jicowan/aio-sandbox-broker:0.3.1
+          env:
+            - { name: BROKER_APP,        value: mcp }
+            - { name: AIO_TEMPLATE_NAME, value: aio-sandbox-template }
+            - { name: AIO_NAMESPACE,     value: default }
+            - { name: AIO_WARMPOOL,      value: aio-sandbox-warmpool }
+            - { name: AIO_TTL_SECONDS,   value: "3600" }
+            # In-cluster router (ClusterIP-only, no sidecar).
+            - { name: AIO_ROUTER_URL,    value: "http://sandbox-router-svc.default.svc.cluster.local.:8080" }
+            # OAuth2 resource-server validation of the passed-through user JWT.
+            - { name: AIO_OIDC_ISSUER,       value: "https://keycloak.jicomusic.com/realms/sandbox" }
+            - { name: AIO_EXPECTED_AUDIENCE, value: "sandbox-router" }
+            # agentgateway passthrough: the token is the user's own, minted by
+            # the public login client. Per-user identity + group gate enforced here.
+            - { name: AIO_GATEWAY_AZP,       value: "aio-sandbox-client" }
+            - { name: AIO_REQUIRED_GROUP,    value: "sandbox-users" }
+          ports:
+            - { name: http, containerPort: 8080 }
+          # Tolerant probes: the broker is single-worker uvicorn and its
+          # handlers make BLOCKING SDK calls (claim/list sandboxes) that can
+          # briefly stall the event loop. A 1s timeout / 3 failures killed it
+          # mid-tool-call. Give /healthz room. (Proper fix: run the blocking
+          # SDK work in a threadpool / add workers — tracked in DESIGN.)
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aio-sandbox-broker-svc
+  namespace: default
+spec:
+  selector:
+    app: aio-sandbox-broker
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

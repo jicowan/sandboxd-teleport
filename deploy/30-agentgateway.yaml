@@ -1,0 +1,95 @@
+# agentgateway (standalone) — the MCP front door.
+#
+#   client (user JWT) -> agentgateway (validate inbound JWT against Keycloak)
+#     -> backendAuth passthrough (forward the SAME user JWT)
+#     -> broker (re-validates JWT, reads preferred_username/groups, claims sandbox)
+#     -> sandbox-router -> AIO pod
+#
+# Standalone mode: a single Deployment reading config.yaml from a ConfigMap.
+# Per-user identity reaches the broker with no OBO/3LO/consent (see
+# docs/POSTMORTEM-agentcore-vs-agentgateway.md).
+#
+# NOTE: the backend target uses the broker's Service DNS name. If the cluster's
+# CoreDNS is flaky, agentgateway's connect may time out — stabilize DNS rather
+# than pinning a ClusterIP (which is not stable across Service recreation).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentgateway-config
+  namespace: default
+data:
+  config.yaml: |
+    # yaml-language-server: $schema=https://agentgateway.dev/schema/config
+    binds:
+    - port: 3000
+      listeners:
+      - protocol: HTTP
+        routes:
+        - name: mcp-route
+          matches:
+          - path: { pathPrefix: / }
+          policies:
+            mcpAuthentication:
+              mode: strict
+              issuer: https://keycloak.jicomusic.com/realms/sandbox
+              audiences: [sandbox-router]
+              jwks:
+                url: https://keycloak.jicomusic.com/realms/sandbox/protocol/openid-connect/certs
+              provider:
+                keycloak: {}
+              resourceMetadata:
+                resource: https://agentgateway.jicomusic.com/mcp
+                scopesSupported: [openid, sandbox]
+                bearerMethodsSupported: [header]
+            # Forward the validated user JWT unchanged to the broker.
+            backendAuth:
+              passthrough: {}
+          backends:
+          - mcp:
+              targets:
+              - name: aio-broker
+                mcp:
+                  host: http://aio-sandbox-broker-svc.default.svc.cluster.local.:8080/
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentgateway
+  namespace: default
+  labels: { app: agentgateway }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: agentgateway }
+  template:
+    metadata:
+      labels: { app: agentgateway }
+      annotations: { karpenter.sh/do-not-disrupt: "true" }
+    spec:
+      dnsConfig:
+        options:
+          - { name: ndots, value: "3" }
+      containers:
+        - name: agentgateway
+          image: cr.agentgateway.dev/agentgateway:v1.3.1
+          args: ["-f", "/etc/agentgateway/config.yaml"]
+          ports:
+            - { name: http, containerPort: 3000 }
+          volumeMounts:
+            - { name: cfg, mountPath: /etc/agentgateway }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+      volumes:
+        - name: cfg
+          configMap: { name: agentgateway-config }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentgateway-svc
+  namespace: default
+spec:
+  selector: { app: agentgateway }
+  ports:
+    - { name: http, port: 3000, targetPort: 3000 }
