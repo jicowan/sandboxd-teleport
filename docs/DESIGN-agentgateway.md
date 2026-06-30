@@ -57,9 +57,24 @@ sandbox — that constraint is gone.
 
 ## Operational fixes that were required
 
-- **CoreDNS**: scaled 2→4 replicas (across subnets) — 2 was too few and
-  resolution failed intermittently, surfacing as broker→router/JWKS
-  "Temporary failure in name resolution".
+- **CoreDNS black-hole pod (root cause of all intermittent failures)**: one
+  CoreDNS replica (`10.0.3.139` on node `ip-10-0-3-26`) was a network
+  black hole — `Running`/`Ready` but answering `0/10` direct queries, while
+  the other replicas answered `10/10`. The kube-dns Service load-balanced
+  across all endpoints, so ~25% of every pod's DNS queries silently timed out
+  (no CoreDNS error logged — the packets never arrived). This produced every
+  "Temporary failure in name resolution" / 504-waiting-for-sandbox symptom seen
+  across the whole project (it degraded the AgentCore attempts too). Fix:
+  `kubectl delete pod` the bad replica; it rescheduled healthy. Resolution went
+  to 30/30 and the broker→router→sandbox path to 5/5.
+  - Diagnosis technique: dig each CoreDNS pod IP directly (`@<podIP>`), not
+    just the Service VIP, to find a single bad endpoint.
+  - **Durable hardening (recommended, not yet done): NodeLocal DNSCache** — a
+    per-node DNS cache that talks to CoreDNS over TCP, eliminating both the
+    conntrack-UDP race and single-bad-endpoint fan-out. Best production fix for
+    EKS DNS flakiness.
+- **CoreDNS**: scaled 2→4 replicas (across subnets) — helped spread load but
+  did NOT fix the black-hole pod above (the real cause).
 - **ndots:3 + FQDN**: pods use `dnsConfig` ndots:3 and the broker/agentgateway
   target hosts use a trailing dot (`...svc.cluster.local.`) to avoid
   search-domain query amplification (ndots:5 → 5 lookups per name).
