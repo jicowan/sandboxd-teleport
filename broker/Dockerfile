@@ -6,9 +6,12 @@ RUN pip install --no-cache-dir --upgrade pip
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY broker.py /app/
-RUN chmod 0644 /app/broker.py
+# Ship both apps: broker.py = Stage 1 REST (portable fallback),
+# broker_mcp.py = Stage 2 MCP server (behind AgentCore Gateway).
+COPY broker.py broker_mcp.py entrypoint.sh /app/
+RUN chmod 0644 /app/broker.py /app/broker_mcp.py && chmod 0755 /app/entrypoint.sh
 
-# Runs as an arbitrary non-root UID assigned by the Pod securityContext.
+# BROKER_APP selects which to run: "mcp" (default) or "rest".
+ENV BROKER_APP=mcp
 EXPOSE 8080
-ENTRYPOINT ["uvicorn", "broker:app", "--host", "0.0.0.0", "--port", "8080"]
+ENTRYPOINT ["/app/entrypoint.sh"]

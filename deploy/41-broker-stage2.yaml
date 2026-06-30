@@ -1,0 +1,79 @@
+# Stage 2 broker: the MCP server that sits behind AgentCore Gateway.
+#
+# Unlike the Stage-1 broker (10-deployment.yaml), there is NO oauth2-proxy
+# sidecar — the broker validates the inbound OBO JWT itself (JWKS) and enforces
+# the sandbox-users group. It is reached by the Gateway via its own ALB
+# (see 42-broker-stage2-ingress.yaml) and forwards MCP to the ClusterIP router.
+#
+# Apply:
+#   kubectl apply -f 41-broker-stage2.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aio-sandbox-broker
+  namespace: default
+  labels:
+    app: aio-sandbox-broker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: aio-sandbox-broker
+  template:
+    metadata:
+      labels:
+        app: aio-sandbox-broker
+    spec:
+      serviceAccountName: aio-sandbox-broker
+      containers:
+        - name: broker
+          image: jicowan/aio-sandbox-broker:0.2.1
+          env:
+            - { name: BROKER_APP,        value: mcp }
+            - { name: AIO_TEMPLATE_NAME, value: aio-sandbox-template }
+            - { name: AIO_NAMESPACE,     value: default }
+            - { name: AIO_WARMPOOL,      value: aio-sandbox-warmpool }
+            - { name: AIO_TTL_SECONDS,   value: "3600" }
+            # In-cluster router (now ClusterIP-only, no sidecar).
+            - { name: AIO_ROUTER_URL,    value: "http://sandbox-router-svc.default.svc.cluster.local:8080" }
+            # OAuth2 resource-server validation of the inbound OBO token.
+            - { name: AIO_OIDC_ISSUER,       value: "https://keycloak.jicomusic.com/realms/sandbox" }
+            - { name: AIO_EXPECTED_AUDIENCE, value: "sandbox-router" }
+            - { name: AIO_GATEWAY_AZP,       value: "sandbox-gateway-outbound" }
+            # Gateway-level identity (CLIENT_CREDENTIALS): the inbound token is
+            # the gateway's M2M token with no end-user groups. Group authz is
+            # enforced by the Gateway inbound authorizer, not here. Empty =
+            # broker skips the group check.
+            - { name: AIO_REQUIRED_GROUP,    value: "" }
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aio-sandbox-broker-svc
+  namespace: default
+spec:
+  selector:
+    app: aio-sandbox-broker
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
