@@ -7,6 +7,32 @@
 #
 # Apply:
 #   kubectl apply -f 20-broker.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aio-sandbox-broker-config
+  namespace: default
+  labels:
+    app: aio-sandbox-broker
+data:
+  AIO_TEMPLATE_NAME: aio-sandbox-template
+  AIO_NAMESPACE: default
+  AIO_WARMPOOL: aio-sandbox-warmpool
+  AIO_TTL_SECONDS: "3600"
+  # In-cluster router (ClusterIP-only, no sidecar).
+  AIO_ROUTER_URL: "http://sandbox-router-svc.default.svc.cluster.local.:8080"
+  # OAuth2 resource-server validation of the passed-through user JWT.
+  AIO_OIDC_ISSUER: "https://keycloak.jicomusic.com/realms/sandbox"
+  AIO_EXPECTED_AUDIENCE: "sandbox-router"
+  # agentgateway passthrough: the token is the user's own, minted by the
+  # public login client. Per-user identity + group gate enforced here.
+  AIO_GATEWAY_AZP: "aio-sandbox-client"
+  AIO_REQUIRED_GROUP: "sandbox-users"
+  # Per-user concurrent-sandbox cap (the create gate). The broker is the only
+  # component that can create claims, so this can't be bypassed by opening more
+  # MCP sessions. 0 disables the cap.
+  AIO_MAX_SANDBOXES_PER_USER: "3"
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -33,33 +59,14 @@ spec:
           - { name: ndots, value: "3" }
       containers:
         - name: broker
-          image: jicowan/aio-sandbox-broker:0.4.0
-          env:
-            - { name: BROKER_APP,        value: mcp }
-            - { name: AIO_TEMPLATE_NAME, value: aio-sandbox-template }
-            - { name: AIO_NAMESPACE,     value: default }
-            - { name: AIO_WARMPOOL,      value: aio-sandbox-warmpool }
-            - { name: AIO_TTL_SECONDS,   value: "3600" }
-            # In-cluster router (ClusterIP-only, no sidecar).
-            - { name: AIO_ROUTER_URL,    value: "http://sandbox-router-svc.default.svc.cluster.local.:8080" }
-            # OAuth2 resource-server validation of the passed-through user JWT.
-            - { name: AIO_OIDC_ISSUER,       value: "https://keycloak.jicomusic.com/realms/sandbox" }
-            - { name: AIO_EXPECTED_AUDIENCE, value: "sandbox-router" }
-            # agentgateway passthrough: the token is the user's own, minted by
-            # the public login client. Per-user identity + group gate enforced here.
-            - { name: AIO_GATEWAY_AZP,       value: "aio-sandbox-client" }
-            - { name: AIO_REQUIRED_GROUP,    value: "sandbox-users" }
-            # Per-user concurrent-sandbox cap (the create gate). The broker is
-            # the only component that can create claims, so this can't be
-            # bypassed by opening more MCP sessions. 0 disables the cap.
-            - { name: AIO_MAX_SANDBOXES_PER_USER, value: "3" }
+          image: jicowan/aio-sandbox-broker:0.4.1
+          envFrom:
+            - configMapRef:
+                name: aio-sandbox-broker-config
           ports:
             - { name: http, containerPort: 8080 }
-          # Tolerant probes: the broker is single-worker uvicorn and its
-          # handlers make BLOCKING SDK calls (claim/list sandboxes) that can
-          # briefly stall the event loop. A 1s timeout / 3 failures killed it
-          # mid-tool-call. Give /healthz room. (Proper fix: run the blocking
-          # SDK work in a threadpool / add workers — tracked in DESIGN.)
+          # Tolerant probe timings (5s timeout / 6 failures) leave headroom on
+          # a single-worker uvicorn under load; /healthz itself is trivial.
           readinessProbe:
             httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 3

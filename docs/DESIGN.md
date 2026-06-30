@@ -100,7 +100,8 @@ Smallest step that solves both stated pains. Keeps the local `aio_proxy.py`
 for MCP forwarding; the proxy now claims via the broker instead of reading a
 `current.json` written by the SDK.
 
-- Broker (`broker/broker.py`, FastAPI, SDK-only) exposes:
+- Broker (Stage 1 REST broker, since removed — see ADR-0002; lives in git
+  history) exposed:
   - `POST /sessions`  → claims a sandbox for the caller (`session_id` ==
     `SandboxClaim` name), returns `{session_id, sandbox_id, namespace,
     container_port, expires_at, principal}`.
@@ -201,10 +202,13 @@ aio-sandbox/
     DESIGN.md            # this file
     adr/
       0001-no-agentcore-gateway.md
-  broker/                # the broker service (Stage 1: REST; Stage 2: + MCP)
+  broker/                # the MCP broker service (broker_mcp.py)
   deploy/                # k8s manifests (Deployment, SA/RBAC, Service)
-  skill/                 # thin client skill (Stage 1: calls broker REST)
 ```
+
+(Historical note: earlier stages also had a `proxy/` directory and a `skill/`
+directory on the client side; both were removed once the agentgateway design
+made the local proxy and lifecycle scripts unnecessary.)
 
 ## Resolved decisions (2026-06-29)
 

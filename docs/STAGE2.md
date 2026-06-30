@@ -196,7 +196,7 @@ output. Full chain proven: Gateway (inbound JWT) → client-credentials → inte
 ALB → broker (token validated, sandbox claimed) → ClusterIP router → AIO pod.
 27 AIO tools surfaced through the Gateway (namespaced `aio-sandbox-broker___*`).
 
-Gotchas resolved during bring-up (all now in DEPLOY notes):
+Gotchas resolved during bring-up:
 - **MCP endpoint path**: the Gateway fetches tools from the endpoint as given
   and MCP servers serve at the ROOT (`/`), per the keycloak project docs — not
   `/mcp`. Target FAILED with `{"detail":"Not Found"}` until the broker mounted
@@ -282,8 +282,8 @@ Gateway's backend timeout is tunable. Heavy pages (buzzfeed) also exceed
      releases.
    - **Transparent forwarding**: relays MCP JSON-RPC to the router with
      `X-Sandbox-*`, streaming the response (json or SSE) unchanged.
-   - One image, two apps: `BROKER_APP=mcp` (Stage 2, default) or `rest`
-     (Stage 1 fallback), selected by `entrypoint.sh`.
+   - The image runs `broker_mcp:app` directly (the Stage-1 REST `broker.py`
+     and dual-mode entrypoint were removed in cleanup; git history only).
 
    Implementation decisions made (flag for review):
    - The broker forwards to the router over plain in-cluster HTTP

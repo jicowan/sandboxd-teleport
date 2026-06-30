@@ -111,10 +111,8 @@ Claude to do something in a sandbox (e.g. *"run `uname -a` in a sandbox"*).
 ## Repo layout
 
 ```
-broker/         broker_mcp.py (the MCP broker) + Dockerfile; broker.py is the
-                Stage-1 REST fallback (not used by the agentgateway design)
+broker/         broker_mcp.py (the MCP broker) + Dockerfile
 deploy/         k8s manifests, applied in numeric order
-proxy/          legacy local stdio↔HTTP proxy (pre-agentgateway fallback)
 docs/           DESIGN-agentgateway.md, POSTMORTEM, ADRs, and historical
                 Stage-1/Stage-2 notes
 ARCHITECTURE.md the design + auth/authz swim-lane

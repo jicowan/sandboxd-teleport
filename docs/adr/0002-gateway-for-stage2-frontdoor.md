@@ -50,20 +50,19 @@ purpose (lifecycle owner) and is not replaced. ADR-0001's portability concern
 still stands as a tradeoff: Stage 2 introduces a hard Bedrock/AWS dependency on
 the data path.
 
-The Stage-1 broker + local proxy remain in the repo (`broker.py`,
-`proxy/aio_proxy.py`) as a portable, Gateway-free design — but as of the Stage-2
-cutover they are **not deployed/live**. Standing up Stage 2 required:
+The Stage-1 broker (REST `broker.py`) and its dual-mode entrypoint have been
+**removed from the tree** in the Stage-2 cleanup — they live only in git
+history now. The repo is strictly MCP: `broker/broker_mcp.py` is the only
+broker, run directly by the Dockerfile's `ENTRYPOINT` (no `BROKER_APP`
+switch). The local `proxy/` (Stage-1 stdio↔HTTP proxy) likewise is no longer
+part of the live path.
 
-- removing the router's oauth2-proxy sidecar and rebinding it to `0.0.0.0`,
-- deleting the public `sandbox-router` Ingress (router is now ClusterIP-only),
-- deleting the `sandbox-router.jicomusic.com` R53 record and its ACM cert.
-
-So the Stage-1 path (local proxy → public router ALB, authenticated by the
-router sidecar) no longer functions as-is. Reactivating the fallback means
-re-applying the Stage-1 router posture (re-add the sidecar via the
-agent-sandbox bundle's `auth/20-router-deployment-patch.yaml`, rebind to
-loopback, recreate the public Ingress + cert + DNS). The *code* is the
-fallback; the *running infrastructure* is single-track on Stage 2.
+Reactivating a Gateway-free fallback therefore means recovering the Stage-1
+broker/proxy from git history **and** restoring the Stage-1 router posture
+(re-add the sidecar via the agent-sandbox bundle's
+`auth/20-router-deployment-patch.yaml`, rebind to loopback, recreate the
+public Ingress + cert + DNS). The design is recoverable; it is not sitting
+runnable in the tree.
 
 ## Consequences
 
