@@ -229,7 +229,30 @@ The pod is the durable substrate; the sandbox state teleports onto it. This
 is exactly substrate's WorkerPool model ("warm pods ready to receive resumed
 actor states").
 
-### 1b (reframed): warm-worker-pod restore (next)
+### W1 — in-pod restore: WORKS ✅ (2026-07-01) — THE gate
+
+The whole warm-worker model hinged on this: can a checkpoint be restored
+*inside a running pod* (vs the cold-pod attempt that 9p-failed)? **Yes.**
+
+Ran the full atomic cycle entirely inside the persistent `ckpt-shim` pod,
+**pod-local paths** (`/work`, the container's own fs — not `/host`), one
+`-root`, one bundle:
+create → start → (accumulate) → `checkpoint` → delete → `create` (new id) →
+`restore`. Result: `checkpoint rc=0`, `restore rc=0`, `state=running`,
+**RAM counter continued 5→9** and **/state/log kept its pre-checkpoint lines
+(5→9)**. No 9p error (only benign rseq/SA_RESTART/seccomp notices).
+
+**Conclusion:** the earlier cold-pod 9p failure was purely a mount-namespace
+mismatch (create on node / restore in a fresh pod). When ONE persistent pod
+does both create and restore in its OWN mount ns, the gofer-backed rootfs
+resolves and restore succeeds — validating the warm-worker design. "Restore
+into a container in a running pod" is proven; "create a NEW pod from a
+snapshot" remains the wrong framing (and unnecessary).
+
+Next: W2 (S3 teleport between two warm workers — each creates its own gofer,
+so each has a consistent mount ns), then W3 reconnect, W4 AIO-under-gVisor.
+
+### 1b (reframed): warm-worker-pod restore — W1 done, W2 next
 
 ## Findings / go-no-go
 
