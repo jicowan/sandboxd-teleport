@@ -408,8 +408,47 @@ to explore: (a) restore out-of-band into our own -root from these images
 (mount-ns must be consistent — W1 showed one pod doing create+restore works);
 (b) whether containerd/CRI can be told to restore. Next.
 
+## AIO under gVisor + in-place checkpoint: WORKS ✅ (2026-07-01)
+
+**Corrected the deployment, then proved it.** AIO WAS running on runc because
+`aio-sandbox-template` had `runtimeClassName: ""` (empty ≠ gVisor; the `gvisor`
+RuntimeClass is NOT the cluster default, so pods landed on plain runc m5 nodes —
+verified on-node: zero runsc procs, handler `io.containerd.runc.v2`, runsc not
+even installed). Fix: **patch the SandboxTemplate `podTemplate.spec.runtimeClassName:
+gvisor`** (agent-sandbox copies the pod spec verbatim; you MUST set runtimeClassName
+explicitly — it is not defaulted). The `gvisor` RuntimeClass has a `scheduling`
+block ({nodeSelector sandbox=gvisor, toleration}) so that ONE field also pins the
+pods to the gvisor node — no manual nodeSelector/toleration needed.
+
+Deleted the 2 stale runc warmpool pods; warmpool recreated them from the updated
+template → new pods `runtimeClassName: gvisor` on gvisor node ip-10-0-5-141,
+**Running**. Confirmed genuinely runsc (runsc list shows them; runsc-sandbox boot
+procs).
+
+**AIO is fully healthy under gVisor** (the big compat unknown — it bundles Chrome):
+MCP hub HTTP 200 on :8080; supervisord + python MCP hub + Node REPL + code-server
++ JupyterLab + **mcp-server-browser w/ Chrome CDP :9222** + Xvnc + openbox all up.
+Chrome-under-gVisor works.
+
+**In-place checkpoint of the AIO gVisor pod:**
+```
+RROOT=/run/containerd/runsc/k8s.io
+C=<aio workload container id>   # container-type=container, name=aio-sandbox (NOT the pause/sandbox)
+runsc --root=$RROOT checkpoint --image-path=/var/lib/ckpt-inplace/aio --leave-running $C
+```
+Result: **rc=0 in ~1 second**. Artifacts: checkpoint.img 5.9M + pages.img **624M**
+(live RAM: Chrome/Node/Jupyter/code-server/Xvnc/MCP hub) + pages_meta.img 129K =
+**601M**. Wrote a marker file `/home/gem/ckpt-marker.txt` first. Post-checkpoint the
+pod stayed **Running, ready, 0 restarts**, marker intact, MCP hub still 200 — the
+`--leave-running` container was untouched.
+
 ## Findings / go-no-go
 
-- **Checkpoint of a live containerd gVisor pod on EKS: PROVEN** (in-place, host
-  runsc against containerd root, pod survives with `--leave-running`).
-- Restore path into containerd lifecycle: still to prove.
+- **Checkpoint of a live containerd gVisor pod on EKS: PROVEN** — both a small
+  python sandbox (32M) AND the full AIO sandbox incl. Chrome (601M, ~1s), in
+  place, host runsc against containerd's root, pod survives `--leave-running`.
+- **AIO runs correctly under gVisor: PROVEN** (previously an open compat gate).
+- **How to make agent-sandbox pods gVisor: set `runtimeClassName: gvisor` in the
+  SandboxTemplate's podTemplate.spec** (explicit; RuntimeClass scheduling pins
+  the node).
+- Restore path into containerd lifecycle: still to prove (the hard half).
