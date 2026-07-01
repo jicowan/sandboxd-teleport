@@ -288,6 +288,57 @@ already has the AIO image locally; S3 only carries the per-session checkpoint.
 
 ### 1b (reframed): warm-worker-pod restore — W1 ✅, W2 ✅; next W3 (reconnect), W4 (AIO-under-gVisor)
 
+## RESUME POINT (2026-07-01, context compaction)
+
+**Proven so far:** atomic mem+fs checkpoint/restore on EKS gVisor nodes
+(out-of-band runsc, `-overlay2=root:self`); in-pod restore (W1); S3 teleport of
+the checkpoint into an independent `-root` (W2). Only the ~732K checkpoint
+travels via S3; bundle/rootfs stays node-local.
+
+**Decision for next test:** AIO cross-node via anti-affinity — force AIO onto 2
+gvisor nodes and test cross-node/cross-gen (c6a↔c7a) checkpoint/restore.
+
+**Key facts / state:**
+- AIO under gVisor = the **`aio-sandbox-warmpool` pods**, image
+  `ghcr.io/agent-infra/sandbox:latest`. (Note: `kubectl` showed their
+  `runtimeClassName` empty in one query — reconcile: confirm they truly run
+  under gvisor before relying on it.)
+- gvisor nodes: currently ONE — `ip-10-0-5-90` (c6a.xlarge). Need a 2nd
+  (different gen ideally) for cross-node. Nodepool `gvisor` now pinned
+  `instance-size In [xlarge,2xlarge]` (changing it churns nodes — that evicted
+  the original `ckpt-shim`).
+- `ckpt-shim2` pod (SA `ckpt-spike`, Pod Identity→S3, has
+  `karpenter.sh/do-not-disrupt`) still running on `ip-10-0-5-90`; `/host/work/`
+  has the working bundle + w2 scripts.
+- S3 bucket `aio-checkpoint-spike-820537372947-us-west-2`; IAM role
+  `aio-checkpoint-spike-role`; SA `default/ckpt-spike`.
+
+**⚠️ ARCHITECTURAL TENSION to resolve before the AIO test:** our proven
+checkpoint model drives runsc **out-of-band against our own `-root`**. The
+`aio-sandbox-warmpool` pods are **containerd-managed gvisor pods** (runsc shim,
+containerd's state dir). We CANNOT checkpoint a containerd-managed container
+with our out-of-band runsc (that path caused the 9p failure). So to checkpoint
+AIO we must either (a) run the AIO rootfs as an OUT-OF-BAND runsc container in a
+worker pod (swap busybox→AIO rootfs in the W1/W2 recipe), or (b) find whether
+containerd's runsc shim exposes checkpoint (it does NOT, per gVisor docs — no
+containerd/k8s restore path). → Plan: build an AIO bundle for out-of-band runsc;
+anti-affinity applies to the WORKER pods (2 gvisor nodes), not the warmpool.
+
+**Concrete next steps:**
+1. Ensure a 2nd gvisor node (anti-affinity on worker pods, or scale a warmpool,
+   with do-not-disrupt to avoid churn).
+2. Build an AIO OCI bundle (rootfs from `ghcr.io/agent-infra/sandbox:latest`)
+   for out-of-band runsc — reuse the W2 "build rootfs" approach but lean.
+3. Producer worker (node A): create+start AIO under our runsc, atomic
+   checkpoint, upload 732K-class image to S3.
+4. Consumer worker (node B, different gen): download, restore, verify AIO's
+   MCP hub state survived.
+5. Then W3 (reconnect: sandbox `:8080` reachable again post-restore).
+
+**Cluster cleanup owed (if abandoning):** delete `ckpt-shim2`; revert gvisor
+nodepool instance-size requirement; delete S3 bucket + IAM role + `ckpt-spike`
+SA + Pod Identity association; scale/remove any extra gvisor nodes.
+
 ## Findings / go-no-go
 
 (pending)
