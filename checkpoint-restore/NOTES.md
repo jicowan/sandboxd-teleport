@@ -796,6 +796,50 @@ sandbox as a root container it controls; on resume the worker restores the whole
 (single-root) sandbox from S3 — proven clean, broker owns routing. Given T1+T1c,
 (ii) is the pragmatic path.
 
+**Reference: cedana (github.com/cedana/cedana)** — user-flagged as "we'll
+probably do something like this." Cedana = a privileged node DAEMON that
+integrates with containerd/CRI-O to drive checkpoint/restore (save/migrate/
+resume) incl. rootfs handling, GPU, and cross-node migration. It's **CRIU-based
+(runc)**, NOT gVisor. Relevance: it validates the ARCHITECTURE pattern we're
+forced to — a runtime-integrated node daemon that OWNS C/R + rootfs + migration,
+rather than poking containers out-of-band (which T1 proved fights kubelet).
+Mapping: cedana:CRIU:runc ↔ us:runsc-checkpoint/restore:gVisor. We're simpler in
+one way — gVisor has native first-class C/R (sentry serialization), so we do NOT
+need CRIU; runsc already does it. The daemon+runtime-integration + rootfs/
+migration orchestration is the shared hard part. Cedana also shows precedent for
+integrating C/R with containerd rather than forking kubelet — worth studying its
+containerd integration when we design route (i)/(ii).
+
+### T2 — substrate-style teleport (option ii) END-TO-END: WORKS ✅✅✅ (2026-07-01)
+
+The capability the user actually wants — **sandbox state decoupled from its pod,
+restored onto any interchangeable worker via S3** — proven with busybox as a
+standalone runsc ROOT container (no pause, worker owns the -root).
+
+Sequence (runsc ops via SSM; S3 I/O via the ckpt-shim pod / Pod Identity;
+they share the node fs via the shim's `/host` hostPath):
+1. Worker A = standalone `runsc -root <A> --network=none -overlay2=root:self`
+   busybox counter. Ran to count=21.
+2. `runsc checkpoint` A → 360K image. A goes `stopped`.
+3. Upload image to `s3://…/teleport/img/` (shim pod).
+4. **DESTROY worker A entirely** — `runsc delete` + `rm -rf <rootA> <img>`. State
+   now lives ONLY in S3 (verified: local dirs gone).
+5. Download image from S3 into a fresh dir (shim pod).
+6. Worker B = a SEPARATE `-root`, a SEPARATE busybox rootfs snapshot, freshly
+   `create`d, then `restore -image-path <downloaded>` `-detach`.
+7. **Result: restore rc=0, running; counter resumed 19→20→21→22→23 and kept
+   advancing (24,25) — NOT reset to 1.** RAM state teleported through S3 onto a
+   different worker.
+
+**This validates the architecture (option ii):** a privileged worker pod that
+owns its own runsc `-root` and runs the sandbox as a single ROOT container can
+suspend→S3→resume onto a different worker. No pause/sub-container problem (single
+root), no kubelet fight (worker owns the inner sandbox). Matches substrate's
+WorkerPool exactly, and cedana's "runtime-integrated daemon owns C/R" pattern.
+Remaining for a real product: the worker pod shape + control API (runrunner),
+broker seam, AIO-under-this-model (first-boot bootstrap → golden checkpoint),
+W3 reconnect, cross-node/cross-gen CPU-match (T3), lean rootfs delivery.
+
 ## Findings / go-no-go
 
 - **Checkpoint of a live containerd gVisor pod on EKS: PROVEN** — both a small
