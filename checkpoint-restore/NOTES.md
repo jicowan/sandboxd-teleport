@@ -172,8 +172,32 @@ this same primitive (no public confirmation).
 unsupported for save/restore; connected sockets break across nodes). Irrelevant
 to the spike; matters for MCP session continuity in the real design.
 
-### restore-into-a-new-pod: (next — now de-risked; it's runsc create+restore
-with a spec-equivalent bundle inside a pod; gVisor tests are the reference)
+### Atomic mem+fs checkpoint/restore: WORKS ✅ (2026-07-01, supersedes fscheckpoint)
+
+Single `runsc checkpoint` on an **overlay rootfs** captures memory AND
+filesystem atomically. Proven: counter continuity (RAM 5→6→7→8) AND file
+continuity (`/state/log` went 5 lines pre → 8 lines post, i.e. the pre-
+checkpoint lines survived and the restored process appended). No fscheckpoint,
+no time-skew panic.
+
+**Working recipe (atomic, the one we'll build on):**
+```
+R="runsc -root <stateDir> --network=none -overlay2=root:self"   # overlay = disk-backed tmpfs
+# bundle: rootfs + config.json; write app state to a PLAIN dir in rootfs (e.g. /state),
+#   NOT a tmpfs mount.
+$R create  -bundle <bundle> -pid-file <pf> demo
+$R start   demo
+# ... accumulate state ...
+$R checkpoint -image-path <MEMDIR> demo          # single snapshot: checkpoint.img pages.img pages_meta.img
+$R delete -force demo
+$R create  -bundle <bundle> -pid-file <pf2> demo2
+$R restore -bundle <bundle> -image-path <MEMDIR> -pid-file <pf2> -background -detach demo2
+```
+Key: `-overlay2=root:self` on EVERY runsc call; app state in the rootfs
+overlay (not a tmpfs mount); one `checkpoint` (drop fscheckpoint).
+
+### restore-into-a-new-pod: (next — runsc create+restore with a spec-equivalent
+bundle inside a pod, checkpoint pulled from S3)
 
 ## Findings / go-no-go
 
