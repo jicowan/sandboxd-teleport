@@ -133,7 +133,47 @@ restore-shim pod). So S3 access binds to that component's SA (`ckpt-spike`),
 NOT the sandbox's SA. Current sandbox pods run as `default` in `default` ns —
 we deliberately did not grant `default` any S3 access.
 
-### restore-into-a-new-pod: (next)
+### gVisor docs review — corrects our approach (2026-07-01)
+
+Primary sources: gvisor.dev/docs/user_guide/checkpoint_restore + fs_snapshot,
+and google/gvisor runsc integration tests (`runsc/container/container_test.go`).
+
+**1. Our fs+mem panic was self-inflicted — use ONE atomic checkpoint.**
+gVisor has two distinct filesystem models; we mixed them:
+  - **`runsc checkpoint` alone**, on a rootfs that is a **disk-backed tmpfs
+    overlay** (runsc default `-overlay2`), captures memory + filesystem
+    **atomically in one snapshot**. ← the intended path; adopt this.
+  - `runsc fscheckpoint` is a *separate, experimental* fs-only feature. Pairing
+    it with a separately-timed `checkpoint` produces inconsistent images →
+    the `pgalloc/save_restore.go` panic (an internal self-consistency check).
+  **Action: drop the fscheckpoint dance; rely on a single `runsc checkpoint`
+  with an overlay/disk-backed-tmpfs rootfs.**
+
+**2. Restore into a NEW container/pod is officially supported — raw runsc.**
+gVisor's own `TestCheckpointRestoreHostname` restores into a NEW container ID
+with a fresh bundle + spec. Canonical sequence (matches ours):
+`runsc create <new-id>` then `runsc restore --image-path=<dir> <new-id>`.
+  - **Must match** across checkpoint/restore host: runsc **version** (hard
+    error otherwise), **CPU features** (pin via annotation
+    `dev.gvisor.internal.cpufeatures`, else restore aborts on the feature
+    check), and the OCI **spec shape** (Mounts, Process, Namespaces,
+    Annotations); container **name** must be stable (save/restore match by name).
+  - **May differ:** `Root.Path` (bundle path), hostname, env, cgroupsPath,
+    resources → so a different node/pod is fine. `RestoreSpecValidation` can be
+    set to `warning` during bring-up to loosen matching.
+
+**3. No containerd/Kubernetes restore path exists.** gVisor docs: "checkpoint/
+restore functionality is currently available via raw `runsc` commands." No
+shim/CRI handler. So driving runsc out-of-band is the ONLY way (validates the
+substrate pattern), not a workaround. GKE pod-snapshot almost certainly wraps
+this same primitive (no public confirmation).
+
+**4. Networking is rebuilt from the new node's netns on restore** (hostinet
+unsupported for save/restore; connected sockets break across nodes). Irrelevant
+to the spike; matters for MCP session continuity in the real design.
+
+### restore-into-a-new-pod: (next — now de-risked; it's runsc create+restore
+with a spec-equivalent bundle inside a pod; gVisor tests are the reference)
 
 ## Findings / go-no-go
 
