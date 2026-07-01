@@ -252,7 +252,41 @@ snapshot" remains the wrong framing (and unnecessary).
 Next: W2 (S3 teleport between two warm workers — each creates its own gofer,
 so each has a consistent mount ns), then W3 reconnect, W4 AIO-under-gVisor.
 
-### 1b (reframed): warm-worker-pod restore — W1 done, W2 next
+### W2 — S3 teleport: WORKS ✅ (2026-07-01)
+
+Checkpoint travels through S3 and restores into an independent worker context.
+Producer: create+start+accumulate → atomic `checkpoint` (**732K**) → upload to
+`s3://…/w2ckpt/`. Consumer (independent `-root`, own gofer): download ckpt from
+S3 → `create`+`restore` against the node-local bundle. Result: `restore rc=0`,
+`state=running`, RAM counter continued 5→9 AND /state/log carried 5→9 lines.
+
+**Design insight (important): only the CHECKPOINT travels via S3 (~732K); the
+bundle/rootfs stays node-local.** First attempt uploaded the whole 585M rootfs
+file-by-file → 28k S3 objects / 1.3GB, timed out. In the real design the worker
+already has the AIO image locally; S3 only carries the per-session checkpoint.
+
+**Scope caveats (honest):**
+- Producer + consumer ran in the SAME pod with independent `-root` dirs (Karpenter
+  node churn from the nodepool instance-size change blocked getting a clean
+  second-node pod). W1 already established mount-ns independence — not node — is
+  the variable that matters, and each `-root` has its own gofer, so this
+  exercises the teleport mechanism. **True cross-node + cross-generation
+  (c6a→c7a) CPU-match restore remains formally unproven** — worth a clean retest
+  once a stable 2nd gvisor node is available.
+- Bundle built from the shim container's own filesystem (585M) because `ctr
+  image mount` was flaky on fresh nodes; a real worker would ship a lean AIO
+  rootfs.
+
+### Infra notes / cluster hygiene
+- gvisor nodepool `requirements` had NO instance-size bound → Karpenter chose
+  c7a.medium (8-pod cap; 6 are daemonsets → only ~2 usable slots). Added
+  `instance-size In [xlarge,2xlarge]`; this triggered drift replacement of the
+  old c7a.medium nodes (churn that evicted the first `ckpt-shim`).
+- **Put `karpenter.sh/do-not-disrupt: "true"` on worker pods** so consolidation
+  doesn't evict them mid-session (learned the hard way). ckpt-shim2 has it.
+- `python-warmpool` SandboxWarmPool was deleted by the operator during this work.
+
+### 1b (reframed): warm-worker-pod restore — W1 ✅, W2 ✅; next W3 (reconnect), W4 (AIO-under-gVisor)
 
 ## Findings / go-no-go
 
