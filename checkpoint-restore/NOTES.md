@@ -510,6 +510,47 @@ is captured and ready for that test.
 Exception: a workload that is its OWN root container (no separate pause — the
 out-of-band W1/W2 busybox model) restores standalone cleanly.
 
+### Whole-pod restore attempt + the CORRECT restore model (2026-07-01)
+
+Tried whole-pod restore into a bare -root: restore pause/ROOT (rc=0, running)
+then the workload member → got PAST the earlier stall to
+`vfs.CompleteRestore() … 9p failed to walk "home" … in mount "aio-sandbox:/"`.
+Root cause: the workload's real rootfs (`/home/gem`) lives in the sentry's
+`lisafs:self` **overlay upper** (captured in the checkpoint), and the gofer must
+re-present the lower tree with the SAME `gofer-mount-confs`
+(`lisafs:self,none,none,none,none`). My hand-built bundle came up with the wrong
+mount-conf → gofer didn't present the expected rootfs → 9p walk failed.
+Reconstructing each sub-container's gofer + mount-conf + fd-donation by hand IS
+reimplementing what containerd's runsc shim does. Wrong approach.
+
+**CORRECT restore model (user-confirmed, matches substrate + the runsc flags):**
+- **Restore INTO an existing/warm pod, do NOT create a new pod from a checkpoint.**
+  A warm AIO pool pod already has the correctly-built pause/sandbox root, gofer,
+  netns, and BASE rootfs. Restore teleports state ONTO it.
+- **You cannot materialize a new pod purely from a checkpoint out-of-band** —
+  something must stand up the pod's gofer/mount/netns first: either containerd
+  told to `restore` instead of `start`, OR a persistent worker that owns the
+  gofer (substrate's model). Off-the-shelf containerd CRI does NOT expose pod
+  checkpoint/restore (shim binary has both checkpoint/restore AND
+  unimplemented/"not implemented" strings) → "hook into containerd" = custom
+  controller/shim work. This is why GKE built a node-level podsnapshot
+  controller, not a runsc flag.
+- **Only fs-deltas + memory travel, NOT the base rootfs.** `runsc restore` takes
+  TWO image inputs: `-image-path` (memory/sentry) and `-fs-restore-image-path`
+  (filesystem). The read-only base image layers are already on the warm pod, so
+  you restore only (a) the rw overlay delta (the `lisafs:self` upper — the
+  `/home/gem` changes) via `-fs-restore-image-path`, and (b) memory via
+  `-image-path`. This is substrate's two-scope design (DATA = fs-delta only;
+  FULL = +memory) and it explains my failure (I tried to rebuild the whole
+  rootfs by hand). Also shrinks the S3 payload to delta+RAM, not a 600M+ full
+  image.
+
+**Next experiment (revised):** restore the checkpoint INTO a warm pool pod's
+sandbox using `-fs-restore-image-path` (delta) + `-image-path` (memory) against
+that pod's existing gofer/root — rather than a bare -root. Requires driving it
+through (or alongside) the container's real gofer, i.e. the persistent-worker or
+containerd-restore path.
+
 ## Findings / go-no-go
 
 - **Checkpoint of a live containerd gVisor pod on EKS: PROVEN** — both a small
