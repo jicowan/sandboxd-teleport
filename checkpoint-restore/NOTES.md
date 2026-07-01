@@ -545,11 +545,55 @@ pool pod's existing sandbox/gofer using `-fs-restore-image-path` (delta) +
 `-image-path` (memory), not a bare -root — the persistent-worker path already
 scoped above.
 
+### DON'T reinvent the wheel — where gVisor's built-in C/R ends and orchestration begins (2026-07-01)
+
+gVisor C/R works (proven). The mistake was hand-driving it. Clarified the layers:
+- `runsc checkpoint <id>` / `runsc restore <id>` are **per-container primitives**
+  (help: `checkpoint [flags] <container id>`). They fully support multi-container
+  pods, BUT the ORCHESTRATION — checkpoint each container, restore the
+  sandbox-ROOT (pause) first, rejoin the workload with the correct bundle +
+  gofer-mount-confs — is done by whoever owns the pod lifecycle, i.e.
+  **containerd's runsc shim**. Hand-building bundles = reimplementing that shim
+  (and getting mount-confs wrong → the 9p walk failure). Stop doing that.
+- **BUT containerd does NOT implement task checkpoint for the runsc runtime.**
+  Tested on-node: `ctr -n k8s.io tasks checkpoint --image-path … <aio-container>`
+  → **`ctr: not implemented`**. (`ctr tasks checkpoint` exists but its options are
+  CRIU-oriented — `--image-path` = "criu image files" — and the
+  `io.containerd.runsc.v1` shim doesn't implement the Checkpoint/Restore task
+  RPC.) `crictl checkpoint` (kubelet ContainerCheckpoint) is also CRIU-only, not
+  wired to runsc here.
+- Also tried running AIO as its OWN standalone runsc ROOT container out-of-band
+  (no pause) to sidestep the sub-container coupling: create+start rc=0 and AIO's
+  entrypoint runs, but AIO's first-boot bootstrap (`gem_init.sh` → `groupadd`)
+  fails/loops under a hand-built spec (`groupadd: failure writing /etc/gshadow`;
+  services flap). Fixable in principle by copying the containerd container's full
+  149-var env + caps, but this is still rebuilding what the platform does.
+
+**Conclusion for the architecture:** there is NO off-the-shelf command
+(`ctr`/`crictl`) that checkpoints a runsc k8s pod today. gVisor's `runsc
+checkpoint/restore` is the only working primitive, and driving it for a full pod
+requires an ORCHESTRATOR that owns the pod's containers/bundles/gofers. That
+orchestrator is exactly what GKE built (node-level podsnapshot controller) and
+what substrate's `ateom-gvisor` is. So our final solution must be ONE of:
+  (A) **persistent-worker model (substrate-style):** a privileged pod owns runsc;
+      the sandbox runs as its own runsc ROOT container (no pause), so
+      checkpoint/restore is single-root and WORKS out-of-band (this is W1/W2,
+      already proven with busybox). AIO needs its first-boot bootstrap handled
+      (real env/caps, or boot once then checkpoint a "golden" started image).
+  (B) **node-level pod orchestrator (GKE-style):** a controller/shim that drives
+      `runsc checkpoint`/`restore` across the pod's pause+workload containers
+      using their real containerd bundles. More work; matches agent-sandbox's
+      native pod shape.
+Not viable today: expecting stock containerd/CRI to restore a pod from S3.
+
 ## Findings / go-no-go
 
 - **Checkpoint of a live containerd gVisor pod on EKS: PROVEN** — both a small
   python sandbox (32M) AND the full AIO sandbox incl. Chrome (601M, ~1s), in
   place, host runsc against containerd's root, pod survives `--leave-running`.
+- **No off-the-shelf containerd/CRI checkpoint for runsc:** `ctr tasks
+  checkpoint` = "not implemented" for `io.containerd.runsc.v1`. Full-pod restore
+  needs a custom orchestrator (persistent-worker OR node-level controller).
 - **AIO runs correctly under gVisor: PROVEN** (previously an open compat gate).
 - **How to make agent-sandbox pods gVisor: set `runtimeClassName: gvisor` in the
   SandboxTemplate's podTemplate.spec** (explicit; RuntimeClass scheduling pins
