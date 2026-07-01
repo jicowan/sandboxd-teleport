@@ -489,6 +489,27 @@ Live AIO pod verified UNAFFECTED by all restore attempts (Running, ready, 0
 restarts) — we worked in a separate -root and bind-mounted (not moved) its
 rootfs.
 
+### Container-vs-pod checkpoint granularity — TESTED (2026-07-01)
+
+Q: do you have to checkpoint the whole pod, or can you checkpoint one container
+and restore just that? Empirical answer: **the unit is the pod-sandbox, because
+gVisor runs ONE sentry per pod shared by all its containers.**
+- Checkpoint the WORKLOAD sub-container (`d990…`) → image = 601M (its memory).
+  Restore-in-isolation STALLS: loads RootContainer:false, waits for the pod-root
+  (pause) container that isn't there → never "started".
+- Checkpoint the ROOT/pause container (`0c33…`, container-type=sandbox) →
+  image = **694M** — LARGER, because it captured the ENTIRE sandbox (pause +
+  workload memory) in one snapshot, ~1.7s. This is the whole pod in one image.
+So: you can *make* a single-container image, but you can't *restore* it standalone
+— restore requires the sandbox root. Checkpoint/restore at pod (sandbox-root)
+granularity is the correct unit. Restoring a multi-container sandbox still needs
+each sub-container's bundle/gofer (root restored first, then members joined) —
+this is the pod-level orchestration GKE's podsnapshot controller does. NOT yet
+run end-to-end; the whole-sandbox image (694M at /var/lib/ckpt-inplace/aiopod)
+is captured and ready for that test.
+Exception: a workload that is its OWN root container (no separate pause — the
+out-of-band W1/W2 busybox model) restores standalone cleanly.
+
 ## Findings / go-no-go
 
 - **Checkpoint of a live containerd gVisor pod on EKS: PROVEN** — both a small
