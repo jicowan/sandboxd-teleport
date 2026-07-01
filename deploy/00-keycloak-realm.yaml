@@ -1,0 +1,128 @@
+apiVersion: k8s.keycloak.org/v2alpha1
+kind: KeycloakRealmImport
+metadata:
+  name: sandbox-realm
+  namespace: keycloak
+  labels:
+    app.kubernetes.io/component: realm
+    app.kubernetes.io/name: keycloak
+spec:
+  keycloakCRName: keycloak
+  realm:
+    realm: sandbox
+    displayName: AIO Sandbox
+    enabled: true
+    accessTokenLifespan: 3600
+    ssoSessionIdleTimeout: 1800
+    ssoSessionMaxLifespan: 36000
+    loginWithEmailAllowed: true
+    registrationAllowed: false
+    rememberMe: true
+    resetPasswordAllowed: true
+
+    groups:
+      # Membership authorizes claiming a sandbox. agentgateway's mcpAuthorization
+      # policy and the broker both gate on the `groups` claim, so a valid token
+      # alone is not enough — the user must be in this group. Manage access by
+      # adding/removing users here.
+      - name: sandbox-users
+
+    clientScopes:
+      - name: sandbox
+        description: Adds aud=sandbox-router, groups, preferred_username, and client_id on access tokens
+        protocol: openid-connect
+        attributes:
+          include.in.token.scope: "true"
+          display.on.consent.screen: "false"
+        protocolMappers:
+          # aud=sandbox-router — agentgateway validates this audience on inbound.
+          - name: sandbox-audience
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.custom.audience: sandbox-router
+              access.token.claim: "true"
+              id.token.claim: "false"
+          # `groups` claim — the broker enforces sandbox-users membership.
+          - name: sandbox-groups
+            protocol: openid-connect
+            protocolMapper: oidc-group-membership-mapper
+            config:
+              claim.name: groups
+              full.path: "false"
+              access.token.claim: "true"
+              id.token.claim: "false"
+              userinfo.token.claim: "true"
+          # `preferred_username` — the broker's stable per-user principal.
+          - name: sandbox-username
+            protocol: openid-connect
+            protocolMapper: oidc-usermodel-property-mapper
+            config:
+              user.attribute: username
+              claim.name: preferred_username
+              jsonType.label: String
+              access.token.claim: "true"
+              id.token.claim: "false"
+              userinfo.token.claim: "true"
+          # `client_id` claim — the broker asserts this equals aio-sandbox-client
+          # (AIO_GATEWAY_AZP) to confirm the token arrived via the front door.
+          # Keycloak access tokens don't emit client_id by default.
+          - name: client-id-hardcoded
+            protocol: openid-connect
+            protocolMapper: oidc-hardcoded-claim-mapper
+            config:
+              claim.name: client_id
+              claim.value: aio-sandbox-client
+              jsonType.label: String
+              access.token.claim: "true"
+              id.token.claim: "false"
+
+    clients:
+      # Public OAuth client that end users authenticate through. Claude Code's
+      # remote-MCP auth-code + PKCE flow uses it against agentgateway; the token
+      # is passed through to the broker unchanged (backendAuth: passthrough).
+      # No secret (public client); security is PKCE + the redirect-URI allowlist.
+      - clientId: aio-sandbox-client
+        name: AIO Sandbox Client (user login)
+        description: Public client end users authenticate through to reach the sandbox
+        protocol: openid-connect
+        enabled: true
+        publicClient: true
+        standardFlowEnabled: true
+        redirectUris:
+          - "http://localhost/*"
+          - "http://127.0.0.1/*"
+          - "http://localhost:*/*"
+          - "http://127.0.0.1:*/*"
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: false
+        attributes:
+          oauth2.device.authorization.grant.enabled: "true"
+          pkce.code.challenge.method: "S256"
+          access.token.lifespan: "3600"
+        defaultClientScopes:
+          - openid
+          - profile
+          - email
+          - sandbox
+        optionalClientScopes:
+          - offline_access
+
+    users:
+      - username: jicowan
+        email: jicowan@proton.me
+        enabled: true
+        emailVerified: true
+        firstName: Jeremy
+        lastName: Cowan
+        credentials:
+          # Placeholder — set a real value before applying, or create/reset the
+          # user's password out of band (Keycloak admin UI / API). Temporary:
+          # the user is forced to reset it on first login.
+          - type: password
+            value: REPLACE_BEFORE_APPLY
+            temporary: true
+        realmRoles:
+          - default-roles-sandbox
+        groups:
+          - /sandbox-users
