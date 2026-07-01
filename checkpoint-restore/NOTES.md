@@ -298,6 +298,13 @@ travels via S3; bundle/rootfs stays node-local.
 **Decision for next test:** AIO cross-node via anti-affinity — force AIO onto 2
 gvisor nodes and test cross-node/cross-gen (c6a↔c7a) checkpoint/restore.
 
+**UPDATE 2026-07-01 (later): superseded — see "IN-PLACE checkpoint" section at
+end.** We confirmed AIO is NOT running under gVisor (template runtimeClassName
+is empty; AIO pods are on runc m5 nodes). But the `python-sandbox` gVisor pod
+IS containerd-managed gVisor, and we successfully checkpointed it IN PLACE with
+host runsc against containerd's root — the clean path. So the out-of-band AIO
+bundle detour is unnecessary for the checkpoint half; focus shifts to restore.
+
 **Key facts / state:**
 - AIO under gVisor = the **`aio-sandbox-warmpool` pods**, image
   `ghcr.io/agent-infra/sandbox:latest`. (Note: `kubectl` showed their
@@ -356,6 +363,53 @@ AIO SandboxTemplate) forces 2 gvisor nodes for the cross-node/cross-gen leg.
 nodepool instance-size requirement; delete S3 bucket + IAM role + `ckpt-spike`
 SA + Pod Identity association; scale/remove any extra gvisor nodes.
 
+## IN-PLACE checkpoint of a containerd-managed gVisor pod: WORKS ✅ (2026-07-01)
+
+**This is the clean path — no image pull, no hand-built bundle.** You CAN
+checkpoint a live containerd-scheduled gVisor pod by running `runsc` on the host
+against containerd's OWN root. Proves the earlier "can't checkpoint
+containerd-managed pods" worry fully wrong.
+
+**What we checkpointed:** `sandbox-python-example` (a real gVisor SandboxTemplate
+pod, `runtimeClassName: gvisor`) on gvisor node `ip-10-0-5-141` (c6a.xlarge).
+Note: the **AIO** warmpool pods are NOT gVisor — `aio-sandbox-template` has
+`runtimeClassName: ""`, so they land on plain runc m5.large nodes (no runsc
+container to checkpoint). The `python-sandbox` template IS gVisor; used it.
+
+**On the node (via `kubectl node-shell`):**
+```
+RROOT=/run/containerd/runsc/k8s.io
+# find the workload container (the one with lisafs:self overlay), NOT the pause/sandbox container:
+runsc --root=$RROOT list        # two ids per pod: 620b… = pause (2 mounts), a10f… = python-sandbox workload
+C=a10f2e4dce06…                 # the container-type=container one (io.kubernetes.cri.container-name=python-sandbox)
+runsc --root=$RROOT checkpoint --image-path=/var/lib/ckpt-inplace/py --leave-running $C
+```
+Result: **rc=0**, artifacts `checkpoint.img` (427K) + `pages.img` (32M) +
+`pages_meta.img`. **`--leave-running` kept the pod up** — pod stayed `1/1
+Running`, container `status: running` after checkpoint. Checkpoint staged to
+`/work/inplace-py/` on the shim's hostPath for S3 upload.
+
+**Key learnings:**
+- Drive it against containerd's root `/run/containerd/runsc/k8s.io` (NOT our own
+  /tmp root) to hit the live pod. runsc is just a CLI over whatever `-root` you
+  point at; containerd's shim uses that path.
+- A gVisor *pod* = 2 runsc containers: the pause/sandbox (`container-type=sandbox`)
+  and the workload (`container-type=container`, has the `lisafs:self` writable
+  overlay). Checkpoint the **workload** container.
+- No `--leave-running` would stop the container; with it the pod keeps serving.
+- Node disk: AL2023 default root is 20Gi — too small once you cache big images
+  (the AIO 3.4Gi pull earlier drove the node into `DiskPressure`, Karpenter
+  killed it). Bumped gvisor `EC2NodeClass` blockDeviceMapping /dev/xvda → 100Gi.
+
+**Still open (the hard half): RESTORE of an in-place checkpoint.** Checkpoint is
+easy; restoring into a containerd-managed lifecycle (containerd owns create/
+delete) is the untested part — GKE coordinates this at the node level. Options
+to explore: (a) restore out-of-band into our own -root from these images
+(mount-ns must be consistent — W1 showed one pod doing create+restore works);
+(b) whether containerd/CRI can be told to restore. Next.
+
 ## Findings / go-no-go
 
-(pending)
+- **Checkpoint of a live containerd gVisor pod on EKS: PROVEN** (in-place, host
+  runsc against containerd root, pod survives with `--leave-running`).
+- Restore path into containerd lifecycle: still to prove.
