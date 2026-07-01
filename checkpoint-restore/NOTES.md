@@ -766,15 +766,35 @@ What happened, step by step:
   CRI (so kubelet's view stays consistent), not around it — and containerd's
   runsc shim doesn't implement restore (`ctr tasks checkpoint`=not implemented).
 
-**Implication for architecture:** the K8s-native "restore onto a warm Sandbox
-pod out-of-band" path is blocked by kubelet lifecycle ownership. Viable routes
-now narrow to: (i) extend/patch the containerd runsc shim (or CRI) to support a
-restore-on-create, so kubelet-driven pod creation restores from an image — big,
-upstream-ish work; OR (ii) the substrate-style FALLBACK: warm worker is a
-privileged pod that owns its OWN runsc `-root` and runs the sandbox as a root
-container it fully controls (no kubelet managing the inner sandbox) — restore is
-clean (proven), broker owns routing. Given T1, (ii) looks like the pragmatic
-path. Revisit the ARCHITECTURE.md fork with this evidence.
+### T1c — can we restore a NEW sub-container into B's ALREADY-RUNNING pause sandbox? NO ❌ (2026-07-01)
+
+Follow-up (better idea than T1's "restore over the same id"): leave B's own
+workload alone; restore A's checkpoint as a NEW container id whose spec
+`sandbox-id` = B's pause sandbox `c1e6c0…`, so it JOINS B's running pod.
+Result: `runsc restore` → **`sandbox is not being restored, cannot restore
+subcontainer: state=started`**.
+
+**This is the definitive gVisor invariant:** a sub-container can be restored
+into a shared sandbox ONLY while that **sandbox itself is being restored** (root
+restored from a checkpoint in the same flow). You CANNOT graft a restored
+sub-container onto an already-live (`started`) sandbox. The restore unit is the
+**whole pod/sandbox, restored together, root-first** — exactly what worked into
+our own `-root`. It cannot be injected into a running kubelet-owned pod.
+
+**Implication for architecture (now firmly evidenced by T1 + T1c):** the
+K8s-native "restore onto a warm Sandbox pod" path is blocked at TWO levels:
+(1) kubelet owns/recreates the workload container (T1); (2) gVisor won't restore
+a sub-container into an already-started sandbox (T1c). To restore a whole pod you
+must restore the pause ROOT from a checkpoint too — i.e. bring the ENTIRE pod up
+via restore, which kubelet/containerd (not us) drive for a real Pod.
+
+Viable routes: (i) extend/patch the containerd runsc shim (or CRI) so
+kubelet-driven pod creation restores the whole sandbox from an image
+(restore-on-create at pod granularity) — big, upstream-ish; OR (ii) substrate-
+style FALLBACK: a privileged worker pod owns its OWN runsc `-root` and runs the
+sandbox as a root container it controls; on resume the worker restores the whole
+(single-root) sandbox from S3 — proven clean, broker owns routing. Given T1+T1c,
+(ii) is the pragmatic path.
 
 ## Findings / go-no-go
 
