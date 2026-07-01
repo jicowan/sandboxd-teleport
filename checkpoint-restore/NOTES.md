@@ -736,6 +736,46 @@ kubelet own that pod's container lifecycle? We proved restore into our OWN
 container while keeping the K8s Pod object valid. This is the crux of the whole
 model. See ARCHITECTURE.md.
 
+### T1 gating spike — RESULT: naive "restore over a warm pod's workload" FAILS ❌ (2026-07-01)
+
+Setup: two busybox Sandbox pods on the gvisor node — A `busybox-ckpt` (source,
+counter ~779) and B `busybox-warm` (target, counter ~49). Tried to teleport A's
+state onto B via containerd's `-root`.
+
+What happened, step by step:
+1. Checkpoint A workload to its own image: rc=0 (fine, as always).
+2. `runsc --root=<containerd> kill <B_WORK> SIGKILL` → B workload `stopped`.
+3. `runsc --root=<containerd> restore … <B_WORK>` → **`cannot restore container
+   … in state stopped`**. `runsc restore` CREATES a container; it will not
+   restore onto an existing (stopped) container id.
+4. Meanwhile **kubelet immediately RESTARTED B's workload** as a NEW container id
+   (`867d33e…`, pod RESTARTS=1), pod back to Running/ready.
+
+**Decisive lessons:**
+- **kubelet + containerd own the workload container's lifecycle.** Killing/
+  swapping it out-of-band just makes kubelet recreate it — the kubelet wins.
+  You CANNOT swap a kubelet-managed container's sentry state underneath it from
+  outside. So the naive "restore over the warm pod's workload" model is dead.
+- **`runsc restore` must CREATE the target container** (fresh id), not attach to
+  an existing/stopped one.
+- **But B's PAUSE/sandbox container stayed running the entire time** (kubelet
+  only manages the workload container's restarts, not by tearing the sandbox).
+  → the seam is at the SANDBOX level: a restored workload would need to be
+  created as a sub-container that JOINS B's existing pause sandbox, WITHOUT
+  kubelet knowing/racing. That means the restore has to go THROUGH containerd's
+  CRI (so kubelet's view stays consistent), not around it — and containerd's
+  runsc shim doesn't implement restore (`ctr tasks checkpoint`=not implemented).
+
+**Implication for architecture:** the K8s-native "restore onto a warm Sandbox
+pod out-of-band" path is blocked by kubelet lifecycle ownership. Viable routes
+now narrow to: (i) extend/patch the containerd runsc shim (or CRI) to support a
+restore-on-create, so kubelet-driven pod creation restores from an image — big,
+upstream-ish work; OR (ii) the substrate-style FALLBACK: warm worker is a
+privileged pod that owns its OWN runsc `-root` and runs the sandbox as a root
+container it fully controls (no kubelet managing the inner sandbox) — restore is
+clean (proven), broker owns routing. Given T1, (ii) looks like the pragmatic
+path. Revisit the ARCHITECTURE.md fork with this evidence.
+
 ## Findings / go-no-go
 
 - **Checkpoint of a live containerd gVisor pod on EKS: PROVEN** — both a small
