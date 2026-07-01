@@ -586,6 +586,133 @@ what substrate's `ateom-gvisor` is. So our final solution must be ONE of:
       native pod shape.
 Not viable today: expecting stock containerd/CRI to restore a pod from S3.
 
+## PIVOT → Orchestrator route, busybox first (2026-07-01)
+
+**Option A (persistent worker / standalone runsc root container) is REJECTED** —
+even if the sandbox runs as its own runsc root container, **it is NOT a
+Kubernetes Pod**: no API-server object, no Pod lifecycle, no
+SandboxClaim/warmpool membership, no service endpoints. For agent-sandbox that's
+disqualifying. (Also, AIO-as-standalone kept fighting orthogonal issues: Chrome
+compat, first-boot `groupadd` bootstrap, flaky `ctr images mount` lease — none
+are the real question.)
+
+**Going with Option B — a node-level ORCHESTRATOR** (GKE podsnapshot-style) that
+drives `runsc checkpoint`/`restore` across a REAL pod's containers (pause +
+workload) using their actual containerd bundles, while the Pod stays registered
+with the K8s API.
+
+**Decisions (user, 2026-07-01):**
+1. Target = an **agent-sandbox Sandbox CRD** with a **busybox** workload
+   (`runtimeClassName: gvisor`). Busybox isolates the real question (pod-level
+   pause+workload C/R + API registration) without Chrome/bootstrap noise. We
+   already proved the busybox C/R primitive (W1/W2).
+2. **Script-first** — prove the sequence is even possible with a shell/python
+   script driving runsc on the node; formalize into a Go controller only once we
+   know the requirements.
+3. **API-registration model (in-place resume vs. teleport into a warm pod) =
+   decide AFTER the raw primitive works.**
+
+**The question this spike answers:** can a node-agent checkpoint a real
+Sandbox-managed gVisor pod (pause+workload, shared sentry) and restore it —
+root-first, real bundles — with the Pod object staying valid in the API?
+
+### Busybox orchestrator spike — progress (2026-07-01)
+
+Created `busybox-ckpt` Sandbox (CRD, `runtimeClassName: gvisor`, counter+state
+file). Landed on gvisor node as a real runsc pod: pause/root `22c18f…`
+(type=sandbox) + workload `7d5543…` (type=container, name=counter), sharing one
+sentry PID. Manifest: `checkpoint-restore/busybox-sandbox.yaml`. Orchestrator
+scripts staged on-node at `/var/lib/ckpt-orch.sh` + `/var/lib/restore-orch.sh`.
+
+**Checkpoint (whole sandbox via ROOT/pause id): WORKS ✅** — `runsc checkpoint
+--leave-running <pause-id>` rc=0, image ~600K (checkpoint.img+pages.img+
+pages_meta.img). Saved both containers' config.json + ids for restore.
+
+**Restore into a fresh -root, root-first: PARTIAL ⚠️**
+- Restore PAUSE/root from the image: **rc=0, running** ✅.
+- BUT `runsc ps` on the restored sandbox shows NO counter process, and the
+  workload id is unknown to the new root. So **restoring the pause restores ONLY
+  the pause** — the whole-sandbox image holds the memory but restore is
+  per-container; the workload must be restored SEPARATELY into the same sandbox.
+- Restoring the WORKLOAD sub-container then FAILS:
+  `creating gofer filestore files: "…/work-bundle/rootfs" mount source already
+  has a filestore file at ".gvisor.filestore.<sandbox-id>"; repeated submounts
+  are not supported with overlay optimizations`.
+
+**What this teaches (for the controller design):**
+- Live pods place the gVisor filestore in the WORKLOAD container's rootfs, keyed
+  by SANDBOX id (`.gvisor.filestore.<sandbox-id>`), and pause/workload use
+  SEPARATE overlays (different containerd snapshots). My bind-mount reuse of the
+  live overlay + reusing the pause's whole-sandbox image for the workload
+  restore caused the filestore collision.
+- Correct restore is genuinely multi-step and must mirror what the containerd
+  runsc shim does per container: (1) restore sandbox ROOT with the sandbox
+  image; (2) restore EACH sub-container with ITS OWN image-path + a clean
+  rootfs/overlay whose filestore matches — NOT a second full-sandbox restore
+  against the same image, NOT a bind of the live overlay.
+- This is exactly the shim/GKE-controller responsibility. Hand-driving it hits
+  gofer-filestore + overlay-optimization constraints. STRONG signal that the
+  real solution reconstructs per-container bundles the way the shim does (or
+  extends/forks the runsc shim), rather than a bespoke script.
+
+Open question for next step: to restore a multi-container sandbox correctly do
+we (a) checkpoint EACH container to its OWN image (pause img + workload img) and
+restore each with its own image-path + freshly-prepared snapshot, or (b) accept
+that this reconstruction = reimplementing the runsc shim and instead pursue
+extending the containerd runsc shim / a controller that calls the shim's own
+create-with-restore path. Decision pending.
+
+### POD-LEVEL CHECKPOINT/RESTORE: WORKS ✅✅ (2026-07-01) — the primitive
+
+Answer to the open question above = **(a) works.** Full checkpoint→restore of a
+real **Sandbox-CRD-managed gVisor pod** (busybox-ckpt: pause + workload, shared
+sentry), driven by a node script.
+
+**Two fixes unlocked it (both vs. the earlier failures):**
+1. **Checkpoint EACH container to its OWN image** — `imgp` for pause,
+   `imgw` for workload. Reusing the single whole-sandbox image for BOTH restores
+   caused the `.gvisor.filestore.<sandbox-id>` collision / "repeated submounts".
+2. **Use SSM Run Command, not node-shell, and NO foreground pipes on `runsc
+   restore`** (`-detach` + redirect to a file). The `| tail` pipe on a
+   backgrounded restore is what WEDGED node-shell (nsenter pod stuck
+   Terminating). SSM runs async, captures stdout/stderr reliably, survives.
+   (Node instance i-000d00ffa9964e5b3; helper `/tmp/ssm-run.sh` locally.)
+
+**Working sequence (node, via SSM):**
+```
+RROOT=/run/containerd/runsc/k8s.io ; NR=<fresh restore -root>
+# checkpoint each container to its own image, leave running:
+runsc --root=$RROOT checkpoint --image-path=$IMGP --leave-running <pause-id>
+runsc --root=$RROOT checkpoint --image-path=$IMGW --leave-running <work-id>
+# restore bundles = real saved config.json + bind-mount of live rootfs
+# restore ROOT (pause) FIRST, then workload; -detach, redirect (NO pipes):
+runsc --root=$NR restore -bundle $PB -image-path=$IMGP -pid-file=.. -detach <pause-id>
+runsc --root=$NR restore -bundle $WB -image-path=$IMGW -pid-file=.. -detach <work-id>
+```
+
+**Proof:** restore pause rc=0 running; restore work rc=0 running. **RAM
+continuity** — restored workload stdout `in-ram counter=385,386` continued from
+the checkpoint (not reset). **FS continuity** — restored `/state/log` carried
+pre-checkpoint lines (383,384) then appended 385,386. Restored sandbox is
+INDEPENDENT and keeps advancing (411→412→413) in its own `-root`, while the
+ORIGINAL live pod also keeps running (414). Two independent sandboxes from one
+checkpoint.
+
+**Scope of what's proven vs. still open:**
+- PROVEN: the pod-level C/R MECHANISM (pause+workload, root-first, per-container
+  images) works out-of-band via runsc on a real Sandbox pod.
+- STILL OPEN (the K8s-integration half): the restored sandbox currently lives in
+  our own `-root`, NOT under containerd/kubelet — so the K8s Pod object does NOT
+  yet point at it. Making the API-registered Pod resume onto this restore (or a
+  warm pod) is the orchestrator/controller's job — the "where restored state
+  attaches to a live Pod object" question we deferred. Next: decide in-place
+  resume vs. teleport-into-warm-pod, and how the controller swaps containerd's
+  container for the restored one (or drives the shim's own restore path).
+- Bind-mounting the LIVE pod's rootfs worked because the original stayed running
+  (shared lower layers). A real teleport needs the target pod's own rootfs +
+  matching gofer-mount-confs (still the shim-parity concern for >1 workload
+  container, though single-workload busybox is clean).
+
 ## Findings / go-no-go
 
 - **Checkpoint of a live containerd gVisor pod on EKS: PROVEN** — both a small
