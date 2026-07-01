@@ -903,6 +903,41 @@ actor DNS name) — we'd need that class of router (broker/worker-aware),
 addressing the worker pod + interior IP, not a K8s Service per sandbox. Design
 item for the controller work.
 
+### Nested gVisor in a normal pod (the "worker" shape): WORKS ✅ — but it's DinD ⚠️ (2026-07-01)
+
+Proved the worker packaging: a NORMAL runc pod (`worker-nested`,
+`runtimeClassName: <none>`, **privileged**, node's runsc mounted via hostPath)
+can run `runsc` INSIDE its container to launch a nested gVisor sandbox.
+- Pulled the busybox rootfs from its **OCI image inside the pod** via `crane
+  export` (no host containerd, no hand-built rootfs) → realistic worker flow.
+- `runsc create`+`start` a nested sandbox → **running**; `runsc exec … uname -r`
+  → **`4.19.0-gvisor`** (the gVisor sentry kernel, NOT the node's 6.1) = proof
+  the nested sandbox is genuinely gVisor-isolated inside the pod.
+- Manifest: `checkpoint-restore/worker-nested.yaml`.
+
+**DinD assessment (user flagged: "feels a lot like DnD"): CORRECT, and it's the
+key tradeoff.** This worker is Docker-in-Docker-shaped: privileged container
+(full host caps → node-compromise blast radius on a shared cluster), hostPath
+runsc binary, a nested runtime the platform can't see (opacity, no native
+resource accounting, security). Irony: gVisor exists to AVOID privileged
+containers; wrapping it in a privileged pod partially defeats that. Substrate
+accepts this (its worker/`ateom-gvisor` is privileged too) because it's a
+ground-up platform; for us bolting onto agent-sandbox it's a real cost.
+
+**The two honest paths (unchanged, now with full evidence):**
+- (A) **DinD-style privileged worker** (just proven buildable): works, but
+  privileged + nested + we rebuild routing/lifecycle/scheduling/quota (the whole
+  substrate control plane) and lose native Sandbox-CRD semantics.
+- (B) **Fix at the runtime layer** — extend containerd runsc shim / CRI for
+  restore-on-create so kubelet drives a NATIVE gVisor pod that restores from an
+  image. No DinD, stays K8s-native; upstream-ish Go work on the shim. This is
+  **cedana's shape** (C/R integrated at the containerd layer) and why cedana
+  doesn't need a privileged DinD worker per sandbox.
+
+The DinD discomfort is the strongest argument that (B) is the right long-term
+shape and (A) is substrate's pragmatic-but-heavy path. DECISION POINT — get user
+direction before building either.
+
 ## Findings / go-no-go
 
 - **Checkpoint of a live containerd gVisor pod on EKS: PROVEN** — both a small
