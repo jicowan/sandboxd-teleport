@@ -442,6 +442,53 @@ Result: **rc=0 in ~1 second**. Artifacts: checkpoint.img 5.9M + pages.img **624M
 pod stayed **Running, ready, 0 restarts**, marker intact, MCP hub still 200 — the
 `--leave-running` container was untouched.
 
+## RESTORE of the in-place AIO checkpoint: BLOCKED on pod-granularity ⚠️ (2026-07-01)
+
+Attempted out-of-band restore of the AIO workload checkpoint into our own -root.
+Got very close, and the failure is diagnostic, not fatal — it tells us the
+correct granularity.
+
+**Iteration (each error taught the next fix):**
+1. `restore` straight → `cannot load sandbox: open <sandbox-id>_sandbox…state:
+   no such file` — the checkpoint's CRI annotations
+   (`container-type=container`, `sandbox-id=0c33…`) make runsc look for the POD
+   sandbox's sentry state in our root. Fix attempt: strip `io.kubernetes.cri.*`
+   annotations + drop namespace `path` bindings from config.json.
+2. rootfs via symlink → `setting up FS: mounting /etc/hosts … expected to open
+   …bundle/rootfs/etc/hosts but found …/d990…/rootfs/etc/hosts` (gVisor mount
+   safety rejects the symlinked rootfs). Fix: `mount --bind` the original
+   overlay rootfs into a REAL bundle/rootfs dir (original pod still alive →
+   lowerdirs shared).
+3. Then restore **rc=0, sandbox `status: running`** — but `exec` → `container
+   "aio-r" not started`; async page loader shows all 611M paged in (122 MB/s in
+   5s, then 0 B/s = DONE, not stalled), yet no `CompleteRestore`.
+
+**ROOT CAUSE (confirmed): the AIO container is a NON-ROOT sub-container of its
+pod sandbox.** A k8s gVisor pod = ONE sentry shared by 2 containers: the pause/
+sandbox container (`0c33…`, the pod-sandbox ROOT) and the workload (`d990…`).
+Proof: both share the SAME sandbox PID (14378) in `runsc list`. The restore load
+logs `{ContainerID:aio-r, RootContainer:false}`. gVisor won't mark a non-root
+container "started" until its pod-ROOT (pause) container is restored first — and
+we only checkpointed the workload, so it waits forever. Hence sandbox=running,
+container=not-started, no CompleteRestore.
+
+**Implication / correct path:** checkpoint & restore at **pod-sandbox
+granularity**, not single-container. Either (a) checkpoint BOTH the pause and
+workload containers and restore the pause (root) first then the workload — the
+way containerd/GKE coordinate a pod; or (b) run the workload as its own runsc
+ROOT container (out-of-band bundle, our earlier W1/W2 busybox model) where there
+is no separate pause container, so the workload IS the root and restores
+cleanly. W1/W2 worked precisely because busybox was a standalone root container.
+
+**So:** in-place *checkpoint* of a real k8s gVisor pod = easy (proven). In-place
+*restore* needs pod-level (multi-container, root-first) orchestration — exactly
+what GKE's podsnapshot controller does at the node level. Single-container
+out-of-band restore only works when the container is its own root.
+
+Live AIO pod verified UNAFFECTED by all restore attempts (Running, ready, 0
+restarts) — we worked in a separate -root and bind-mounted (not moved) its
+rootfs.
+
 ## Findings / go-no-go
 
 - **Checkpoint of a live containerd gVisor pod on EKS: PROVEN** — both a small
@@ -451,4 +498,9 @@ pod stayed **Running, ready, 0 restarts**, marker intact, MCP hub still 200 — 
 - **How to make agent-sandbox pods gVisor: set `runtimeClassName: gvisor` in the
   SandboxTemplate's podTemplate.spec** (explicit; RuntimeClass scheduling pins
   the node).
-- Restore path into containerd lifecycle: still to prove (the hard half).
+- **Restore of an in-place k8s-pod checkpoint: needs POD granularity** (root/
+  pause container restored before the non-root workload). Single-container
+  restore stalls at `not started` (RootContainer:false). Out-of-band restore
+  works only when the workload is its OWN root container (W1/W2). This is the
+  next design fork: (a) pod-level restore orchestration, or (b) run AIO as a
+  standalone root container out-of-band.
