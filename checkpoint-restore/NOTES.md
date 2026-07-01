@@ -840,6 +840,69 @@ Remaining for a real product: the worker pod shape + control API (runrunner),
 broker seam, AIO-under-this-model (first-boot bootstrap → golden checkpoint),
 W3 reconnect, cross-node/cross-gen CPU-match (T3), lean rootfs delivery.
 
+### Networking across restore — CORRECTION + substrate source check (2026-07-01)
+
+Earlier I wrote "no socket survival; matches GKE." That referenced **GKE's
+sandbox snapshot offering**, NOT substrate — a conflation. Checked substrate
+source (`cmd/ateom-gvisor/`, `docs/architecture.md`) to be sure:
+
+- **Substrate does NOT preserve live sockets either.** On checkpoint it TEARS
+  DOWN the per-activation veth pair (`main.go` cleanupActorNetwork, after
+  `runsc checkpoint`); on restore it BUILDS A FRESH veth pair (setupActorNetwork,
+  before `runsc restore`). Existing TCP connections are severed.
+- **What substrate DOES give** that GKE/our-spike don't: a **persistent interior
+  netns** (per worker pod, reused across activations) + a **hardcoded stable
+  interior IP `169.254.17.2`** (`actorVethIP`) that the actor always gets. So
+  NEW connections work identically post-resume (stable address), even though old
+  sockets die. It's still a RECONNECT model, not socket survival.
+- Substrate's `runsc start` uses **`-allow-connected-on-save`** (a documented
+  workaround for a gVisor "bug in networking resumption"); checkpoint/restore
+  themselves don't add network flags. Their restore also uses `-direct` (their
+  image path is O_DIRECT-capable; ours on tmpfs/overlay is not — we drop it).
+
+Net: for W3 the reconnect model holds for BOTH GKE and substrate. The substrate
+improvement worth copying = a **stable interior IP** so the broker always dials
+the same address after resume.
+
+### Substrate control-plane shape (to model our controller after) (2026-07-01)
+
+Confirmed from source. Three tiers (we should mirror this shape on EKS+S3):
+- **atecontroller** (Deployment): K8s operator reconciling CRDs → Deployments.
+  Reconciles **WorkerPool** CRD → a Deployment of worker pods; **ActorTemplate**
+  CRD → golden-actor snapshot lifecycle.
+- **ateapi** (Deployment, gRPC :443): master control plane. Owns Actor lifecycle
+  RPCs — **CreateActor / ResumeActor / SuspendActor / PauseActor / DeleteActor**
+  (`pkg/proto/ateapipb/ateapi.proto`). State in **Redis/Valkey** (actor↔worker
+  assignments, snapshot URIs; optimistic-concurrency versions + distributed
+  locks). **Worker selection happens at RESUME time** (pick an idle worker whose
+  pool matches sandboxClass + selectors) → enables reschedule onto any worker.
+- **atelet** (DaemonSet, privileged, hostPath `/var/lib/ateom-gvisor`, gRPC
+  :8085): node daemon. **Run / Checkpoint / Restore** RPCs; does S3/GCS I/O
+  (`ATE_STORAGE_BACKEND=s3`); registers workers. Talks localhost to **ateom-gvisor**
+  (the runsc driver, per worker pod).
+- Actor state machine: SUSPENDED→RESUMING→RUNNING→SUSPENDING→SUSPENDED; snapshot
+  scopes **FULL** (mem+rootfs delta) vs **DATA** (durable volumes only).
+- Snapshot URI = `<template.snapshotsConfig.location>/<actorId>/<ts>-<rand>`;
+  resume reads `actor.latest_snapshot_info` and passes the URI to atelet Restore.
+
+**Mapping to us:** atelet+ateom = the node-agent we prototyped (SSM+runsc+shim);
+ateapi = the lifecycle/scheduling controller we still need; WorkerPool = warm
+pool of worker pods (each owns its runsc `-root`); Redis = actor→worker+snapshot
+store. Substitute GCS→S3 (supported), pod-certs→IAM/OIDC, Redis→ElastiCache/
+Valkey. This is effectively a **fork of substrate's control plane**, gVisor-only,
+on EKS.
+
+### Router note (user, 2026-07-01)
+
+We currently have the **agent-sandbox `sandbox-router`** (routes by
+`X-Sandbox-*`). That works because agent-sandbox creates real pods/services. In
+the substrate-like model the sandbox is NOT a K8s pod/service (it's a runsc root
+container inside a worker pod), so the agent-sandbox router won't address it.
+Substrate's equivalent is **atenet / atenet-router** (routes by Host header =
+actor DNS name) — we'd need that class of router (broker/worker-aware),
+addressing the worker pod + interior IP, not a K8s Service per sandbox. Design
+item for the controller work.
+
 ## Findings / go-no-go
 
 - **Checkpoint of a live containerd gVisor pod on EKS: PROVEN** — both a small
