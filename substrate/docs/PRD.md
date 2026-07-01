@@ -1,6 +1,13 @@
 # PRD — AIO Sandbox on Agent Substrate (via broker)
 
-Status: Draft
+Status: **BLOCKED at Stage 0 (2026-07-01)** — see
+[`../stage0/NOTES.md`](../stage0/NOTES.md). Substrate's stock install requires
+the `PodCertificateRequest` + `ClusterTrustBundle` APIs (certificates.k8s.io,
+beta/off-by-default, GA target K8s 1.37), which managed EKS does not serve at
+any version available today (empirically confirmed on EKS 1.31/1.33/1.35).
+Stages 1–4 are not started and are gated on resolving this. Options: local kind
+spike to evaluate the suspend/resume model, or shelve until K8s 1.37 reaches
+EKS.
 Branch: `substrate`
 Related: [`DESIGN-NOTES.md`](./DESIGN-NOTES.md), and (on `main`) the
 agentgateway design that this reuses for the auth front door.
