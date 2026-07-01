@@ -313,16 +313,33 @@ gvisor nodes and test cross-node/cross-gen (c6a↔c7a) checkpoint/restore.
 - S3 bucket `aio-checkpoint-spike-820537372947-us-west-2`; IAM role
   `aio-checkpoint-spike-role`; SA `default/ckpt-spike`.
 
-**⚠️ ARCHITECTURAL TENSION to resolve before the AIO test:** our proven
-checkpoint model drives runsc **out-of-band against our own `-root`**. The
-`aio-sandbox-warmpool` pods are **containerd-managed gvisor pods** (runsc shim,
-containerd's state dir). We CANNOT checkpoint a containerd-managed container
-with our out-of-band runsc (that path caused the 9p failure). So to checkpoint
-AIO we must either (a) run the AIO rootfs as an OUT-OF-BAND runsc container in a
-worker pod (swap busybox→AIO rootfs in the W1/W2 recipe), or (b) find whether
-containerd's runsc shim exposes checkpoint (it does NOT, per gVisor docs — no
-containerd/k8s restore path). → Plan: build an AIO bundle for out-of-band runsc;
-anti-affinity applies to the WORKER pods (2 gvisor nodes), not the warmpool.
+**CORRECTION — earlier "can't checkpoint containerd-managed pods" was WRONG.**
+That was an over-generalization from the 9p restore failure, which was actually
+a mount-namespace/gofer inconsistency in the cold cross-pod attempt (checkpoint
+in one `-root`, restore in a fresh pod) — NOT proof that containerd containers
+can't be checkpointed. GKE snapshots/restores containerd-SCHEDULED gvisor pods,
+so it's clearly possible.
+
+Corrected understanding:
+- `runsc` is a CLI over a state `-root`. Containerd's runsc shim manages gvisor
+  containers against root **`/run/containerd/runsc/k8s.io`** (observed in the
+  node process list: `runsc --root=/run/containerd/runsc/k8s.io ...`).
+- So out-of-band `runsc -root /run/containerd/runsc/k8s.io checkpoint
+  <containerd-container-id>` should be able to checkpoint a RUNNING warmpool
+  pod's gvisor container — UNTESTED (we only ever used our own /tmp root). This
+  is the cheap test to run next, NOT dismiss.
+- The genuinely harder half is RESTORE: GKE coordinates pod re-creation +
+  restore at the node level (podsnapshot controller). Raw `runsc restore` into
+  containerd's root while containerd owns lifecycle is the untested tricky part.
+- The 9p failure means: restore needs a consistent rootfs/gofer/mount-ns; it
+  does NOT mean containerd containers are off-limits.
+
+→ Revised plan: (1) try checkpointing a running `aio-sandbox-warmpool` gvisor
+container in place via `runsc -root /run/containerd/runsc/k8s.io checkpoint
+<id>` (find the containerd id from the shim process / crictl). (2) Figure out
+the restore path (in-place resume vs. new pod) — this is where GKE's node
+coordination matters and our design work concentrates. Anti-affinity (per the
+AIO SandboxTemplate) forces 2 gvisor nodes for the cross-node/cross-gen leg.
 
 **Concrete next steps:**
 1. Ensure a 2nd gvisor node (anti-affinity on worker pods, or scale a warmpool,
