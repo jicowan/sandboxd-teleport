@@ -74,15 +74,23 @@ All the exact flags are in `../NOTES.md` (overlay2, no `-direct` on tmpfs,
 
 ## The two hard problems (honestly)
 
-1. **Networking across restore.** gVisor rebuilds the netstack from the restore
-   host's netns; connected sockets break. The MCP hub listens on a port inside
-   the sandbox — after restore the worker must re-expose that port. Substrate
-   builds a point-to-point veth (pod netns ↔ per-actor interior netns) at
-   worker start and the actor keeps its interior IP across restore. We will
-   likely need the same: a stable interior netns/veth the sandbox binds to, so
-   the broker's route to `:8080` survives a checkpoint/restore cycle. **This is
-   the biggest unsolved piece and should be the next spike after a bare
-   in-pod restore works.**
+1. **Networking across restore — RECONNECT, not connection-survival (scope
+   reduced).** gVisor rebuilds the netstack from the restore host's netns;
+   connected sockets break. **This is acceptable** — the reference managed
+   implementation (GKE Agent Sandbox Pod Snapshots) makes *no* networking
+   guarantee either: its docs promise only "memory and file system" state and
+   demonstrate continuity via `kubectl exec`, never a surviving network
+   connection (verified 2026-07-01 against
+   docs.cloud.google.com/.../agent-sandbox-pod-snapshots + the GKE Sandbox
+   limitations). So we do NOT need live TCP connections to survive.
+   The real requirement is: **after restore, the sandbox's MCP `:8080` is
+   reachable again and the broker RECONNECTS.** That's a re-expose/reconnect
+   problem, not a connection-preservation one — a much lower bar than first
+   assumed. substrate's veth/interior-netns gives the sandbox a *stable
+   interior IP* so newly-established connections work post-restore; we need the
+   equivalent "port is listening again + broker dials a fresh MCP session,"
+   not socket teleport. MCP itself already expects reconnders (Streamable HTTP
+   sessions can be re-initialized). Still the trickiest piece, but bounded.
 
 2. **Bundle/rootfs identity across restore.** The restore `create` must use a
    bundle whose rootfs is equivalent to the checkpoint's (gVisor validates the
@@ -110,8 +118,10 @@ All the exact flags are in `../NOTES.md` (overlay2, no `-direct` on tmpfs,
 - **W2 — S3 in the loop:** worker checkpoints → S3, a *second* warm worker pod
   restores from S3. Proves teleport across pods (the thing cold-restore
   couldn't do), given both are persistent workers that create their own gofer.
-- **W3 — networking:** make the sandbox's `:8080` reachable and survive a
-  checkpoint/restore cycle (veth/interior-netns like substrate). Hardest.
+- **W3 — networking (reconnect model):** ensure the sandbox's `:8080` is
+  reachable again after restore and the broker can open a FRESH MCP session
+  (no socket survival needed — GKE doesn't promise it either). Give the
+  sandbox a stable interior addressing so post-restore connections work.
 - **W4 — AIO under gVisor:** swap the busybox test workload for the real AIO
   image; confirm the 31 tools work under runsc, then checkpoint/restore it.
 - **W5 — control API + broker seam:** wrap W1–W4 in the runrunner control API;
