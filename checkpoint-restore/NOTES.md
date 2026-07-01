@@ -713,6 +713,29 @@ checkpoint.
   matching gofer-mount-confs (still the shim-parity concern for >1 workload
   container, though single-workload busybox is clean).
 
+## DIRECTION DECIDED (2026-07-01): substrate-like teleport onto warm Sandbox pods + S3
+
+User intent: **decouple sandbox STATE from its original pod.** Checkpoint a
+session to S3, FREE the pod (stop paying — rules out in-place resume, which pins
+state to an always-running pod), later restore that state onto **any
+interchangeable warm pod**, possibly a different node. Pod = fungible worker;
+state = the portable thing. This is substrate's WorkerPool + suspend/resume.
+
+**Decisions (user):**
+- **Warm worker = a real K8s-native agent-sandbox Sandbox pod** (pause+workload,
+  containerd-managed, gVisor, API-registered). NOT a substrate-style
+  worker-owns-runsc-root container. Keeps Sandbox/SandboxClaim semantics; the
+  controller restores checkpointed state ONTO a warm Sandbox pod.
+- **Checkpoint store = S3** (proven W2 + Pod Identity). Enables cross-node.
+
+**THE GATING UNKNOWN (must spike before committing the design):** can we restore
+a checkpoint ONTO a warm *containerd-managed* Sandbox pod, given containerd/
+kubelet own that pod's container lifecycle? We proved restore into our OWN
+`-root`; we have NOT proven restoring into containerd's `-root`
+(`/run/containerd/runsc/k8s.io`) "over" a warm pod's freshly-booted workload
+container while keeping the K8s Pod object valid. This is the crux of the whole
+model. See ARCHITECTURE.md.
+
 ## Findings / go-no-go
 
 - **Checkpoint of a live containerd gVisor pod on EKS: PROVEN** — both a small
