@@ -196,8 +196,40 @@ $R restore -bundle <bundle> -image-path <MEMDIR> -pid-file <pf2> -background -de
 Key: `-overlay2=root:self` on EVERY runsc call; app state in the rootfs
 overlay (not a tmpfs mount); one `checkpoint` (drop fscheckpoint).
 
-### restore-into-a-new-pod: (next — runsc create+restore with a spec-equivalent
-bundle inside a pod, checkpoint pulled from S3)
+### S3 data path: WORKS ✅ — but "cold new pod" restore model is WRONG ⚠️
+
+**S3 round-trip proven:** a privileged shim pod (SA `ckpt-spike`, Pod Identity)
+uploaded the checkpoint + bundle to S3 and a fresh consumer downloaded both
+cleanly (`up/dl mem rc=0`, `up/dl bundle rc=0`). So moving checkpoints via S3
+between pods/nodes works.
+
+**But restore into a COLD fresh pod FAILED** with:
+`vfs.CompleteRestore() failed: filesystem type "9p": failed to walk "tmp" in
+mount "__no_name_0:/": no such file or directory`.
+
+**Root cause (corrected model):** the checkpoint references a **gofer-backed
+(9p) rootfs**. Restoring requires that gofer/rootfs mount environment to
+already exist and be walkable. A cold `runsc create`+`restore` in a brand-new
+pod (fresh mount namespace) can't reconstruct it → 9p walk fails.
+
+**Substrate does NOT create a new pod per restore.** Re-reading
+`cmd/ateom-gvisor/main.go:386-440`: the ateom **worker pod is persistent** and
+owns the runsc `-root` state dir, the netns/veth (`actorVethIP`), and the gofer
+lifecycle. On resume it does `cmdCreate` (which stands up the gofer/rootfs in
+the worker's OWN consistent mount namespace) then `cmdRestore` into it. Two
+scopes: `DATA` = `create --fs-restore-image-path` + `start` (fs only);
+`FULL` = `create` then `restore` (memory). Our same-node FULL restore (1a)
+matched this and worked precisely because create+restore shared one `-root`/
+mount ns.
+
+**Corrected 1b goal:** not "cold pod from S3 snapshot." Instead: **a
+persistent/warm worker pod that, on resume, does `runsc create` + `runsc
+restore` into its own `-root`**, with the checkpoint image fetched from S3.
+The pod is the durable substrate; the sandbox state teleports onto it. This
+is exactly substrate's WorkerPool model ("warm pods ready to receive resumed
+actor states").
+
+### 1b (reframed): warm-worker-pod restore (next)
 
 ## Findings / go-no-go
 
