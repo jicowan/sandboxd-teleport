@@ -89,8 +89,11 @@ stage's doc grows too large, split it into its own PRD (e.g. `PRD-broker.md`).
   Install substrate on the (or a parallel) EKS cluster. Verify **G1** (run the
   stock `demos/sandbox` actor: create, `/process`, suspend, resume, confirm
   state persists) and **G3** (S3 snapshots). Deliverable: a working stock demo
-  on EKS + a go/no-go note on G1/G3. **This is the make-or-break stage — do it
-  before writing broker code.**
+  on EKS + a go/no-go note on G1/G3. Also confirm the privileged gVisor node
+  DaemonSet (`atelet` / `ateom-gvisor`) **coexists with existing cluster
+  workloads** without destabilizing nodes (we're installing into the shared
+  production cluster, isolated by namespace + RBAC). **This is the make-or-break
+  stage — do it before writing broker code.**
 
 - **Stage 1 — AIO image as an actor.**
   Build C2 (ActorTemplate wrapping the AIO image) + C1 (WorkerPool). Create the
@@ -100,11 +103,13 @@ stage's doc grows too large, split it into its own PRD (e.g. `PRD-broker.md`).
   broker exists. Deliverable: AIO hub reachable as an actor over MCP.
 
 - **Stage 2 — Substrate broker (lifecycle + forward).**
-  Build C3: the Go broker. MCP `initialize` → ResumeActor; forward
-  tools/list/call to atenet; MCP `DELETE`/idle → SuspendActor. Actor keyed per
-  user (from JWT principal). No auth yet — trust localhost, test with a raw MCP
-  client. Deliverable: broker drives claim-or-resume + suspend + forwarding end
-  to end.
+  Build C3: the Go broker. MCP `initialize` → **create-or-resume the caller's
+  durable per-user actor** (one actor per principal, keyed on the JWT
+  principal; reused across sessions); forward tools/list/call to atenet; MCP
+  `DELETE`/idle → SuspendActor (snapshot, keep the actor). No auth yet — trust
+  localhost, test with a raw MCP client. Deliverable: broker drives
+  create-or-resume + suspend + forwarding end to end, and a second session for
+  the same principal resumes the *same* actor.
 
 - **Stage 3 — Auth + quota (reuse main's logic).**
   Port the `main` broker's JWKS validation, `sandbox-users` group gate, and
@@ -126,17 +131,28 @@ stage's doc grows too large, split it into its own PRD (e.g. `PRD-broker.md`).
 - No substrate GC/TTL — broker must own all reclamation.
 - Session continuity (G2) is the highest-uncertainty technical risk after G1.
 
-## 8. Open questions
+## 8. Resolved decisions
 
-- Do we co-locate substrate on the existing EKS cluster or stand up a parallel
-  one? (Blast-radius vs. cost.)
-- One actor per user (reused across sessions) or one per MCP session? (main uses
-  per-session claims; substrate's snapshot model favors a durable per-user
-  actor.)
+- **Cluster: existing EKS cluster, dedicated namespace** (not a parallel
+  cluster). Substrate installs into its own namespace (e.g. `ate-system`) with
+  demo/actor resources in a separate namespace (e.g. `aio-substrate`). Accept
+  the blast-radius of substrate's privileged node DaemonSet (`atelet` /
+  `ateom-gvisor`) on the shared cluster; isolate everything else by namespace +
+  RBAC. Stage 0 must confirm the gVisor DaemonSet coexists with existing
+  workloads without destabilizing nodes.
+- **Actor model: one durable actor per user**, reused across sessions (not one
+  per MCP session). This is the point of substrate: MCP `initialize` →
+  create-or-resume the user's actor; disconnect → suspend (snapshot); reconnect
+  → resume with RAM+FS state intact. Quota is measured in **actors per user**;
+  reclamation is **idle-actor cleanup** owned by the broker (no substrate GC/TTL).
+  The success-criteria state-persistence proof (§2.4) exercises exactly this.
+
+## 9. Open questions
+
 - Go module strategy for the broker: import substrate's `pkg/proto/ateapipb`
-  (public) but reimplement `internal/resources` bits.
+  (public) but reimplement `internal/resources` (`ActorDNSName`) bits.
 
-## 9. If this PRD gets too big
+## 10. If this PRD gets too big
 
 Split by stage into: `PRD-0-eks-gate.md`, `PRD-broker.md` (Stages 2–3),
 `PRD-frontdoor.md` (Stage 4). Keep this file as the umbrella/index.

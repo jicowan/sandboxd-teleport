@@ -91,8 +91,10 @@ Flags: `--id` (actor id), `--atespace`, `--ateapi` (gRPC, default :8080),
     AIO server.
 
 ### Broker behavior per MCP session (Substrate-native, Option B)
-1. MCP `initialize` → `ResumeActor(atespace, actorID)` (create-or-resume; actor
-   keyed per user/session from the passthrough JWT principal).
+Actor model (decided): **one durable actor per user**, reused across sessions —
+keyed on the passthrough JWT principal, not per MCP session.
+1. MCP `initialize` → create-or-resume the caller's durable actor
+   `ResumeActor(atespace, actorID=principal)`.
 2. Forward `tools/list` / `tools/call` as MCP-over-HTTP to atenet-router with
    `Host: ActorDNSName(atespace, actorID)`.
 3. Session end / MCP `DELETE` → `SuspendActor(...)` — **hibernate, not destroy**
