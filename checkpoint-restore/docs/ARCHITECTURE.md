@@ -140,3 +140,150 @@ Decision deferred until the spike above resolves.
 - Networking: restore rebuilds netstack from the new node's netns; MCP is a
   **reconnect** (fresh session), not socket survival — matches GKE (no network
   guarantee). Bake into the broker's resume path.
+
+---
+
+# RESOLVED MODEL (2026-07-01, after spikes T1/T1c/T2)
+
+The pre-T1 diagram above ("restore onto a warm Sandbox pod") is SUPERSEDED.
+T1/T1c proved you cannot restore onto a kubelet-managed pod out-of-band
+(kubelet recreates the workload; gVisor won't inject a restored sub-container
+into a started sandbox). T2 proved the substrate-style model end-to-end. The
+resolved design:
+
+## Worker vs. sandbox — the load-bearing distinction
+
+| Thing | K8s Pod? | Placed/accounted by | Has cluster IP / DNS? |
+|---|---|---|---|
+| **Worker** | **YES** — normal Pod from a Deployment (`WorkerPool` CRD → Deployment) | **kube-scheduler**, via the worker pod's resource requests | YES (VPC-CNI pod IP; DNS if fronted by a Service) |
+| **Sandbox / actor** | **NO** — a runsc ROOT container INSIDE the worker pod | control plane picks *which idle worker* (assignment only) | NO cluster IP, NO CoreDNS name, NO Service |
+
+Everything below follows from this: the schedulable/accountable unit is a
+**real Kubernetes pod (the worker)**; the portable stateful unit is the
+**sandbox (runsc root container)** that teleports onto workers.
+
+## The controller does NOT reimplement kube-scheduler
+
+Because the worker is a real pod, **kube-scheduler already does all node/
+resource reasoning**: the `WorkerPool` Deployment declares `replicas` +
+per-worker resource requests; kube-scheduler bin-packs worker pods onto nodes
+and reserves capacity. The C/R controller therefore keeps only a lightweight
+**assignment table** (substrate: Redis/Valkey), NOT a cluster/resource model:
+which workers exist, idle-vs-busy, pool/sandboxClass, and each actor's snapshot
+URI. Resume = O(1) "pick any idle worker in a matching pool" → dial its
+node-agent to restore. No feasibility/bin-packing math.
+
+**Why it never asks "does this node have room?": one actor per worker.** Each
+worker pod is sized (resource requests) for ONE sandbox up front; kube-scheduler
+reserved that room when it placed the worker. So when an actor resumes onto an
+idle worker, the room exists by construction. **Oversubscription is TEMPORAL,
+not spatial** — many actors, fewer workers; idle actors checkpoint to S3 and
+free their worker for the next. Capacity scaling = scale the `WorkerPool`
+Deployment `replicas` (normal K8s). If no idle worker at resume, wait or scale
+the pool up — never place a pod ourselves. (Spatial oversubscription — many
+sandboxes per worker — is the ONLY thing that would force per-worker resource
+accounting; substrate avoids it and so should we, at least v1.)
+
+## Networking / addressing (grounded in substrate source)
+
+- Worker pod: normal VPC-CNI pod IP; routable; DNS-resolvable if fronted by a
+  Service. This is the only real IP.
+- Sandbox: lives in a **persistent interior netns** in the worker, connected by
+  a **veth pair with a stable hardcoded interior IP** (substrate: `169.254.17.2`
+  / `actorVethIP`). Same interior address every resume.
+- Path to a sandbox: **worker-pod-IP (routable) → veth → interior IP:port** (e.g.
+  AIO `:8080/mcp`). The sandbox has no address of its own.
+- **CoreDNS/kube-dns cannot resolve a sandbox** (not a Pod/Service/Endpoint).
+  Only workers are DNS-visible. Substrate uses an app-layer name
+  `ActorDNSName(atespace, actorId)` as a **Host header**, resolved by its router
+  against the assignment table — NOT a DNS record.
+- **Sockets do NOT survive restore** (verified for BOTH GKE and substrate;
+  substrate tears down/rebuilds the veth around C/R). The stable interior IP
+  means the *address* is constant; the *session* must be re-established →
+  reconnect model.
+
+## Router & registration
+
+- The current agent-sandbox `sandbox-router` (routes by `X-Sandbox-*`, backed by
+  Pod/Service endpoints) will NOT address a non-pod sandbox. We need a router of
+  substrate's `atenet-router` class: routes by Host header = sandbox/actor id,
+  resolved against the **assignment table** to `worker-pod-IP` (+ interior IP).
+- "Registration" is NOT a K8s endpoints watch — it's the **resume workflow
+  writing `actorId → workerPod, workerPodIP, interiorIP` into the store**; the
+  router (and broker) read that store. On suspend the assignment is cleared.
+
+## Broker → sandbox MCP path
+
+- Broker → **router** over HTTP with Host/header = actor/sandbox id.
+- Router resolves id → worker pod IP (store), forwards; worker proxies to the
+  sandbox interior IP:port.
+- Every resume = a **fresh MCP session** (reconnect + `initialize`); no live
+  TCP/SSE survives. Broker owns reconnect.
+
+## Claims — mostly dissolve
+
+- agent-sandbox `SandboxClaim` binds a user to a SPECIFIC pod because state lives
+  in that pod, with TTL/release to reclaim. **In this model state is portable
+  (S3), so no user is bound to any pod.** Workers are fungible.
+- Substrate has **no claim/release**: one **durable Actor per principal** +
+  **resume-time worker assignment**. The tracked unit for quota/lifecycle is the
+  **actor + its S3 snapshot**, not a pod. Reclamation = delete idle actors'
+  snapshots (broker-owned; substrate has no GC).
+
+## Restore latency — MEASURED (busybox, warm worker, 360K checkpoint, 2026-07-01)
+
+| Phase | Time |
+|---|---|
+| `runsc checkpoint` | ~91 ms |
+| `runsc create` (gofer/sandbox spin-up) | ~268 ms |
+| `runsc restore` call returns | ~91 ms |
+| restore → usable (`exec` succeeds) | ~74 ms |
+| **create + restore + usable** | **~434 ms** |
+
+- Sub-500ms for a trivial workload; counter resumed correctly.
+- **`create` dominates (~270ms)** → a truly warm worker can **pre-`create`** an
+  idle container so resume ≈ just the restore (~150ms).
+- Excludes **S3 download** (small for busybox; **seconds for AIO ~600M** → the
+  argument for fs-delta+memory-only, and for keeping the base image node-local).
+- **Memory size**: 360K here. AIO ~600M adds page-load, but gVisor **lazy-loads
+  pages** so "usable" can precede full residency; steady-state warms as pages
+  fault in. Measure AIO specifically (T4).
+
+## AIO (real workload) — MEASURED (2026-07-01)
+
+Full AIO gVisor sandbox (Chrome + MCP hub + Jupyter + code-server + Xvnc):
+| Phase | Value |
+|---|---|
+| `runsc checkpoint` (AIO, --leave-running) | **~3.04 s** |
+| checkpoint image size | **696M** (checkpoint.img 6.6M + pages.img 723M + meta 136K) |
+| S3 upload (696M, shim pod / Pod Identity) | **~3.08 s** |
+| S3 download (696M) | **~4.56 s** |
+
+Implications:
+- The **S3 round-trip (~7.6s for 696M) dominates** the real-workload resume, NOT
+  the runsc ops. This is THE argument for shipping only **fs-delta + memory
+  actually touched** (not a full 696M image) and for keeping the base image
+  node-local. A per-session delta is far smaller than the full RAM dump.
+- Checkpoint itself (~3s) is fine for suspend-on-idle.
+- For fast resume: pre-warm workers (pre-`create`), and consider keeping hot
+  actors' checkpoints on a faster tier or node-local cache, S3 for cold.
+- Not yet measured: AIO *restore*-to-usable (blocked on AIO first-boot bootstrap
+  under a standalone root container — the golden-checkpoint approach). gVisor
+  lazy page-load means usable-time should be well under full-download time once
+  the image is local.
+
+## Control-plane shape to build (mirror substrate, gVisor-only, EKS+S3)
+
+- **WorkerPool CRD → Deployment** of worker pods (each owns its runsc `-root`;
+  privileged; one sandbox at a time; `sandboxClass: gvisor`). kube-scheduler
+  places them.
+- **Lifecycle/scheduling controller** (≈ substrate `ateapi`): Create/Resume/
+  Suspend/Delete actor; resume-time idle-worker selection; assignment + snapshot
+  URIs in a store (ElastiCache/Valkey). Owns GC (delete idle snapshots).
+- **Node-agent** (≈ `atelet`+`ateom`; DaemonSet, privileged, hostPath): the
+  proven runsc driver (checkpoint each container to its own image, root-first
+  restore, `-overlay2=root:self`, no `-direct` on overlay, `-detach`), + S3 I/O
+  (Pod Identity). We prototyped this via SSM+shim.
+- **Router** (≈ `atenet-router`): Host-header→worker-pod routing from the store.
+- **Broker** (exists): per-user actor mapping, resume-on-connect, reconnect MCP,
+  quota over actors, suspend-on-idle.
