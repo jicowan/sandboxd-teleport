@@ -112,7 +112,28 @@ are identical c7a, so the CPU-match precondition already holds.)
 
 ## 1b — restore into a new pod + S3
 
-(not started)
+### S3 + Pod Identity foundation: DONE ✅ (2026-07-01)
+
+- **Bucket:** `aio-checkpoint-spike-820537372947-us-west-2` (us-west-2, private
+  / public-access-block on, versioning on).
+- **IAM role:** `aio-checkpoint-spike-role` — trust `pods.eks.amazonaws.com`
+  (`sts:AssumeRole`+`sts:TagSession`); inline policy `s3-checkpoints`:
+  `s3:ListBucket` on the bucket + `s3:GetObject/PutObject/DeleteObject` on
+  `/*`. Least-privilege, scoped to the one bucket.
+- **ServiceAccount:** `default/ckpt-spike` (dedicated — NOT the sandbox SA).
+- **Pod Identity association:** `default/ckpt-spike -> aio-checkpoint-spike-role`
+  (id `a-x8250humihcnivrdk`).
+- **Verified:** a pod using `ckpt-spike` wrote/listed/deleted in the bucket via
+  the AWS default cred chain (Pod Identity), no static keys. `S3_OK`.
+
+**Design note — who touches S3:** in the out-of-band model the SANDBOX pod does
+NOT do checkpoint I/O; the component driving runsc does (a privileged
+node-agent/DaemonSet like substrate's `atelet`; for this spike, the
+restore-shim pod). So S3 access binds to that component's SA (`ckpt-spike`),
+NOT the sandbox's SA. Current sandbox pods run as `default` in `default` ns —
+we deliberately did not grant `default` any S3 access.
+
+### restore-into-a-new-pod: (next)
 
 ## Findings / go-no-go
 
