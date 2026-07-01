@@ -938,6 +938,36 @@ The DinD discomfort is the strongest argument that (B) is the right long-term
 shape and (A) is substrate's pragmatic-but-heavy path. DECISION POINT — get user
 direction before building either.
 
+### Nested checkpoint AND cross-pod restore: WORKS ✅✅ (2026-07-01)
+
+Proved the full thing the user asked for: checkpoint a gVisor sandbox NESTED in
+one worker pod, and RESTORE it into a DIFFERENT worker pod, state intact.
+
+- Worker A (`worker-nested`): nested busybox sandbox, counter reached **count=7**,
+  `runsc checkpoint` → 368K image (all INSIDE the pod's container).
+- Transferred image + config.json A→B (via kubectl cp; would be S3 in prod).
+- Worker B (`worker-nested-b`, a SEPARATE pod): `runsc create`+`restore` →
+  `/state/log` shows `boot,count=1..7` (worker A's history preserved) then
+  **continues 8,9,10,11…**. Memory (`n`) AND filesystem (`/state/log`) teleported.
+
+**Reading the result correctly (I initially misread it):** "restored process
+starts at 8" = SUCCESS (checkpoint was at 7 → resume at 8), NOT a reset. A reset
+would show `boot,count=1` fresh. Same-pod restore showed identical 7→8 continuity.
+
+**Two self-inflicted bugs that caused earlier false-negatives (fixed):**
+1. The debian-slim worker pod has **no python3**, so my `python3` spec-patch
+   silently no-op'd → `runsc spec`'s default **`readonly: true`** root stuck →
+   the workload's `mkdir /state` + `>>/state/log` failed ("Read-only file
+   system") → no fs state to capture, and I misread the memory result. Fix: edit
+   config.json with `sed`/`jq` (no python), set `root.readonly=false`.
+2. `runsc exec` streaming + `start &` noise obscured the real artifacts; verify
+   via on-disk images + reading `/state/log`, not the stdout stream.
+
+**Bottom line:** nested gVisor C/R (the worker model's core mechanism) is proven
+end-to-end incl. cross-pod. The DinD/privileged tradeoff (A vs B) still stands as
+the architecture decision; the MECHANISM works. Runbook:
+`docs/RUNBOOK-nested-cross-pod.md`. Manifests: `worker-nested.yaml` (+ `-b`).
+
 ## Findings / go-no-go
 
 - **Checkpoint of a live containerd gVisor pod on EKS: PROVEN** — both a small
