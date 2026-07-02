@@ -314,3 +314,19 @@ per worker. Move the cache to a **hostPath volume** on the node:
 - pairs well with pre-warming the base image at node/pool provisioning.
 Keep the per-sandbox rootfs as a hardlink copy from the hostPath cache (hardlinks
 work within one filesystem, so cache + bundles must be on the same volume).
+
+### TODO (optimization): incremental / delta checkpoints (user idea, 2026-07-02)
+Today each checkpoint captures the FULL memory image (AIO pages.img = 783MB) +
+fs. Investigate capturing only DELTAS to shrink the S3 payload + speed
+suspend/resume:
+- Memory: does runsc support incremental/differential checkpoints (dirty-page
+  tracking, base + delta layers)? Check runsc checkpoint flags / gVisor docs
+  (e.g. compression exists: --compression=flate-best-speed; look for
+  incremental/diff options or resume-from-base).
+- Filesystem: with -overlay2=root:self the writable delta is the overlay UPPER
+  only — capture/ship just that, not the whole rootfs (base is already node-local
+  via imgcache). Substrate's DATA scope = fs-delta only (create
+  --fs-restore-image-path) vs FULL = +memory. Consider a "fs-delta-only" scope
+  for snapshots that don't need live memory.
+Goal: much smaller/faster snapshots (esp. for the golden-checkpoint model where
+the base memory image is shared and only per-session deltas travel).
