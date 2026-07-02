@@ -330,3 +330,25 @@ suspend/resume:
   for snapshots that don't need live memory.
 Goal: much smaller/faster snapshots (esp. for the golden-checkpoint model where
 the base memory image is shared and only per-session deltas travel).
+
+### AIO TELEPORT end-to-end: PROVEN ✅✅✅ (2026-07-02)
+
+Full AIO sandbox teleported between workers via S3, functional after restore:
+1. AIO running on worker A (nested gVisor, network=sandbox, MCP hub on :8080).
+2. Wrote marker `/home/gem/marker.txt = TELEPORT-MARKER-42` via AIO's shell tool.
+3. `/checkpoint` -> S3: 790MB (pages.img 783MB live RAM: Chrome/Jupyter/MCP hub +
+   checkpoint.img 6.5MB + config.json). Worker A freed.
+4. `/restore` on worker B (different pod) with ports -> status running.
+5. Verified on B's pod IP: MCP `initialize` -> serverInfo "Sandbox MCP Tools"
+   v2.14.7 (MEMORY state resumed); marker.txt -> TELEPORT-MARKER-42 (FS state
+   survived). Reachable via veth+nftables at B's pod IP.
+
+Fixes that made it work this session: writable /tmp tmpfs (python-server crash),
+DNS resolv.conf, S3 ops on a BACKGROUND context (opCtx) so a client timeout
+doesn't cancel a 790MB up/download mid-flight, image rootfs cache (~10x faster
+runs). The substrate-style veth networking survives the teleport (fresh veth +
+fixed interior IP on restore).
+
+This realizes the whole thesis: an arbitrary heavy image (AIO: Chrome + full MCP
+hub) runs as a nested gVisor sandbox, is reachable over the network, and
+teleports (RAM+FS) between workers via S3 — driven entirely by the sandboxd API.
