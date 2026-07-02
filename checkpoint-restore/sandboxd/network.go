@@ -245,25 +245,3 @@ func removeNft() {
 	c.Flush() // ignore error if table absent
 }
 
-// writeResolvConf drops an /etc/resolv.conf into the sandbox rootfs so workloads
-// can resolve hostnames. Without it, gVisor netstack has no resolver and services
-// doing DNS lookups fail with EAI_AGAIN ("Try again") — which stalled AIO's nginx.
-// We copy the worker pod's own resolver (kube-dns) so in-cluster + external names
-// resolve, and egress is masqueraded out the pod IP.
-func writeResolvConf(rootfsDir string) error {
-	etc := rootfsDir + "/etc"
-	if err := os.MkdirAll(etc, 0o755); err != nil {
-		return err
-	}
-	// prefer the worker pod's resolver; fall back to a public one.
-	data, err := os.ReadFile("/etc/resolv.conf")
-	if err != nil || len(data) == 0 {
-		data = []byte("nameserver 8.8.8.8\noptions ndots:1\n")
-	}
-	// IMPORTANT: the rootfs is a HARDLINK copy of the shared image cache. Writing
-	// in place would mutate the cached (shared) inode. Remove first to break the
-	// link, then create a fresh file.
-	target := etc + "/resolv.conf"
-	os.Remove(target)
-	return os.WriteFile(target, data, 0o644)
-}

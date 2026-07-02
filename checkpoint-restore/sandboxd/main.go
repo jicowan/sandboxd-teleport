@@ -196,10 +196,7 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 500, "network: "+err.Error())
 			return
 		}
-		// give the sandbox a resolver (else DNS lookups fail with EAI_AGAIN)
-		if err := writeResolvConf(rootfs); err != nil {
-			lg("WARN: writeResolvConf: %v", err)
-		}
+		// DNS is injected as an OCI bind mount by writeOCISpec (netnsPath!="" ).
 		netnsPath = interiorNetNSPath
 		lg("network up: %s:%v -> %s", s.podIP, req.Ports, interiorIP)
 	}
@@ -370,6 +367,11 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			s.cleanupArtifacts(id)
 			writeErr(w, 500, "network: "+err.Error())
 			return
+		}
+		// write resolv.conf into the freshly-rebuilt rootfs (the saved config.json
+		// no longer bind-mounts it; DNS is a direct file in the rootfs).
+		if err := writeResolvIntoRootfs(rootfs); err != nil {
+			lg("WARN: resolv.conf: %v", err)
 		}
 		lg("network re-established: %s:%v -> %s", s.podIP, req.Ports, interiorIP)
 	}

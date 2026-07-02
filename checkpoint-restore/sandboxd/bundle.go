@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -39,6 +40,18 @@ func writeOCISpec(bundle string, ic *imageConfig, cmdOverride, envOverride []str
 	}
 	env = append(env, envOverride...)
 
+	// DNS: when networked, write /etc/resolv.conf directly INTO the rootfs. We do
+	// NOT bind-mount it via the OCI spec: runsc requires a bind mount's TARGET file
+	// to pre-exist in the rootfs, and /etc/resolv.conf usually doesn't, so the bind
+	// fails ("open .../rootfs/etc/resolv.conf: no such file or directory"). The
+	// rootfs is the writable containerd overlay and /etc exists in real images, so
+	// a direct write is the robust path. bundle/rootfs is passed in as rootfsDir.
+	if netnsPath != "" {
+		if err := writeResolvIntoRootfs(filepath.Join(bundle, "rootfs")); err != nil {
+			return fmt.Errorf("resolv.conf: %w", err)
+		}
+	}
+
 	uid, gid := 0, 0
 	spec := ociSpec(args, env, firstNonEmpty(ic.WorkingDir, "/"), uid, gid, netnsPath)
 	b, err := json.MarshalIndent(spec, "", "  ")
@@ -46,6 +59,24 @@ func writeOCISpec(bundle string, ic *imageConfig, cmdOverride, envOverride []str
 		return err
 	}
 	return os.WriteFile(filepath.Join(bundle, "config.json"), b, 0o644)
+}
+
+// writeResolvIntoRootfs writes /etc/resolv.conf directly into the (writable
+// containerd overlay) rootfs. On restore the rootfs is rebuilt fresh from the
+// image, so this is re-applied there too. Copies the worker pod's resolver
+// (kube-dns) so in-cluster + external names resolve; egress is masqueraded.
+func writeResolvIntoRootfs(rootfsDir string) error {
+	etc := filepath.Join(rootfsDir, "etc")
+	if err := os.MkdirAll(etc, 0o755); err != nil {
+		return err
+	}
+	data, err := os.ReadFile("/etc/resolv.conf")
+	if err != nil || len(data) == 0 {
+		data = []byte("nameserver 8.8.8.8\noptions ndots:1\n")
+	}
+	target := filepath.Join(etc, "resolv.conf")
+	os.Remove(target) // break any hardlink / stale symlink
+	return os.WriteFile(target, data, 0o644)
 }
 
 func firstNonEmpty(vals ...string) string {

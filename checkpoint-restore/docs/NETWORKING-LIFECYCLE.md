@@ -565,3 +565,32 @@ Results:
 
 The intermittent gofer-filestore race is RESOLVED. This was the #1 known issue;
 run + teleport are now reliable.
+
+### FULL E2E TELEPORT (fresh pull → mutate → checkpoint → restore on another worker): PASS ✅✅✅ (2026-07-02, v36)
+
+Definitive end-to-end test with a stateful server proving RAM+FS+process identity:
+1. RUN node:20-slim — FIRST-TIME PULL via node containerd — succeeded FIRST attempt.
+2. Stateful server (RAM counter + /data/counter file, boot id). Mutated over the
+   network (9 HTTP POSTs to worker A pod IP) → ram=9, file=9, boot=T.
+3. CHECKPOINT (compressed) → S3 (~4MB); FREED worker A (state only in S3).
+4. RESTORE on worker B (different pod) — FIRST attempt.
+5. Queried B: **ram_counter=9, file_counter=9, boot=T (IDENTICAL boot id)** — same
+   PROCESS resumed, not a fresh boot; a further POST advanced 9→10 cleanly.
+
+Validated the whole session's work at once: node-containerd image cache (fresh
+pull), --overlay2=root:dir= fix (reliable first-attempt run AND restore, filestore
+race gone), DNS-into-rootfs, compression, veth/nftables data path surviving teleport.
+
+### DNS fix correction (v36): write resolv.conf INTO rootfs, not OCI bind mount
+The v35 OCI-bind-mount approach failed on restore: runsc requires a bind mount's
+TARGET file to pre-exist in the rootfs, but /etc/resolv.conf doesn't → "open
+.../rootfs/etc/resolv.conf: no such file or directory". Fix: write /etc/resolv.conf
+directly into the (writable containerd-overlay) rootfs on run AND restore. /etc
+exists in real images; the rootfs is writable. Simple + robust.
+
+### Confirmed design invariants (user, 2026-07-02)
+- ONE sandbox per worker → worker-global nftables/interior-IP/teardown are correct;
+  no per-sandbox network isolation needed within a worker.
+- Different sandboxes expose DIFFERENT ports → handled: each /run|/restore carries
+  its own `ports`, DNAT built per-sandbox; persisted in metadata. On restore the
+  CALLER (control plane) passes the ports (a fresh worker has no prior metadata).

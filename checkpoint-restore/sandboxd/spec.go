@@ -18,6 +18,7 @@ func ociSpec(args, env []string, cwd string, uid, gid int, netnsPath string) map
 	if netnsPath != "" {
 		namespaces = append(namespaces, map[string]any{"type": "network", "path": netnsPath})
 	}
+	mounts := append([]map[string]any{}, defaultMounts...)
 	return map[string]any{
 		"ociVersion": "1.2.0",
 		"process": map[string]any{
@@ -36,7 +37,7 @@ func ociSpec(args, env []string, cwd string, uid, gid int, netnsPath string) map
 		// overlay (runsc spec defaults this true -> silent state loss).
 		"root":     map[string]any{"path": "rootfs", "readonly": false},
 		"hostname": "sandbox",
-		"mounts":   defaultMounts,
+		"mounts":   mounts,
 		"linux": map[string]any{
 			"namespaces": namespaces,
 		},
