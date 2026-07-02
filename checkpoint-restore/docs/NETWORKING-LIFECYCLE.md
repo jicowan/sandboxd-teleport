@@ -292,3 +292,15 @@ blocking day-to-day since the cache is warm after one pull.
 ## Non-goals (now)
 - Control plane / scheduler, multi-port, private-registry auth, API auth
   (deferred), multi-sandbox-per-worker (explicitly avoided).
+
+### AIO MCP server VERIFIED working under sandboxd (2026-07-02)
+
+Full AIO under sandboxd's nested gVisor, reached via worker-pod-IP:8080 through
+the veth+nftables data path:
+- REST: GET /v1/sandbox -> 200 (full environment payload).
+- MCP: POST /mcp `initialize` -> 200, serverInfo "Sandbox MCP Tools" v2.14.7,
+  protocol 2024-11-05; `tools/list` -> real tool set (browser_get_info,
+  browser_gui_screenshot, browser_gui_execute_action, ...) with JSON schemas.
+The `/tmp` tmpfs fix (v23) was the last blocker (python-server crash loop).
+Next: teleport AIO (checkpoint mem+fs -> S3 -> restore on another worker) and
+verify the MCP hub + a written marker survive.
