@@ -139,6 +139,14 @@ func (s *server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[checkpoint %s] START (leaveRunning=%v) image=%s", req.SandboxID, req.LeaveRunning, sb.Image)
 	imgDir := filepath.Join(s.work, "img", req.SandboxID)
+	os.MkdirAll(imgDir, 0o755)
+	// Persist the EXACT config.json used to run this sandbox alongside the
+	// checkpoint. gVisor restore enforces spec match (RestoreSpecValidation=
+	// enforce), so the restoring worker must reuse this identical spec, not
+	// rebuild one from the image defaults.
+	if b, err := os.ReadFile(filepath.Join(sb.Bundle, "config.json")); err == nil {
+		os.WriteFile(filepath.Join(imgDir, "config.json"), b, 0o644)
+	}
 	t0 := time.Now()
 	if err := s.runsc.checkpoint(req.SandboxID, imgDir, req.LeaveRunning); err != nil {
 		log.Printf("[checkpoint %s] runsc checkpoint FAILED: %v", req.SandboxID, err)
@@ -204,11 +212,7 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[restore %s] base rootfs from %s in %s", id, req.Image, time.Since(tp))
-	if err := writeOCISpec(bundle, ic, nil, nil); err != nil {
-		writeJSON(w, 500, map[string]string{"error": "spec: " + err.Error()})
-		return
-	}
-	// 2) download the checkpoint from S3
+	// 2) download the checkpoint from S3 (includes the original config.json)
 	imgDir := filepath.Join(s.work, "img", id)
 	if s.s3 == nil {
 		log.Printf("[restore %s] S3 NOT CONFIGURED", id)
@@ -222,6 +226,22 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[restore %s] downloaded checkpoint (%d bytes) in %s", id, dirSize(imgDir), time.Since(td))
+	// Use the EXACT config.json the checkpoint was made with (restore enforces
+	// spec match). It was uploaded alongside the images; move it into the bundle
+	// and out of imgDir (runsc would otherwise treat it as a stray image file).
+	cfgSrc := filepath.Join(imgDir, "config.json")
+	if b, err := os.ReadFile(cfgSrc); err == nil {
+		os.WriteFile(filepath.Join(bundle, "config.json"), b, 0o644)
+		os.Remove(cfgSrc)
+		log.Printf("[restore %s] using original spec from snapshot", id)
+	} else {
+		// fallback: rebuild from image defaults (may fail spec validation)
+		log.Printf("[restore %s] WARN: no config.json in snapshot, rebuilding spec: %v", id, err)
+		if err := writeOCISpec(bundle, ic, nil, nil); err != nil {
+			writeJSON(w, 500, map[string]string{"error": "spec: " + err.Error()})
+			return
+		}
+	}
 	// 3) create + restore
 	tr := time.Now()
 	if err := s.runsc.restore(id, bundle, imgDir); err != nil {

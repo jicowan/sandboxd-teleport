@@ -127,6 +127,16 @@ user → B:/restore {id, image:X, uri:s3://…/id/snap1/}
 5. **Privileged worker (DinD)** tradeoff stands (see NOTES A-vs-B). This solution
    is path (A); it's what lets a user run *arbitrary* nested images today.
 
+## Known follow-ups (deferred, not blocking)
+
+- **Nested gVisor logs not in `kubectl logs`.** The sentry/gofer `--debug-log`
+  files are captured and reachable via `GET /logs?sandboxId=` (used for
+  debugging), but they do NOT stream to the pod's stdout. Reason: the detached
+  `runsc run/restore` must use `/dev/null` stdio (a tee/pipe made cmd.Run() block
+  forever). To surface them in `kubectl logs` later: a background goroutine that
+  tails the `--debug-log` dir → sandboxd stdout (decoupled from the exec'd
+  process, so no fd inheritance / blocking). Low priority; logs are available.
+
 ## Prototype plan (this session)
 
 - **P1** — one worker pod runs sandboxd; `POST /run` an **arbitrary image**
@@ -135,3 +145,28 @@ user → B:/restore {id, image:X, uri:s3://…/id/snap1/}
 - **P3** — second worker pod; `POST /restore {uri}` → sandbox resumes with state
   (prove with an in-sandbox counter/file, as in the busybox runbook).
 - **P4** — pick a non-trivial arbitrary image and see how far it gets (compat).
+
+## Prototype status (2026-07-02) — P1/P2/P3 PROVEN ✅
+
+End-to-end teleport of an ARBITRARY image works through the sandboxd HTTP API:
+- **P1 /run**: sandboxd pulled `alpine:3.20` (library, no daemon), built the OCI
+  bundle, ran it as a nested gVisor sandbox → `status=running`.
+- **P2 /checkpoint**: `runsc checkpoint` (~75ms, ~315KB) + uploaded to
+  `s3://…/sandboxes/<id>/<snap>/` incl. the exact `config.json` (~250ms).
+- **P3 /restore on a DIFFERENT worker pod**: pulled the same base image, DL'd the
+  checkpoint from S3, restored → `status=running` in ~420ms; counter continued
+  (43→48…), NOT reset. Memory + filesystem teleported A → S3 → B.
+
+Bugs found + fixed on the way (all in sandboxd, ECR 820537372947/sandboxd v1→v9):
+1. `runsc start` blocks (foreground) → use `run -detach`.
+2. detached run/restore inherits stdio → cmd.Run() hangs on pipes; use /dev/null
+   stdio + rely on `--debug-log` files.
+3. restore rebuilt spec from image defaults → `RestoreSpecValidation=enforce`
+   mismatch; fix: persist the exact config.json in S3 with the checkpoint, reuse.
+4. directfs needs /proc/self/uid_map (absent nested) → `--directfs=false`.
+5. **separate `create` before `restore` orphans a sandbox** ("Watchdog.Start()
+   not called within 30s", stuck `created`) → `restore` ALONE establishes+restores.
+
+Logging: rich step/timing logs on checkpoint+restore; `GET /logs?sandboxId=`
+surfaces the nested gVisor sentry/gofer debug logs (used to root-cause all of the
+above). Known follow-up: also stream them to `kubectl logs` (see above).

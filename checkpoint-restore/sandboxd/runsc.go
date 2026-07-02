@@ -29,10 +29,14 @@ func newRunsc(bin, root string) *runscDriver {
 func (r *runscDriver) base() []string {
 	// --debug + --debug-log captures the SENTRY/GOFER logs (the nested gVisor
 	// container's own output) into files we can surface in the parent.
+	// --directfs=false: directfs needs /proc/self/uid_map, which isn't available
+	// in this nested/detached context ("failed to modify spec for directfs") —
+	// disable it so restore can complete. Falls back to gofer-mediated fs.
 	return []string{
 		"-root", r.root,
 		"--network=none",
 		"-overlay2=root:self",
+		"--directfs=false",
 		"--debug",
 		"--debug-log", r.debugDir + "/",
 		"--log", r.debugDir + "/runsc.log",
@@ -126,14 +130,13 @@ func (r *runscDriver) checkpoint(id, imageDir string, leaveRunning bool) error {
 	return nil
 }
 
-// Restore: create then restore (the proven sequence), detached, no -direct.
-// The restore is -detach (backgrounds the sandbox) so it MUST use runDetached
-// (file stdio) or cmd.Run() blocks on inherited pipes — same bug as createStart.
+// Restore: `runsc restore` alone establishes the sandbox AND restores into it in
+// one step (like `run` does for a fresh start). A separate preceding `create`
+// boots a DIFFERENT sandbox that waits for `start` — its watchdog logs
+// "Watchdog.Start() not called within 30s" and the container hangs at "created"
+// because the restore never targets it. So: NO separate create; restore -detach.
 func (r *runscDriver) restore(id, bundle, imageDir string) error {
 	pid := filepath.Join(bundle, id+".pid")
-	if _, se, err := r.run("create", "-bundle", bundle, "-pid-file", pid, id); err != nil {
-		return fmt.Errorf("restore/create: %v: %s", err, se)
-	}
 	log := filepath.Join(bundle, id+".restore.log")
 	if err := r.runDetached(log, "restore", "-bundle", bundle, "-image-path", imageDir,
 		"-pid-file", pid, "-detach", id); err != nil {
