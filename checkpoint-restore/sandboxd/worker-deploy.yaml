@@ -22,7 +22,7 @@ spec:
         - { key: sandbox, operator: Equal, value: gvisor, effect: NoSchedule }
       containers:
         - name: sandboxd
-          image: 820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v14
+          image: 820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v16
           env:
             - { name: SANDBOXD_BUCKET, value: aio-checkpoint-spike-820537372947-us-west-2 }
             - { name: AWS_REGION, value: us-west-2 }

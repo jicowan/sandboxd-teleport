@@ -1,12 +1,45 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"os"
 	"path/filepath"
 	"time"
 )
+
+func bgCtx() context.Context { return context.Background() }
+
+// imgDir is the per-sandbox checkpoint image staging dir.
+func (s *server) imgDir(id string) string { return filepath.Join(s.work, "img", id) }
+
+// moveSpecFromImg moves the downloaded config.json out of the image dir into the
+// bundle (shared by restore + restart-restore).
+func (s *server) moveSpecFromImg(sb *sandbox) {
+	src := filepath.Join(s.imgDir(sb.ID), "config.json")
+	if b, err := os.ReadFile(src); err == nil {
+		os.WriteFile(filepath.Join(sb.Bundle, "config.json"), b, 0o644)
+		os.Remove(src)
+	}
+}
+
+// ---- runtime health state (not persisted) ----
+
+func (s *server) healthState(id string) *healthState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hs[id] == nil {
+		s.hs[id] = &healthState{}
+	}
+	// return a copy-ish pointer; callers mutate then putHealthState
+	return s.hs[id]
+}
+func (s *server) putHealthState(id string, h *healthState) {
+	s.mu.Lock()
+	s.hs[id] = h
+	s.mu.Unlock()
+}
 
 // Persistence: each sandbox's metadata is written to <work>/meta/<id>.json so
 // that a sandboxd restart can reconcile the in-memory map with the runsc state

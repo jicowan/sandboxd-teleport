@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -53,15 +54,26 @@ func (r *runscDriver) base() []string {
 	}
 }
 
+// runTimeout bounds a runsc call so a wedged/half-dead sandbox can't hang the
+// HTTP handler forever. On timeout the process (and its group) is killed.
+const runTimeout = 30 * time.Second
+
 func (r *runscDriver) run(args ...string) (string, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
+	defer cancel()
 	full := append(r.base(), args...)
-	cmd := exec.Command(r.bin, full...)
+	cmd := exec.CommandContext(ctx, r.bin, full...)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	// Detach the child from our process group so a backgrounded sandbox (from
 	// `run -detach`) doesn't keep our stdio pipes open and block cmd.Run().
+	// Cancel kills the whole group.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return out.String(), errb.String(), fmt.Errorf("runsc %v timed out after %s", args, runTimeout)
+	}
 	return out.String(), errb.String(), err
 }
 

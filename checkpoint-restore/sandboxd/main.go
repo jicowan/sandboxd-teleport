@@ -26,7 +26,8 @@ type server struct {
 	podIP   string // worker pod's routable IP (for nftables DNAT target)
 	netns   bool   // whether the checkpointable veth/interior-netns path is active
 	mu      sync.Mutex
-	sb      map[string]*sandbox // sandboxId -> metadata
+	sb      map[string]*sandbox    // sandboxId -> metadata
+	hs      map[string]*healthState // sandboxId -> runtime health (not persisted)
 }
 
 // sandbox is the metadata needed to teleport: which image it is + its config
@@ -38,6 +39,7 @@ type sandbox struct {
 	Bundle    string    `json:"bundle"`
 	Snapshot  string    `json:"snapshot"` // s3 prefix of the latest checkpoint
 	Ports     []portMap `json:"ports"`    // podIP:host -> interior:container
+	Health    health    `json:"health"`   // restart policy + readiness probe + idle
 	RunscVer  string    `json:"runscVersion"`
 	CreatedAt string    `json:"createdAt"`
 }
@@ -56,6 +58,7 @@ func main() {
 		bucket: bucket,
 		podIP:  os.Getenv("SANDBOXD_POD_IP"), // set via downward API
 		sb:     map[string]*sandbox{},
+		hs:     map[string]*healthState{},
 	}
 	if bucket != "" {
 		st, err := newS3(context.Background(), bucket)
@@ -82,6 +85,8 @@ func main() {
 	s.reconcile()
 	// Background GC of orphaned on-disk artifacts.
 	go s.gcLoop(gcEvery)
+	// Supervisor: liveness/readiness/restart + idle detection.
+	go s.supervise(envDuration("SANDBOXD_SUPERVISE_INTERVAL", 10*time.Second))
 	// Stream nested gVisor (sentry/gofer) debug logs to stdout so they show up in
 	// `kubectl logs` (in addition to the /logs endpoint).
 	go s.runsc.tailToStdout()
@@ -93,6 +98,9 @@ func main() {
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.HandleFunc("/sandbox", s.handleDelete)      // DELETE ?sandboxId=
 	mux.HandleFunc("/sandboxes", s.handleList)      // GET : all tracked sandboxes
+	mux.HandleFunc("/suspend", s.handleSuspend)     // POST : checkpoint->S3->free worker
+	mux.HandleFunc("/reset", s.handleReset)         // POST : free worker WITHOUT checkpoint
+	mux.HandleFunc("/capacity", s.handleCapacity)   // GET : busy/idle for the scheduler
 	mux.HandleFunc("/logs", s.handleLogs)           // GET ?sandboxId= : nested gVisor logs
 	mux.HandleFunc("/metrics", s.handleMetrics)     // GET : basic counters
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
@@ -130,6 +138,7 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 		Env       []string  `json:"env"`
 		SandboxID string    `json:"sandboxId"`
 		Ports     []portMap `json:"ports"`
+		Health    health    `json:"health"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -202,7 +211,8 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 	st, _ := s.runsc.state(id)
 	lg("started, status=%s", st)
 	s.put(&sandbox{ID: id, Image: req.Image, Digest: ic.Digest, Bundle: bundle,
-		Ports: req.Ports, RunscVer: s.runsc.version(), CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+		Ports: req.Ports, Health: req.Health, RunscVer: s.runsc.version(),
+		CreatedAt: time.Now().UTC().Format(time.RFC3339)})
 	writeJSON(w, 200, map[string]any{"sandboxId": id, "status": st, "image": req.Image, "ports": req.Ports})
 }
 
@@ -275,6 +285,7 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		Snapshot     string    `json:"snapshot"`
 		RunscVersion string    `json:"runscVersion"`
 		Ports        []portMap `json:"ports"`
+		Health       health    `json:"health"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -376,7 +387,7 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	metrics.inc("restores")
 	lg("DONE in %s, status=%s", time.Since(tr), st)
 	s.put(&sandbox{ID: id, Image: req.Image, Digest: ic.Digest, Bundle: bundle,
-		Snapshot: req.Snapshot, Ports: req.Ports, RunscVer: s.runsc.version(),
+		Snapshot: req.Snapshot, Ports: req.Ports, Health: req.Health, RunscVer: s.runsc.version(),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339)})
 	writeJSON(w, 200, map[string]any{"sandboxId": id, "status": st, "restoredFrom": req.Snapshot, "ports": req.Ports})
 }
@@ -392,7 +403,100 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]string{"sandboxId": id, "status": st})
+	hs := s.healthState(id)
+	writeJSON(w, 200, map[string]any{"sandboxId": id, "status": st,
+		"ready": hs.ready, "idle": hs.idle, "restarts": hs.restarts})
+}
+
+// POST /suspend {sandboxId} — checkpoint to S3, then free the worker (delete +
+// cleanup). This is substrate's suspend-on-idle: state persists in S3, worker
+// becomes reusable. Compose of checkpoint + delete.
+func (s *server) handleSuspend(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SandboxID string `json:"sandboxId"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if err := validateID(req.SandboxID); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	sb := s.get(req.SandboxID)
+	if sb == nil {
+		writeErr(w, 404, "unknown sandbox")
+		return
+	}
+	if s.s3 == nil {
+		writeErr(w, 503, "s3 not configured")
+		return
+	}
+	lg := reqLogger(r, "suspend", req.SandboxID)
+	imgDir := s.imgDir(req.SandboxID)
+	os.MkdirAll(imgDir, 0o755)
+	if b, err := os.ReadFile(filepath.Join(sb.Bundle, "config.json")); err == nil {
+		os.WriteFile(filepath.Join(imgDir, "config.json"), b, 0o644)
+	}
+	if err := s.runsc.checkpoint(req.SandboxID, imgDir, false); err != nil {
+		lg("checkpoint FAILED: %v", err)
+		writeErr(w, 500, "checkpoint: "+err.Error())
+		return
+	}
+	snapID := fmt.Sprintf("snap-%d", time.Now().UnixNano())
+	prefix := fmt.Sprintf("sandboxes/%s/%s", req.SandboxID, snapID)
+	if err := s.s3.uploadDir(r.Context(), imgDir, prefix); err != nil {
+		lg("upload FAILED: %v", err)
+		writeErr(w, 502, "upload: "+err.Error())
+		return
+	}
+	// free the worker
+	s.runsc.delete(req.SandboxID)
+	if len(sb.Ports) > 0 {
+		teardownSandboxNet()
+	}
+	s.cleanupArtifacts(req.SandboxID)
+	s.forget(req.SandboxID)
+	metrics.inc("suspends")
+	lg("SUSPENDED: snapshot=%s, worker freed", prefix)
+	writeJSON(w, 200, map[string]any{"sandboxId": req.SandboxID, "snapshot": prefix,
+		"image": sb.Image, "suspended": true})
+}
+
+// POST /reset {sandboxId} — free the worker WITHOUT checkpointing (discard state).
+func (s *server) handleReset(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SandboxID string `json:"sandboxId"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if err := validateID(req.SandboxID); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	sb := s.get(req.SandboxID)
+	s.runsc.delete(req.SandboxID)
+	if sb != nil && len(sb.Ports) > 0 {
+		teardownSandboxNet()
+	}
+	s.cleanupArtifacts(req.SandboxID)
+	s.forget(req.SandboxID)
+	metrics.inc("resets")
+	writeJSON(w, 200, map[string]any{"sandboxId": req.SandboxID, "reset": true})
+}
+
+// GET /capacity — is this worker busy? (one sandbox per worker). The scheduler
+// uses this to find idle workers.
+func (s *server) handleCapacity(w http.ResponseWriter, r *http.Request) {
+	list := s.list()
+	busy := len(list) > 0
+	resp := map[string]any{"busy": busy, "count": len(list)}
+	if busy {
+		resp["sandboxId"] = list[0].ID
+		hs := s.healthState(list[0].ID)
+		resp["idle"] = hs.idle
+	}
+	writeJSON(w, 200, resp)
 }
 
 func (s *server) handleDelete(w http.ResponseWriter, r *http.Request) {
