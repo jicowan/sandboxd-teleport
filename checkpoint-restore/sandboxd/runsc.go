@@ -43,15 +43,19 @@ func (r *runscDriver) base() []string {
 	// --debug/--debug-log: capture the nested sentry/gofer logs (surfaced via /logs
 	//   and streamed to stdout).
 	// --directfs=false: directfs needs /proc/self/uid_map (absent nested).
-	return []string{
+	flags := []string{
 		"-root", r.root,
 		"--network=" + r.network,
 		"-overlay2=root:self",
 		"--directfs=false",
-		"--debug",
-		"--debug-log", r.debugDir + "/",
 		"--log", r.debugDir + "/runsc.log",
 	}
+	// --debug is EXTREMELY verbose (per-syscall trace) — it floods stdout and adds
+	// real overhead. Off by default; enable via SANDBOXD_DEBUG=1 when diagnosing.
+	if os.Getenv("SANDBOXD_DEBUG") == "1" {
+		flags = append(flags, "--debug", "--debug-log", r.debugDir+"/")
+	}
+	return flags
 }
 
 // runTimeout bounds a runsc call so a wedged/half-dead sandbox can't hang the
@@ -221,16 +225,30 @@ func (r *runscDriver) state(id string) (string, error) {
 	return st.Status, nil
 }
 
-// delete tears a sandbox down robustly: kill the container first (so the sandbox
-// process actually stops — `delete -force` alone can fail with "sandbox is still
-// running" when the container was checkpointed with --leave-running), then delete.
+// delete tears a sandbox down fast and robustly.
+//
+// The naive `runsc kill` + `delete -force` was slow (~5s) and error-prone: runsc
+// kill often reports "sandbox is not running" while the host runsc-gofer/
+// runsc-sandbox processes are STILL ALIVE in the container's cgroup, so
+// `delete -force` then spins ~5s retrying "removing cgroup: device or resource
+// busy" and finally FATALs. Fix: kill the whole cgroup directly via cgroup v2
+// `cgroup.kill` (reliably SIGKILLs every process in it, incl. the gofer/sentry),
+// wait briefly for the cgroup to drain, THEN delete.
+// delete mirrors substrate's teardown (cmd/ateom-gvisor cleanupContainersAfterCheckpoint):
+// call `runsc state` FIRST to let runsc sync its internal state with the kernel
+// ("Without this, runsc delete occasionally throws an error" / cgroup busy), THEN
+// `runsc delete -force`. The real fix for the cgroup-busy stalls is the child
+// reaper (see reapChildren): sandboxd is PID 1 in its container, so it must reap
+// the gofer/sentry's exited children or their zombies pin the cgroup.
 func (r *runscDriver) delete(id string) error {
-	// best-effort kill; ignore errors (already-stopped, unknown, etc.)
-	r.run("kill", id, "SIGKILL")
-	// give the sentry a moment to reap
-	time.Sleep(300 * time.Millisecond)
-	if _, se, err := r.run("delete", "-force", id); err != nil {
+	t0 := time.Now()
+	r.run("state", id) // best-effort state sync before delete (substrate pattern)
+	_, se, err := r.run("delete", "-force", id)
+	if err != nil {
 		return fmt.Errorf("delete: %v: %s", err, se)
+	}
+	if d := time.Since(t0); d > time.Second {
+		fmt.Fprintf(os.Stderr, "[runsc] delete %s took %s\n", id, d)
 	}
 	return nil
 }

@@ -52,6 +52,10 @@ func main() {
 	gcEvery := envDuration("SANDBOXD_GC_INTERVAL", 5*time.Minute)
 	os.MkdirAll(work, 0o755)
 
+	// Reap orphaned children (gofer/sentry) — sandboxd is PID 1; unreaped zombies
+	// pin container cgroups and make `runsc delete` stall/fail (substrate pattern).
+	startReaper()
+
 	s := &server{
 		work:   work,
 		runsc:  newRunsc(runscBin, filepath.Join(work, "rt")),
