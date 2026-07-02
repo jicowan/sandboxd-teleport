@@ -66,6 +66,12 @@ var defaultMounts = []map[string]any{
 		"options": []string{"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620"}},
 	{"destination": "/dev/shm", "type": "tmpfs", "source": "shm",
 		"options": []string{"nosuid", "noexec", "nodev", "mode=1777", "size=65536k"}},
+	// /tmp world-writable (mode 1777) — AIO's python-server runs as user gem(1000)
+	// and does os.makedirs('/tmp/aio-sandbox'); without a writable /tmp it fails
+	// with PermissionError and crash-loops. Real runtimes give containers a
+	// writable /tmp; our minimal spec must too.
+	{"destination": "/tmp", "type": "tmpfs", "source": "tmpfs",
+		"options": []string{"nosuid", "nodev", "mode=1777", "size=1g"}},
 	{"destination": "/dev/mqueue", "type": "mqueue", "source": "mqueue",
 		"options": []string{"nosuid", "noexec", "nodev"}},
 	{"destination": "/sys", "type": "sysfs", "source": "sysfs",
