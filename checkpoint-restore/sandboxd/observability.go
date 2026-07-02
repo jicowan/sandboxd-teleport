@@ -39,8 +39,13 @@ func withRequestLog(next http.Handler) http.Handler {
 					writeErr(sw, 500, fmt.Sprintf("internal error: %v", rec))
 				}
 			}
-			log.Printf("[req %s] %s %s -> %d (%s)", rid, r.Method, r.URL.Path, sw.code, time.Since(t0))
 			metrics.inc("requests")
+			// Don't spam the log with frequent liveness/readiness/metrics probes;
+			// still count them in metrics above.
+			if isProbe(r.URL.Path) {
+				return
+			}
+			log.Printf("[req %s] %s %s -> %d (%s)", rid, r.Method, r.URL.Path, sw.code, time.Since(t0))
 		}()
 		next.ServeHTTP(sw, r)
 	})
@@ -52,6 +57,10 @@ func reqLogger(r *http.Request, op, id string) func(string, ...any) {
 	return func(format string, args ...any) {
 		log.Printf("[req %s][%s %s] %s", rid, op, id, fmt.Sprintf(format, args...))
 	}
+}
+
+func isProbe(path string) bool {
+	return path == "/healthz" || path == "/version" || path == "/metrics"
 }
 
 type statusWriter struct {

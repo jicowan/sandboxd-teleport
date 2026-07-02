@@ -34,12 +34,16 @@ func ociSpec(args, env []string, cwd string, uid, gid int) map[string]any {
 		"hostname": "sandbox",
 		"mounts":   defaultMounts,
 		"linux": map[string]any{
+			// NOTE: NO "network" namespace. With runsc --network=host the sandbox
+			// must INHERIT the worker pod's netns so a server it binds is reachable
+			// at the worker pod IP. Declaring a fresh network namespace here would
+			// isolate it into an empty netns (bind goes nowhere). pid/ipc/uts/mount
+			// stay isolated.
 			"namespaces": []map[string]any{
 				{"type": "pid"},
 				{"type": "ipc"},
 				{"type": "uts"},
 				{"type": "mount"},
-				{"type": "network"},
 			},
 		},
 	}

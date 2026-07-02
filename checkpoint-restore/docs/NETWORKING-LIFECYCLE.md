@@ -49,6 +49,29 @@ Reconnect model (sockets do NOT survive C/R — proven for gVisor & substrate).
 - **On restore, re-establish the SAME interior IP + proxy** so the address a
   client dials is stable across teleport (only the session reconnects).
 
+### EMPIRICAL FINDING (2026-07-02) — host networking is incompatible with C/R
+
+Tested both halves:
+- **`--network=host` gives a working data path** ✅ — with the OCI spec NOT
+  declaring a `network` namespace (so the sandbox inherits the worker pod's
+  netns), a python `http.server` bound `:8080` inside the sandbox was reachable
+  from another pod at `worker-pod-IP:8080` (got the real directory listing).
+- **BUT `--network=host` BREAKS checkpoint** ❌:
+  `checkpoint not supported when using hostinet`. hostinet uses host sockets the
+  sentry can't serialize.
+
+→ **Host networking and teleport are mutually exclusive.** The MVP must use
+`--network=sandbox` (gVisor's OWN netstack, which IS checkpointable) and reach
+into it another way. Options to reach a `sandbox`-netstack workload:
+  (a) **veth pair** worker-netns ↔ sandbox interior netns + stable interior IP
+      (substrate's model) — sandboxd routes worker-pod-IP:hostport → interior IP.
+  (b) **gVisor port-forwarding**: `runsc port-forward` / a gofer-mediated proxy.
+  (c) sandboxd dials the sandbox via the control socket / a userspace hookup.
+Decision: pursue (a) — it's the proven-portable substrate design and survives
+restore (fresh veth each time, fixed interior IP). Host-net stays available as a
+NON-checkpointable "fast path" option (env SANDBOXD_NETWORK=host) for workloads
+that don't need teleport.
+
 ### Constraints / notes
 - gVisor `--network=none` was used to avoid netns setup during the C/R spikes;
   adding networking must not break checkpoint/restore (netstack IS

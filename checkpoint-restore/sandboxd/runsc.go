@@ -18,24 +18,33 @@ type runscDriver struct {
 	bin      string // path to the pinned runsc binary
 	root     string // runsc state -root (owned by this worker)
 	debugDir string // where sentry/gofer --debug-log files land
+	network  string // runsc --network mode: "host" | "sandbox" | "none"
 }
 
 func newRunsc(bin, root string) *runscDriver {
 	os.MkdirAll(root, 0o755)
-	d := &runscDriver{bin: bin, root: root, debugDir: filepath.Join(filepath.Dir(root), "gvisor-logs")}
+	d := &runscDriver{
+		bin:      bin,
+		root:     root,
+		debugDir: filepath.Join(filepath.Dir(root), "gvisor-logs"),
+		network:  envOr("SANDBOXD_NETWORK", "host"),
+	}
 	os.MkdirAll(d.debugDir, 0o755)
 	return d
 }
 
 func (r *runscDriver) base() []string {
-	// --debug + --debug-log captures the SENTRY/GOFER logs (the nested gVisor
-	// container's own output) into files we can surface in the parent.
-	// --directfs=false: directfs needs /proc/self/uid_map, which isn't available
-	// in this nested/detached context ("failed to modify spec for directfs") —
-	// disable it so restore can complete. Falls back to gofer-mediated fs.
+	// --network=host: the sandbox shares the WORKER POD's netns, so a server the
+	//   workload binds on 0.0.0.0:PORT is reachable at the worker pod IP:PORT (the
+	//   pod has a routable CNI IP). One sandbox per worker => no port collisions.
+	//   This is the MVP data path; --network=sandbox + a proxy is the more-isolated
+	//   evolution (see NETWORKING-LIFECYCLE.md).
+	// --debug/--debug-log: capture the nested sentry/gofer logs (surfaced via /logs
+	//   and streamed to stdout).
+	// --directfs=false: directfs needs /proc/self/uid_map (absent nested).
 	return []string{
 		"-root", r.root,
-		"--network=none",
+		"--network=" + r.network,
 		"-overlay2=root:self",
 		"--directfs=false",
 		"--debug",
@@ -200,9 +209,15 @@ func (r *runscDriver) state(id string) (string, error) {
 	return st.Status, nil
 }
 
+// delete tears a sandbox down robustly: kill the container first (so the sandbox
+// process actually stops — `delete -force` alone can fail with "sandbox is still
+// running" when the container was checkpointed with --leave-running), then delete.
 func (r *runscDriver) delete(id string) error {
-	_, se, err := r.run("delete", "-force", id)
-	if err != nil {
+	// best-effort kill; ignore errors (already-stopped, unknown, etc.)
+	r.run("kill", id, "SIGKILL")
+	// give the sentry a moment to reap
+	time.Sleep(300 * time.Millisecond)
+	if _, se, err := r.run("delete", "-force", id); err != nil {
 		return fmt.Errorf("delete: %v: %s", err, se)
 	}
 	return nil
