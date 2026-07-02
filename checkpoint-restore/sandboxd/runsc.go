@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 // runscDriver drives the pinned runsc binary against a per-sandboxd state root.
@@ -80,6 +81,45 @@ func (r *runscDriver) runDetached(logPath string, args ...string) error {
 		return fmt.Errorf("%v; gvisor logs: %s", err, r.tailGvisorLogs(4096))
 	}
 	return nil
+}
+
+// tailToStdout streams NEW content from the gVisor debug-log files to stdout, so
+// the nested sentry/gofer logs appear in `kubectl logs` on the parent. It runs in
+// a background goroutine, decoupled from the exec'd runsc processes (so it can't
+// cause the fd-inheritance blocking that forced detached runs to use /dev/null).
+func (r *runscDriver) tailToStdout() {
+	offsets := map[string]int64{}
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		entries, _ := os.ReadDir(r.debugDir)
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			p := filepath.Join(r.debugDir, e.Name())
+			fi, err := os.Stat(p)
+			if err != nil {
+				continue
+			}
+			off := offsets[e.Name()]
+			if fi.Size() <= off {
+				continue
+			}
+			f, err := os.Open(p)
+			if err != nil {
+				continue
+			}
+			f.Seek(off, 0)
+			buf := make([]byte, fi.Size()-off)
+			n, _ := f.Read(buf)
+			f.Close()
+			offsets[e.Name()] = fi.Size()
+			if n > 0 {
+				fmt.Fprintf(os.Stdout, "[gvisor %s] %s", e.Name(), string(buf[:n]))
+			}
+		}
+	}
 }
 
 // tailGvisorLogs returns the last maxBytes of the sentry/gofer debug logs — the
