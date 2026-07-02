@@ -509,3 +509,59 @@ Candidate fixes (next session, pick one):
 3. Fall back to the (proven-stable) flatten-to-dir rootfs for correctness and
    keep containerd only as the pull/cache source.
 This is the #1 thing to fix — it gates reliable run and teleport.
+
+### RESEARCH → ROOT CAUSE + FIX for the filestore race (2026-07-02)
+
+Researched web + gVisor source (runsc/container, runsc/boot, runsc/cmd/gofer,
+sandboxsetup) + the containerd runsc shim + substrate. Findings converged:
+
+**Root cause.** With `--overlay2=root:self`, runsc writes the overlay upper's
+backing file `.gvisor.filestore.<sandboxID>` INSIDE `spec.Root.Path` (the
+rootfs). Critically it is created by the **runsc PARENT process reaching into the
+GOFER's mount namespace** at `/proc/<goferPid>/root/<rootfs>/.gvisor.filestore…`
+(gVisor PR #11304 / issue #9834 — done so filestore FDs don't pin host mounts).
+The gofer's mount namespace is a **COPY taken at clone() time**, root mounted
+`MS_SLAVE`. So our containerd overlay snapshot (mounted in sandboxd's ns) is only
+visible in the gofer's copy if it was mounted BEFORE the gofer forked AND on a
+SHARED (propagating) mount. Ours raced the fork / wasn't propagating → the
+`open(O_CREAT)` parent dir is missing → ENOENT (worst right after a fresh unpack).
+
+**Fix (option c — confirmed best): move the filestore OUT of the rootfs** via
+`--overlay2=root:dir=/abs/path`. runsc writes the overlay upper to a plain host
+dir we control, never into the containerd overlay, so the filestore open no
+longer depends on the snapshot being propagated into the gofer ns at the exact
+instant. Syntax (runsc/config): `--overlay2={root|all}:{memory|self|dir=/abs}[,size=N]`;
+`dir=` must be absolute. `--directfs`/`--root` are unrelated to the filestore.
+
+**Also keep mount hardening:** carrying mount rshared (MS_SHARED|MS_REC) +
+rootfs-populated probe before exec — fixes propagation/ordering; `dir=` removes
+the write-into-overlay coupling. Both together = robust.
+
+**Bonus:** overlay-on-overlay is NORMAL (standard containerd+runsc runs `self`
+on the overlayfs `merged` snapshot, issue #12476) — so the containerd-snapshot
+rootfs is the RIGHT approach; we just used the wrong medium.
+
+Sources: runsc/container/container.go (createGoferFilestores /
+createGoferFilestoreInSelf), runsc/boot/vfs.go (SelfFilestorePath),
+runsc/cmd/sandboxsetup/gofer_mount.go (MS_SLAVE), PR #11304, issues #9834/#12476;
+runsc/config (overlay2 dir=); containerd runtime-v2 shim pre-mount.
+
+**IMPLEMENTED: `--overlay2=root:dir=<work>/overlays/<id>` per sandbox.**
+
+### FIX VERIFIED ✅ (2026-07-02, v34): --overlay2=root:dir=<work>/overlays/<id>
+
+Implemented option (c). runsc's `base()` now emits
+`-overlay2=root:dir=<work>/overlays/<id>` (per-sandbox, threaded through all
+per-container ops: run/checkpoint/restore/state/delete so it's consistent); the
+dir is created before use and removed on delete. Kept MS_SHARED + the writability
+probe.
+
+Results:
+- **Reliability: 6/6 fresh first-attempt runs succeeded** (was intermittent
+  ~1-2/4 with root:self). Restore also succeeded on the FIRST attempt.
+- **Correctness: checkpoint/restore state continuity intact** — busybox counter
+  checkpointed on A, restored on B, /state.log continued (c=8→…→13). The overlay
+  upper living in the external dir= is captured+shipped+restored correctly.
+
+The intermittent gofer-filestore race is RESOLVED. This was the #1 known issue;
+run + teleport are now reliable.

@@ -34,24 +34,38 @@ func newRunsc(bin, root string) *runscDriver {
 	return d
 }
 
-func (r *runscDriver) base() []string {
-	// --network=host: the sandbox shares the WORKER POD's netns, so a server the
-	//   workload binds on 0.0.0.0:PORT is reachable at the worker pod IP:PORT (the
-	//   pod has a routable CNI IP). One sandbox per worker => no port collisions.
-	//   This is the MVP data path; --network=sandbox + a proxy is the more-isolated
-	//   evolution (see NETWORKING-LIFECYCLE.md).
-	// --debug/--debug-log: capture the nested sentry/gofer logs (surfaced via /logs
-	//   and streamed to stdout).
+// overlayDir returns the per-sandbox host directory that backs runsc's writable
+// overlay upper. See base(): we use --overlay2=root:dir=<this> instead of
+// root:self so runsc does NOT write .gvisor.filestore INTO the (containerd
+// overlay) rootfs — which caused the intermittent "filestore file ... no such
+// file or directory" race (the file is created by the runsc parent into the
+// gofer's mount-ns copy of the rootfs, which may not have the snapshot mount
+// propagated yet). A stable plain dir sidesteps that entirely.
+func (r *runscDriver) overlayDir(id string) string {
+	return filepath.Join(filepath.Dir(r.root), "overlays", id)
+}
+
+func (r *runscDriver) base(id string) []string {
+	// -overlay2=root:dir=<per-sandbox host dir>: writable upper in a plain dir
+	//   OUTSIDE the rootfs (see overlayDir). MUST be identical across create/
+	//   checkpoint/restore/state/delete for a given container.
+	// --network: sandbox netstack (checkpointable) via the veth/interior-netns.
 	// --directfs=false: directfs needs /proc/self/uid_map (absent nested).
+	overlay := "root:self"
+	if id != "" {
+		od := r.overlayDir(id)
+		os.MkdirAll(od, 0o755)
+		overlay = "root:dir=" + od
+	}
 	flags := []string{
 		"-root", r.root,
 		"--network=" + r.network,
-		"-overlay2=root:self",
+		"-overlay2=" + overlay,
 		"--directfs=false",
 		"--log", r.debugDir + "/runsc.log",
 	}
-	// --debug is EXTREMELY verbose (per-syscall trace) — it floods stdout and adds
-	// real overhead. Off by default; enable via SANDBOXD_DEBUG=1 when diagnosing.
+	// --debug is EXTREMELY verbose (per-syscall trace) — floods stdout + overhead.
+	// Off by default; enable via SANDBOXD_DEBUG=1 when diagnosing.
 	if os.Getenv("SANDBOXD_DEBUG") == "1" {
 		flags = append(flags, "--debug", "--debug-log", r.debugDir+"/")
 	}
@@ -62,10 +76,12 @@ func (r *runscDriver) base() []string {
 // HTTP handler forever. On timeout the process (and its group) is killed.
 const runTimeout = 30 * time.Second
 
-func (r *runscDriver) run(args ...string) (string, string, error) {
+// run executes a per-container runsc subcommand. id is the container id (used to
+// select its overlay dir); it must match the id in args.
+func (r *runscDriver) run(id string, args ...string) (string, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
 	defer cancel()
-	full := append(r.base(), args...)
+	full := append(r.base(id), args...)
 	cmd := exec.CommandContext(ctx, r.bin, full...)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
@@ -91,8 +107,8 @@ func (r *runscDriver) run(args ...string) (string, string, error) {
 // /dev/null and rely on runsc --debug-log FILES (surfaced via /logs) for the
 // nested container's own logs. cmd.Wait then returns once the foreground runsc
 // forks the detached child.
-func (r *runscDriver) runDetached(logPath string, args ...string) error {
-	full := append(r.base(), args...)
+func (r *runscDriver) runDetached(id, logPath string, args ...string) error {
+	full := append(r.base(id), args...)
 	cmd := exec.Command(r.bin, full...)
 	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
@@ -175,11 +191,7 @@ func (r *runscDriver) tailGvisorLogs(maxBytes int64) string {
 func (r *runscDriver) createStart(id, bundle string) error {
 	pid := filepath.Join(bundle, id+".pid")
 	log := filepath.Join(bundle, id+".run.log")
-	// Retry on the transient "filestore file ... no such file or directory" —
-	// right after a fresh containerd unpack, the overlay rootfs mount is briefly
-	// not visible/usable in runsc's freshly-forked gofer mount namespace; a retry
-	// (same mount, moments later) succeeds.
-	return r.runDetached(log, "run", "-bundle", bundle, "-pid-file", pid, "-detach", id)
+	return r.runDetached(id, log, "run", "-bundle", bundle, "-pid-file", pid, "-detach", id)
 }
 
 
@@ -198,7 +210,7 @@ func (r *runscDriver) checkpoint(id, imageDir string, leaveRunning, compress boo
 		args = append(args, "-compression=flate-best-speed", "-exclude-committed-zero-pages")
 	}
 	args = append(args, id)
-	if _, se, err := r.run(args...); err != nil {
+	if _, se, err := r.run(id, args...); err != nil {
 		return fmt.Errorf("checkpoint: %v: %s", err, se)
 	}
 	return nil
@@ -212,13 +224,13 @@ func (r *runscDriver) checkpoint(id, imageDir string, leaveRunning, compress boo
 func (r *runscDriver) restore(id, bundle, imageDir string) error {
 	pid := filepath.Join(bundle, id+".pid")
 	log := filepath.Join(bundle, id+".restore.log")
-	return r.runDetached(log, "restore", "-bundle", bundle, "-image-path", imageDir,
+	return r.runDetached(id, log, "restore", "-bundle", bundle, "-image-path", imageDir,
 		"-pid-file", pid, "-detach", id)
 }
 
 // State returns the container status ("running", "stopped", ...).
 func (r *runscDriver) state(id string) (string, error) {
-	out, se, err := r.run("state", id)
+	out, se, err := r.run(id, "state", id)
 	if err != nil {
 		return "", fmt.Errorf("state: %v: %s", err, se)
 	}
@@ -248,8 +260,9 @@ func (r *runscDriver) state(id string) (string, error) {
 // the gofer/sentry's exited children or their zombies pin the cgroup.
 func (r *runscDriver) delete(id string) error {
 	t0 := time.Now()
-	r.run("state", id) // best-effort state sync before delete (substrate pattern)
-	_, se, err := r.run("delete", "-force", id)
+	r.run(id, "state", id) // best-effort state sync before delete (substrate pattern)
+	_, se, err := r.run(id, "delete", "-force", id)
+	os.RemoveAll(r.overlayDir(id)) // drop the per-sandbox overlay upper dir
 	if err != nil {
 		return fmt.Errorf("delete: %v: %s", err, se)
 	}
