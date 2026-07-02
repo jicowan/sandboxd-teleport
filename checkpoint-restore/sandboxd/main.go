@@ -19,24 +19,27 @@ import (
 )
 
 type server struct {
-	work   string // base workdir (bundles, runsc root, image staging)
-	runsc  *runscDriver
-	s3     *s3Store
-	bucket string
-	mu     sync.Mutex
-	sb     map[string]*sandbox // sandboxId -> metadata
+	work    string // base workdir (bundles, runsc root, image staging)
+	runsc   *runscDriver
+	s3      *s3Store
+	bucket  string
+	podIP   string // worker pod's routable IP (for nftables DNAT target)
+	netns   bool   // whether the checkpointable veth/interior-netns path is active
+	mu      sync.Mutex
+	sb      map[string]*sandbox // sandboxId -> metadata
 }
 
 // sandbox is the metadata needed to teleport: which image it is + its config
-// digest + latest snapshot URI. Persisted to <work>/meta/<id>.json (see state.go).
+// digest + latest snapshot URI + port mappings. Persisted to <work>/meta/<id>.json.
 type sandbox struct {
-	ID        string `json:"id"`
-	Image     string `json:"image"`
-	Digest    string `json:"digest"`
-	Bundle    string `json:"bundle"`
-	Snapshot  string `json:"snapshot"` // s3 prefix of the latest checkpoint
-	RunscVer  string `json:"runscVersion"`
-	CreatedAt string `json:"createdAt"`
+	ID        string    `json:"id"`
+	Image     string    `json:"image"`
+	Digest    string    `json:"digest"`
+	Bundle    string    `json:"bundle"`
+	Snapshot  string    `json:"snapshot"` // s3 prefix of the latest checkpoint
+	Ports     []portMap `json:"ports"`    // podIP:host -> interior:container
+	RunscVer  string    `json:"runscVersion"`
+	CreatedAt string    `json:"createdAt"`
 }
 
 func main() {
@@ -51,6 +54,7 @@ func main() {
 		work:   work,
 		runsc:  newRunsc(runscBin, filepath.Join(work, "rt")),
 		bucket: bucket,
+		podIP:  os.Getenv("SANDBOXD_POD_IP"), // set via downward API
 		sb:     map[string]*sandbox{},
 	}
 	if bucket != "" {
@@ -60,6 +64,18 @@ func main() {
 		} else {
 			s.s3 = st
 		}
+	}
+	// Networking: only the "sandbox" (netstack) mode supports the checkpointable
+	// veth/interior-netns data path. With host-net there's no netns to build.
+	if s.runsc.network == "sandbox" && s.podIP != "" {
+		if err := ensureInteriorNetNS(); err != nil {
+			log.Printf("WARN: interior netns setup failed (no sandbox networking): %v", err)
+		} else {
+			s.netns = true
+			log.Printf("networking: interior netns ready (podIP=%s, interiorIP=%s)", s.podIP, interiorIP)
+		}
+	} else {
+		log.Printf("networking: sandbox data path disabled (network=%s podIP=%q)", s.runsc.network, s.podIP)
 	}
 
 	// Reconcile in-memory state from persisted metadata + runsc on startup.
@@ -109,10 +125,11 @@ func main() {
 // POST /run {image, cmd?, env?, sandboxId?}
 func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Image     string   `json:"image"`
-		Cmd       []string `json:"cmd"`
-		Env       []string `json:"env"`
-		SandboxID string   `json:"sandboxId"`
+		Image     string    `json:"image"`
+		Cmd       []string  `json:"cmd"`
+		Env       []string  `json:"env"`
+		SandboxID string    `json:"sandboxId"`
+		Ports     []portMap `json:"ports"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -144,7 +161,31 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lg("pulled+flattened in %s (digest=%s)", time.Since(t0), ic.Digest)
-	if err := writeOCISpec(bundle, ic, req.Cmd, req.Env); err != nil {
+	// Networking: if ports requested + sandbox netstack path available, build the
+	// veth/interior-netns and point the spec at it. Default host-port = container-port.
+	netnsPath := ""
+	if len(req.Ports) > 0 {
+		if !s.netns {
+			s.cleanupArtifacts(id)
+			writeErr(w, 400, "ports requested but sandbox networking unavailable (need network=sandbox + SANDBOXD_POD_IP)")
+			return
+		}
+		for i := range req.Ports {
+			if req.Ports[i].Host == 0 {
+				req.Ports[i].Host = req.Ports[i].Container
+			}
+		}
+		if err := setupSandboxNet(s.podIP, req.Ports); err != nil {
+			lg("network setup FAILED: %v", err)
+			s.cleanupArtifacts(id)
+			writeErr(w, 500, "network: "+err.Error())
+			return
+		}
+		netnsPath = interiorNetNSPath
+		lg("network up: %s:%v -> %s", s.podIP, req.Ports, interiorIP)
+	}
+	if err := writeOCISpec(bundle, ic, req.Cmd, req.Env, netnsPath); err != nil {
+		teardownSandboxNet()
 		s.cleanupArtifacts(id)
 		writeErr(w, 500, "spec: "+err.Error())
 		return
@@ -153,6 +194,7 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 	if err := s.runsc.createStart(id, bundle); err != nil {
 		lg("runsc FAILED: %v", err)
 		s.runsc.delete(id) // clear any partial runsc state
+		teardownSandboxNet()
 		s.cleanupArtifacts(id)
 		writeErr(w, 500, "runsc: "+err.Error())
 		return
@@ -160,8 +202,8 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 	st, _ := s.runsc.state(id)
 	lg("started, status=%s", st)
 	s.put(&sandbox{ID: id, Image: req.Image, Digest: ic.Digest, Bundle: bundle,
-		RunscVer: s.runsc.version(), CreatedAt: time.Now().UTC().Format(time.RFC3339)})
-	writeJSON(w, 200, map[string]string{"sandboxId": id, "status": st, "image": req.Image})
+		Ports: req.Ports, RunscVer: s.runsc.version(), CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	writeJSON(w, 200, map[string]any{"sandboxId": id, "status": st, "image": req.Image, "ports": req.Ports})
 }
 
 // POST /checkpoint {sandboxId, leaveRunning?}
@@ -214,6 +256,11 @@ func (s *server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	sb.Snapshot = prefix
 	s.put(sb) // persist updated snapshot ref
+	// If not leaving it running, tear down the veth/nftables (like substrate does
+	// after checkpoint). If leaveRunning, keep networking so it stays reachable.
+	if !req.LeaveRunning && len(sb.Ports) > 0 {
+		teardownSandboxNet()
+	}
 	metrics.inc("checkpoints")
 	lg("DONE: snapshot=%s uploaded in %s", prefix, time.Since(tu))
 	writeJSON(w, 200, map[string]any{"sandboxId": req.SandboxID, "snapshot": prefix,
@@ -223,10 +270,11 @@ func (s *server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 // POST /restore {sandboxId, image, snapshot, runscVersion?}
 func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SandboxID    string `json:"sandboxId"`
-		Image        string `json:"image"`
-		Snapshot     string `json:"snapshot"`
-		RunscVersion string `json:"runscVersion"`
+		SandboxID    string    `json:"sandboxId"`
+		Image        string    `json:"image"`
+		Snapshot     string    `json:"snapshot"`
+		RunscVersion string    `json:"runscVersion"`
+		Ports        []portMap `json:"ports"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -275,6 +323,27 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lg("downloaded checkpoint (%d bytes) in %s", dirSize(imgDir), time.Since(td))
+	// Re-establish networking with the SAME interior IP so the restored sandbox is
+	// reachable at the same podIP:hostPort (only the session reconnects).
+	if len(req.Ports) > 0 {
+		if !s.netns {
+			s.cleanupArtifacts(id)
+			writeErr(w, 400, "ports requested but sandbox networking unavailable")
+			return
+		}
+		for i := range req.Ports {
+			if req.Ports[i].Host == 0 {
+				req.Ports[i].Host = req.Ports[i].Container
+			}
+		}
+		if err := setupSandboxNet(s.podIP, req.Ports); err != nil {
+			lg("network setup FAILED: %v", err)
+			s.cleanupArtifacts(id)
+			writeErr(w, 500, "network: "+err.Error())
+			return
+		}
+		lg("network re-established: %s:%v -> %s", s.podIP, req.Ports, interiorIP)
+	}
 	// Use the EXACT config.json the checkpoint was made with; move it out of imgDir
 	// (runsc would treat a stray file there as an image file).
 	cfgSrc := filepath.Join(imgDir, "config.json")
@@ -284,7 +353,11 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		lg("using original spec from snapshot")
 	} else {
 		lg("WARN: no config.json in snapshot, rebuilding spec: %v", err)
-		if err := writeOCISpec(bundle, ic, nil, nil); err != nil {
+		netnsPath := ""
+		if len(req.Ports) > 0 {
+			netnsPath = interiorNetNSPath
+		}
+		if err := writeOCISpec(bundle, ic, nil, nil, netnsPath); err != nil {
 			s.cleanupArtifacts(id)
 			writeErr(w, 500, "spec: "+err.Error())
 			return
@@ -294,6 +367,7 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	if err := s.runsc.restore(id, bundle, imgDir); err != nil {
 		lg("runsc restore FAILED: %v", err)
 		s.runsc.delete(id)
+		teardownSandboxNet()
 		s.cleanupArtifacts(id)
 		writeErr(w, 500, err.Error())
 		return
@@ -302,9 +376,9 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	metrics.inc("restores")
 	lg("DONE in %s, status=%s", time.Since(tr), st)
 	s.put(&sandbox{ID: id, Image: req.Image, Digest: ic.Digest, Bundle: bundle,
-		Snapshot: req.Snapshot, RunscVer: s.runsc.version(),
+		Snapshot: req.Snapshot, Ports: req.Ports, RunscVer: s.runsc.version(),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339)})
-	writeJSON(w, 200, map[string]string{"sandboxId": id, "status": st, "restoredFrom": req.Snapshot})
+	writeJSON(w, 200, map[string]any{"sandboxId": id, "status": st, "restoredFrom": req.Snapshot, "ports": req.Ports})
 }
 
 func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -327,9 +401,12 @@ func (s *server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	// best-effort delete of runsc state, then artifacts + metadata
+	// best-effort delete of runsc state, then network, artifacts + metadata
 	if err := s.runsc.delete(id); err != nil {
 		reqLogger(r, "delete", id)("runsc delete: %v (continuing cleanup)", err)
+	}
+	if sb := s.get(id); sb != nil && len(sb.Ports) > 0 {
+		teardownSandboxNet()
 	}
 	s.cleanupArtifacts(id)
 	s.forget(id)

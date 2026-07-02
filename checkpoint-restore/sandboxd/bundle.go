@@ -124,7 +124,7 @@ func extractImage(img v1.Image, dest string) error {
 //   - root.readonly MUST be false (runsc spec defaults true -> workload can't write)
 //   - process.args = entrypoint+cmd (or user override)
 //   - essential mounts for localhost/DNS/shm
-func writeOCISpec(bundle string, ic *imageConfig, cmdOverride, envOverride []string) error {
+func writeOCISpec(bundle string, ic *imageConfig, cmdOverride, envOverride []string, netnsPath string) error {
 	args := append(append([]string{}, ic.Entrypoint...), ic.Cmd...)
 	if len(cmdOverride) > 0 {
 		args = cmdOverride
@@ -139,7 +139,7 @@ func writeOCISpec(bundle string, ic *imageConfig, cmdOverride, envOverride []str
 	env = append(env, envOverride...)
 
 	uid, gid := 0, 0
-	spec := ociSpec(args, env, firstNonEmpty(ic.WorkingDir, "/"), uid, gid)
+	spec := ociSpec(args, env, firstNonEmpty(ic.WorkingDir, "/"), uid, gid, netnsPath)
 	b, err := json.MarshalIndent(spec, "", "  ")
 	if err != nil {
 		return err

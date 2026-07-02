@@ -72,6 +72,48 @@ restore (fresh veth each time, fixed interior IP). Host-net stays available as a
 NON-checkpointable "fast path" option (env SANDBOXD_NETWORK=host) for workloads
 that don't need teleport.
 
+### SUBSTRATE'S MECHANISM (extracted from source; what we reimplement)
+
+Pure kernel networking — **veth + nftables, NO proxy, NO port-forward**. Survives
+C/R because the interior netns is referenced by PATH in the OCI spec (not
+`--network=host`), the IP is fixed, and the veth is rebuilt fresh each restore.
+
+- **Interior netns**: `netns.NewNamed("ateom:<podUID>")` (vishvananda/netns) —
+  persistent per worker, reused across activations. Bind-mounted at
+  `/run/netns/<name>`.
+- **veth pair** (vishvananda/netlink): host end `ateom0` stays in the POD netns
+  @ `169.254.17.1/30`; peer moved into the interior netns
+  (`netlink.LinkSetNsFd`), renamed `eth0`, @ `169.254.17.2/30`, default route via
+  `.1`. `/30` point-to-point.
+- **OCI spec**: `Linux.Namespaces[] {type: network, path: /run/netns/<name>}` —
+  runsc joins that netns (NO `--network` CLI flag; NOT host). gVisor reads eth0's
+  addr/routes from the netns.
+- **nftables (google/nftables), in the POD netns** — table `ateom_actor`:
+  - PREROUTING DNAT: `podIP:PORT` → `169.254.17.2:PORT` (inbound).
+  - POSTROUTING MASQUERADE: src `169.254.17.2` → podIP (egress).
+  - FORWARD ACCEPT.
+- **`/proc/sys/net/ipv4/ip_forward=1`** in the pod netns (route between ateom0 and
+  the pod's eth0).
+- **Data path**: request → podIP:PORT → DNAT → ateom0 → veth → interior eth0 →
+  gVisor injects into guest. No userspace hop.
+- **C/R**: network NOT set up during checkpoint; torn down after; **re-setup
+  (fresh veth) on restore**; interior netns reused; fixed IP → survives.
+
+### sandboxd implementation plan (mirror the above)
+
+Go deps: `vishvananda/netns`, `vishvananda/netlink`, `google/nftables`.
+1. On sandboxd start (or first /run): create the interior netns once
+   (`sbx-net`), enable ip_forward in the pod netns.
+2. `/run` (+ `ports`): create veth (`sbx0` ↔ peer→`eth0` in interior netns @
+   .2/.1), set OCI spec network namespace `path` = the interior netns, install
+   nftables DNAT podIP:hostPort→169.254.17.2:containerPort + masquerade +
+   forward, runsc run (netns via spec, no --network=host).
+3. `/checkpoint`: checkpoint (netstack IS checkpointable now), then tear down the
+   veth (keep nftables? — rebuild on restore for cleanliness).
+4. `/restore`: re-create veth into the (reused) interior netns, re-install
+   nftables, restore. Same interior IP → reachable at the same podIP:hostPort.
+5. record port map in metadata; expose in /status + /sandboxes.
+
 ### Constraints / notes
 - gVisor `--network=none` was used to avoid netns setup during the C/R spikes;
   adding networking must not break checkpoint/restore (netstack IS

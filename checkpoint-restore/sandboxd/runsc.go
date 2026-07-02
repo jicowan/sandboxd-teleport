@@ -27,7 +27,7 @@ func newRunsc(bin, root string) *runscDriver {
 		bin:      bin,
 		root:     root,
 		debugDir: filepath.Join(filepath.Dir(root), "gvisor-logs"),
-		network:  envOr("SANDBOXD_NETWORK", "host"),
+		network:  envOr("SANDBOXD_NETWORK", "sandbox"),
 	}
 	os.MkdirAll(d.debugDir, 0o755)
 	return d

@@ -13,7 +13,20 @@ func mutateExtract(img v1.Image) io.ReadCloser { return mutate.Extract(img) }
 // the full runtime-spec module) that runsc accepts, with the corrections proven
 // necessary in the spikes: writable root, standard namespaces/mounts, no
 // host-specific bind mounts.
-func ociSpec(args, env []string, cwd string, uid, gid int) map[string]any {
+//
+// netnsPath: if non-empty, the sandbox JOINS this network namespace (the interior
+// netns with the veth) — this is the checkpointable "sandbox" netstack path. If
+// empty, no network namespace is declared (host-net inherits the pod netns).
+func ociSpec(args, env []string, cwd string, uid, gid int, netnsPath string) map[string]any {
+	namespaces := []map[string]any{
+		{"type": "pid"},
+		{"type": "ipc"},
+		{"type": "uts"},
+		{"type": "mount"},
+	}
+	if netnsPath != "" {
+		namespaces = append(namespaces, map[string]any{"type": "network", "path": netnsPath})
+	}
 	return map[string]any{
 		"ociVersion": "1.2.0",
 		"process": map[string]any{
@@ -34,17 +47,7 @@ func ociSpec(args, env []string, cwd string, uid, gid int) map[string]any {
 		"hostname": "sandbox",
 		"mounts":   defaultMounts,
 		"linux": map[string]any{
-			// NOTE: NO "network" namespace. With runsc --network=host the sandbox
-			// must INHERIT the worker pod's netns so a server it binds is reachable
-			// at the worker pod IP. Declaring a fresh network namespace here would
-			// isolate it into an empty netns (bind goes nowhere). pid/ipc/uts/mount
-			// stay isolated.
-			"namespaces": []map[string]any{
-				{"type": "pid"},
-				{"type": "ipc"},
-				{"type": "uts"},
-				{"type": "mount"},
-			},
+			"namespaces": namespaces,
 		},
 	}
 }
