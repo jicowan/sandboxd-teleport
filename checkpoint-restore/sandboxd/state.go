@@ -11,6 +11,18 @@ import (
 
 func bgCtx() context.Context { return context.Background() }
 
+// opCtx returns a background context with a generous deadline for long S3
+// operations. It is deliberately NOT tied to the HTTP request context: a client
+// timeout/disconnect must not cancel an in-flight checkpoint upload or restore
+// download (we hit "context canceled" mid-790MB download otherwise).
+func opCtx() context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	// fire cancel after the deadline to release the timer without tying it to the
+	// HTTP request; the op completes well within 15m.
+	time.AfterFunc(15*time.Minute, cancel)
+	return ctx
+}
+
 // imgDir is the per-sandbox checkpoint image staging dir.
 func (s *server) imgDir(id string) string { return filepath.Join(s.work, "img", id) }
 

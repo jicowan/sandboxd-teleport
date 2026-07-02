@@ -267,7 +267,7 @@ func (s *server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	prefix := fmt.Sprintf("sandboxes/%s/%s", req.SandboxID, snapID)
 	lg("uploading %d bytes -> s3://%s/%s", sz, s.bucket, prefix)
 	tu := time.Now()
-	if err := s.s3.uploadDir(r.Context(), imgDir, prefix); err != nil {
+	if err := s.s3.uploadDir(opCtx(), imgDir, prefix); err != nil {
 		lg("S3 upload FAILED: %v", err)
 		writeErr(w, 502, "upload: "+err.Error())
 		return
@@ -335,7 +335,7 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	lg("base rootfs from %s in %s", req.Image, time.Since(tp))
 	imgDir := filepath.Join(s.work, "img", id)
 	td := time.Now()
-	if err := s.s3.downloadPrefix(r.Context(), req.Snapshot, imgDir); err != nil {
+	if err := s.s3.downloadPrefix(opCtx(), req.Snapshot, imgDir); err != nil {
 		lg("S3 download FAILED: %v", err)
 		s.cleanupArtifacts(id)
 		writeErr(w, 502, "download: "+err.Error())
@@ -452,7 +452,7 @@ func (s *server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 	}
 	snapID := fmt.Sprintf("snap-%d", time.Now().UnixNano())
 	prefix := fmt.Sprintf("sandboxes/%s/%s", req.SandboxID, snapID)
-	if err := s.s3.uploadDir(r.Context(), imgDir, prefix); err != nil {
+	if err := s.s3.uploadDir(opCtx(), imgDir, prefix); err != nil {
 		lg("upload FAILED: %v", err)
 		writeErr(w, 502, "upload: "+err.Error())
 		return
