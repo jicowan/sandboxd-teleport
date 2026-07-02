@@ -222,6 +222,54 @@ run/restore ─▶ [busy: one sandbox] ─idle/done─▶ checkpoint→S3 ─▶
 Control-plane scheduling (which worker, when) stays deferred — sandboxd exposes
 the primitives; the controller orchestrates them next phase.
 
+## AIO under sandboxd — status (2026-07-02)
+
+Ran the real AIO image (`ghcr.io/agent-infra/sandbox:latest`, 3.4GB) through
+sandboxd `/run` with `network=sandbox` + ports. Results:
+- **AIO boots nested under sandboxd** — the earlier `groupadd` bootstrap failure
+  is GONE, because sandboxd uses the image's REAL entrypoint (`/opt/gem/run.sh`)
+  + full env from the OCI config (vs. the old hand-built spec). Process tree
+  shows gem.sh, supervisord, jupyter, code-server, mcp-server-browser, tigervnc,
+  nodejs-repl, python-server all RUNNING.
+- **BUT `:8080` (nginx front door) never comes up** → not reachable. Root cause
+  from `supervisorctl status`: **`websocat: failed to lookup address
+  information: Try again`** = DNS resolution failing in the sandbox. Our OCI
+  spec has **no `/etc/resolv.conf`** and the interior netns has no resolver, so
+  AIO services doing hostname lookups fail (EAI_AGAIN) and nginx stalls waiting
+  on upstreams. A few X11 services (openbox, autocutsel) FATAL — non-critical.
+
+**FIX (next):** provide DNS in the sandbox:
+1. bind-mount/write `/etc/resolv.conf` into the sandbox (e.g. the pod's resolver
+   or a public one) — add to the OCI spec mounts.
+2. ensure the veth masquerade allows DNS egress (UDP/TCP 53) — the POSTROUTING
+   masquerade should already cover it; verify.
+3. possibly set a hostname/`/etc/hosts` entry.
+This is a config gap, not a gVisor incompatibility — AIO nearly fully booted.
+Big images also make `/run` block minutes on pull (2m44s for AIO 3.4GB) → make
+image pull/flatten async or pre-warm the base image on workers.
+
+**UPDATE (added resolv.conf, v20):** sandboxd now writes `/etc/resolv.conf`
+(copied from the worker pod's resolver) into the sandbox rootfs on networked
+run. AIO still not fully healthy: it boots (`status: running`) but the MCP hub
+(`:8080`) never becomes ready, and the container appears to exit/become
+inconsistent after a while. Iteration is BLOCKED by ergonomics:
+- **Slow pull:** each AIO attempt re-pulls+flattens 3.4GB (~3 min) synchronously
+  in `/run`, and the HTTP request blocks past client timeouts. MUST fix before
+  productive AIO iteration:
+  1. **async `/run`** (return a sandboxId immediately; pull/boot in background;
+     poll `/status`), AND
+  2. **pre-warm / cache the base image** on the worker (don't re-flatten 3.4GB
+     every run) — e.g. keep an unpacked rootfs template per image digest.
+- Debug logging (`SANDBOXD_DEBUG=1`) floods stdout, burying sandboxd's own log
+  lines — turn off once AIO is stable, or route gVisor logs to a separate sink.
+
+**Next-session plan for AIO:** (a) make `/run` async + cache the base rootfs so
+iteration is seconds not minutes; (b) then debug why AIO's `:8080`/services
+don't fully come up (DNS now provided — check remaining: does AIO need specific
+/dev, cgroup, or larger memory; compare the working containerd-gVisor AIO pod's
+spec/mounts to ours); (c) once healthy, checkpoint a "golden" booted AIO and
+teleport from it (avoids re-running first-boot).
+
 ## Non-goals (now)
 - Control plane / scheduler, multi-port, private-registry auth, API auth
   (deferred), multi-sandbox-per-worker (explicitly avoided).

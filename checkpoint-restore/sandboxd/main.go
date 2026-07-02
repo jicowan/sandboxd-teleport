@@ -194,6 +194,10 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 500, "network: "+err.Error())
 			return
 		}
+		// give the sandbox a resolver (else DNS lookups fail with EAI_AGAIN)
+		if err := writeResolvConf(rootfs); err != nil {
+			lg("WARN: writeResolvConf: %v", err)
+		}
 		netnsPath = interiorNetNSPath
 		lg("network up: %s:%v -> %s", s.podIP, req.Ports, interiorIP)
 	}
