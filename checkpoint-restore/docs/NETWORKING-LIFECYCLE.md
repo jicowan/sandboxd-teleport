@@ -331,6 +331,48 @@ suspend/resume:
 Goal: much smaller/faster snapshots (esp. for the golden-checkpoint model where
 the base memory image is shared and only per-session deltas travel).
 
+### FEASIBILITY FINDINGS for the two TODOs (investigated 2026-07-02)
+
+**(A) hostPath cache — FEASIBLE, low effort, high value. RECOMMENDED.** Move
+imgcache to a hostPath volume shared by all worker pods on the node. Constraint:
+cache + per-sandbox bundles must be on the SAME filesystem (hardlink copy needs
+it) → mount the hostPath and set SANDBOXD_WORK to it (both imgcache and bundles
+live under <work>). Benefits: survives worker rollout (kills the repeated ~3-min
+re-pull we hit every deploy), shared per-node (pull once per node). Cross-process
+safety with multiple worker pods: the atomic `.tmp`→rename + `.done` marker
+already handles it (readers only see committed entries; last writer wins). The
+per-digest in-process lock stays as a same-pod optimization.
+
+**(B) incremental/delta MEMORY checkpoints — NOT feasible with runsc.** Confirmed
+via runsc flags + substrate source: runsc has NO incremental/differential/dirty-
+page memory checkpoint. Substrate also accepts full memory dumps for gVisor (only
+its microVM/cloud-hypervisor path does userfaultfd deltas — N/A to us). The only
+memory-size levers runsc exposes: `-compression=flate-best-speed` and
+`-exclude-committed-zero-pages`. MEASURED (python workload, 17.5MB pages.img):
+- plain: 17.5MB / 110ms
+- exclude-zero-pages: 17.5MB (~0%; this workload had few zero pages) / 64ms
+- **compression: 2.7MB (~6.5x smaller) / 141ms**
+- both: 2.7MB / 128ms
+→ **compression is a big, cheap win (~6.5x here, +~30ms)**; for AIO's 783MB
+pages.img it could cut the S3 payload to ~150-250MB. Zero-page exclusion is
+workload-dependent. CAVEAT: `restore -background` says "requires uncompressed
+checkpoint" — compression likely forces foreground/eager page-in, trading a
+smaller+faster S3 transfer for slower local restore. Since the S3 leg dominates
+for AIO, net likely positive — add as SANDBOXD_COMPRESS and A/B the end-to-end
+(S3 up + down + restore) time.
+
+**Filesystem delta — ALREADY LEAN here.** Substrate's DATA scope fscheckpoints
+only DurableDir VOLUMES and rebuilds rootfs from the image. In our model
+`-overlay2=root:self` keeps the writable delta in the overlay UPPER, and we
+already ship ONLY the checkpoint (the 8.9GB base rootfs never travels — it comes
+from imgcache). So the fs story is done; the memory image is what travels. The
+"golden checkpoint" (shared base, per-session divergence) is the remaining dedup
+lever, orthogonal (planned for AIO).
+
+**Recommendation:** implement (A) hostPath cache (clear win, low risk); add
+optional checkpoint compression to shrink the S3 payload. Drop memory-delta
+(infeasible with runsc).
+
 ### AIO TELEPORT end-to-end: PROVEN ✅✅✅ (2026-07-02)
 
 Full AIO sandbox teleported between workers via S3, functional after restore:
