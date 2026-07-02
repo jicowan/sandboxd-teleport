@@ -304,3 +304,13 @@ the veth+nftables data path:
 The `/tmp` tmpfs fix (v23) was the last blocker (python-server crash loop).
 Next: teleport AIO (checkpoint mem+fs -> S3 -> restore on another worker) and
 verify the MCP hub + a written marker survive.
+
+### TODO (post-teleport): cache on host, not worker fs (user idea, 2026-07-02)
+The imgcache currently lives in the worker pod's ephemeral fs (<work>=/work), so
+a worker restart/rollout LOSES it -> every deploy re-pulls the 3.4GB base (~3min)
+per worker. Move the cache to a **hostPath volume** on the node:
+- survives worker pod restarts/rollouts;
+- SHARED across all worker pods on the same node (pull once per node, not per pod);
+- pairs well with pre-warming the base image at node/pool provisioning.
+Keep the per-sandbox rootfs as a hardlink copy from the hostPath cache (hardlinks
+work within one filesystem, so cache + bundles must be on the same volume).
