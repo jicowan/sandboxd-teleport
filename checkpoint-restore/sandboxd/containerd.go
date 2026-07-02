@@ -85,32 +85,43 @@ func prepareRootfsContainerd(ref, destRootfs, snapKey string) (*imageConfig, err
 	parent := identity.ChainID(diffIDs).String()
 
 	sn := cl.SnapshotService(snapshotter)
-	sn.Remove(ctx, snapKey) // clear any stale snapshot with this key
-	mounts, err := sn.Prepare(ctx, snapKey, parent)
-	if err != nil {
-		return nil, fmt.Errorf("snapshot prepare: %w", err)
-	}
 	if err := os.MkdirAll(destRootfs, 0o755); err != nil {
 		return nil, err
 	}
-	if err := mount.All(mounts, destRootfs); err != nil {
+	// Prepare + mount, with retries: right after a FRESH WithPullUnpack the
+	// snapshot/overlay can briefly present an incomplete tree (the first-ever run
+	// of a just-pulled image fails, a retry succeeds). Retry until the rootfs is
+	// actually populated so runsc's gofer doesn't hit "filestore file ... no such
+	// file or directory".
+	var lastErr error
+	for attempt := 1; attempt <= 5; attempt++ {
+		syscall.Unmount(destRootfs, syscall.MNT_DETACH)
 		sn.Remove(ctx, snapKey)
-		return nil, fmt.Errorf("mount snapshot: %w", err)
+		mounts, err := sn.Prepare(ctx, snapKey, parent)
+		if err != nil {
+			lastErr = fmt.Errorf("snapshot prepare: %w", err)
+			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+			continue
+		}
+		if err := mount.All(mounts, destRootfs); err != nil {
+			lastErr = fmt.Errorf("mount snapshot: %w", err)
+			sn.Remove(ctx, snapKey)
+			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+			continue
+		}
+		// rshared so the mount PROPAGATES into runsc's gofer mount namespace.
+		syscall.Mount("", destRootfs, "", syscall.MS_SHARED|syscall.MS_REC, "")
+		// confirm the rootfs is actually usable (populated). A well-formed image
+		// rootfs always has several top-level dirs (bin, etc, usr, ...).
+		if ents, _ := os.ReadDir(destRootfs); len(ents) >= 3 {
+			return ic, nil
+		}
+		lastErr = fmt.Errorf("rootfs mount empty after prepare (parent=%s)", parent)
+		time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
 	}
-	// Make the rootfs mount rshared so it PROPAGATES into runsc's gofer mount
-	// namespace (the gofer runs with --setup-root in its own ns; without shared
-	// propagation it sees an empty dir -> "filestore file ... no such file or
-	// directory").
-	if err := syscall.Mount("", destRootfs, "", syscall.MS_SHARED|syscall.MS_REC, ""); err != nil {
-		// non-fatal: log via error string on the next failure if it matters
-		_ = err
-	}
-	// sanity: confirm the mount populated the rootfs (catches manifest-list /
-	// unpack issues where Prepare succeeds but the tree is empty).
-	if ents, _ := os.ReadDir(destRootfs); len(ents) < 3 {
-		return nil, fmt.Errorf("rootfs mount empty after prepare (parent=%s, %d entries) — image likely not unpacked for %s snapshotter", parent, len(ents), snapshotter)
-	}
-	return ic, nil
+	syscall.Unmount(destRootfs, syscall.MNT_DETACH)
+	sn.Remove(ctx, snapKey)
+	return nil, fmt.Errorf("prepare rootfs (after retries): %w", lastErr)
 }
 
 // imageConfigFromContainerd reads the OCI run config (entrypoint/cmd/env/workdir)

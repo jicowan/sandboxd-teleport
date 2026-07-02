@@ -446,3 +446,18 @@ restart (it's containerd's store). busybox + AIO both run AND checkpoint fine
 supervisord stable, MCP hub `Sandbox MCP Tools v2.14.7` reachable via pod IP.
 
 This is the "use the k8s node image cache" answer — supersedes the hostPath cache.
+
+### Uncached images + fresh-unpack race (2026-07-02, v28)
+
+Q: "what if a worker wants an image not cached on the node?" → containerd Pulls
+it from the registry (WithPullUnpack), so uncached images WORK (nginx/httpd
+pulled in ~2s). One wrinkle found: the FIRST run of a JUST-pulled image could hit
+"filestore file ... no such file or directory" (the snapshot/overlay briefly
+presents an incomplete tree right after unpack); a retry always succeeded. Fixed:
+prepareRootfsContainerd now retries Prepare+mount (up to 5x, backoff) until the
+rootfs is populated. Verified: a fresh httpd:2.4-alpine succeeds on the FIRST
+attempt now. (This was also the true cause of the earlier "AIO fails first time"
+confusion.)
+
+Compression: verified restorable but NOT yet wired into sandboxd checkpoints
+(checkpoints are uncompressed). Still an optional TODO (SANDBOXD_COMPRESS).
