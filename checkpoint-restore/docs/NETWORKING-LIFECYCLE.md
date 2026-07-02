@@ -270,6 +270,25 @@ don't fully come up (DNS now provided — check remaining: does AIO need specifi
 spec/mounts to ours); (c) once healthy, checkpoint a "golden" booted AIO and
 teleport from it (avoids re-running first-boot).
 
+### Image rootfs cache — DONE ✅ (2026-07-02, v22)
+
+Implemented a disk cache of the FLATTENED rootfs per image digest
+(`<work>/imgcache/<digest>/rootfs`, cache.go) — going beyond substrate (which
+only caches the pulled tarball in-memory and re-untars per actor; it has a TODO
+for exactly this disk cache). Per-sandbox rootfs = a HARDLINK copy (cp -al) from
+the cache; safe because runsc `-overlay2=root:self` copy-up keeps writes in the
+sandbox's overlay filestore, never touching the shared cached inodes. sandboxd's
+own direct writes to the rootfs (e.g. /etc/resolv.conf) do remove-then-create to
+break the hardlink and avoid mutating the cache.
+
+Measured (AIO, flattened rootfs = 8.9GB):
+- cache MISS (first run): pull+flatten ~3+ min (also added pull RETRY — a 3.4GB
+  single-stream fetch hit transient "connection reset by peer").
+- cache HIT (2nd run): **~17s** to running (hardlink copy + runsc boot). ~10x.
+Now iteration on AIO is fast. Note: `/run` is still synchronous on the cache-MISS
+(first pull blocks minutes) — async /run is still a nice-to-have but no longer
+blocking day-to-day since the cache is warm after one pull.
+
 ## Non-goals (now)
 - Control plane / scheduler, multi-port, private-registry auth, API auth
   (deferred), multi-sandbox-per-worker (explicitly avoided).

@@ -260,5 +260,10 @@ func writeResolvConf(rootfsDir string) error {
 	if err != nil || len(data) == 0 {
 		data = []byte("nameserver 8.8.8.8\noptions ndots:1\n")
 	}
-	return os.WriteFile(etc+"/resolv.conf", data, 0o644)
+	// IMPORTANT: the rootfs is a HARDLINK copy of the shared image cache. Writing
+	// in place would mutate the cached (shared) inode. Remove first to break the
+	// link, then create a fresh file.
+	target := etc + "/resolv.conf"
+	os.Remove(target)
+	return os.WriteFile(target, data, 0o644)
 }
