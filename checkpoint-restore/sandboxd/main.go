@@ -62,7 +62,7 @@ func main() {
 		runsc:  newRunsc(runscBin, filepath.Join(work, "rt")),
 		bucket: bucket,
 		podIP:    os.Getenv("SANDBOXD_POD_IP"), // set via downward API
-		compress: os.Getenv("SANDBOXD_COMPRESS") == "1",
+		compress: os.Getenv("SANDBOXD_COMPRESS") != "0", // default ON (A/B: ~4x smaller, ~2x faster suspend); opt out with =0
 		sb:       map[string]*sandbox{},
 		hs:       map[string]*healthState{},
 	}

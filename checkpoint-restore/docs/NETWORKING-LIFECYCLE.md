@@ -594,3 +594,38 @@ exists in real images; the rootfs is writable. Simple + robust.
 - Different sandboxes expose DIFFERENT ports → handled: each /run|/restore carries
   its own `ports`, DNAT built per-sandbox; persisted in metadata. On restore the
   CALLER (control plane) passes the ports (a fresh worker has no prior metadata).
+
+### VARIED E2E TELEPORT TESTS: all PASS ✅ (2026-07-02, v37, compression default ON)
+
+Three diverse workloads, each: run on worker A (fresh pull where noted) → mutate
+→ checkpoint(compressed)→S3 → free A → restore on worker B → verify.
+
+1. **redis:7-alpine** (fresh pull; real server on :6379; `--save ""` so state is
+   PURE IN-RAM keyspace). SET name=sandboxd, count→44 over the network on A;
+   after teleport, worker B returned name=sandboxd count=44, incr→45. In-RAM
+   server state teleported.
+2. **caddy:2-alpine** (fresh pull; Go web server on :80). Mutated the served file
+   /srv/state.txt → "v1-teleported" on A; after teleport, worker B SERVES
+   "v1-teleported". Running web server + fs state teleported.
+3. **python:3.11-alpine, pure-RAM** (in-memory list, NO disk writes at all).
+   Added 4 items on A; after teleport, worker B returned the same 4 items +
+   IDENTICAL boot id. Cleanest proof of live-memory teleport (no fs involved).
+
+Plus the earlier node:20-slim RAM+FS test. All served traffic on a port via the
+veth/nftables path and resumed correctly on a different worker.
+
+Compression is now DEFAULT ON (v37; SANDBOXD_COMPRESS=0 to opt out).
+
+Known intermittency still present: the fresh-image first-run race (filestore/
+mount) occasionally needs 1-2 retries on a COLD worker (seen on redis 1st-try OK,
+caddy 2nd try, python-ram 3rd try). Once the image is warm on the node it's
+first-try. Retry-on-run/restore or a stronger settle would remove the retries.
+
+### On "hostPath / persistent cache" (explained) — NOT needed
+Concern was: sandboxd's /work is the pod's EPHEMERAL fs, so a worker restart
+wiped the pulled/flattened image → re-pull. RESOLVED by reusing the node
+containerd store (containerd.go): image layers live in /var/lib/containerd on the
+NODE — shared across all worker pods + survive pod restarts already. A fresh
+worker does a fast snapshot Prepare, no re-pull (proven by the fresh-worker E2E
+tests). Only per-sandbox bundles/overlays under /work stay ephemeral, which is
+correct (transient; state goes to S3). So no hostPath cache is needed.
