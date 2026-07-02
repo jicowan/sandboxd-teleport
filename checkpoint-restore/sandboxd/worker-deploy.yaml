@@ -1,0 +1,36 @@
+# sandboxd worker pods: minimal privileged pods (distroless + sandboxd + pinned
+# runsc) that run/checkpoint/restore arbitrary nested gVisor sandboxes and
+# teleport state via S3. Two replicas so we can prove worker A -> worker B.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandboxd-worker
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: sandboxd-worker }
+  template:
+    metadata:
+      labels: { app: sandboxd-worker }
+      annotations:
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      serviceAccountName: ckpt-spike          # Pod Identity -> S3
+      nodeSelector: { sandbox: gvisor }
+      tolerations:
+        - { key: sandbox, operator: Equal, value: gvisor, effect: NoSchedule }
+      containers:
+        - name: sandboxd
+          image: 820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v6
+          env:
+            - { name: SANDBOXD_BUCKET, value: aio-checkpoint-spike-820537372947-us-west-2 }
+            - { name: AWS_REGION, value: us-west-2 }
+          ports:
+            - { containerPort: 8090, name: http }
+          securityContext:
+            privileged: true                   # required for nested gVisor (DinD)
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8090 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
