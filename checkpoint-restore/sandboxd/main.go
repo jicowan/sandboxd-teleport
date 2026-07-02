@@ -23,8 +23,9 @@ type server struct {
 	runsc   *runscDriver
 	s3      *s3Store
 	bucket  string
-	podIP   string // worker pod's routable IP (for nftables DNAT target)
-	netns   bool   // whether the checkpointable veth/interior-netns path is active
+	podIP    string // worker pod's routable IP (for nftables DNAT target)
+	netns    bool   // whether the checkpointable veth/interior-netns path is active
+	compress bool   // default: compress checkpoint pages (SANDBOXD_COMPRESS)
 	mu      sync.Mutex
 	sb      map[string]*sandbox    // sandboxId -> metadata
 	hs      map[string]*healthState // sandboxId -> runtime health (not persisted)
@@ -60,9 +61,10 @@ func main() {
 		work:   work,
 		runsc:  newRunsc(runscBin, filepath.Join(work, "rt")),
 		bucket: bucket,
-		podIP:  os.Getenv("SANDBOXD_POD_IP"), // set via downward API
-		sb:     map[string]*sandbox{},
-		hs:     map[string]*healthState{},
+		podIP:    os.Getenv("SANDBOXD_POD_IP"), // set via downward API
+		compress: os.Getenv("SANDBOXD_COMPRESS") == "1",
+		sb:       map[string]*sandbox{},
+		hs:       map[string]*healthState{},
 	}
 	if bucket != "" {
 		st, err := newS3(context.Background(), bucket)
@@ -229,6 +231,7 @@ func (s *server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SandboxID    string `json:"sandboxId"`
 		LeaveRunning bool   `json:"leaveRunning"`
+		Compress     *bool  `json:"compress"` // nil => server default (SANDBOXD_COMPRESS)
 	}
 	if !decode(w, r, &req) {
 		return
@@ -247,8 +250,15 @@ func (s *server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 503, "s3 not configured")
 		return
 	}
-	lg("START (leaveRunning=%v) image=%s", req.LeaveRunning, sb.Image)
+	compress := s.compress
+	if req.Compress != nil {
+		compress = *req.Compress
+	}
+	lg("START (leaveRunning=%v compress=%v) image=%s", req.LeaveRunning, compress, sb.Image)
 	imgDir := filepath.Join(s.work, "img", req.SandboxID)
+	// clear any prior checkpoint image — runsc refuses to overwrite existing
+	// checkpoint.img/pages.img ("file exists"), so a re-checkpoint must start clean.
+	os.RemoveAll(imgDir)
 	os.MkdirAll(imgDir, 0o755)
 	// Persist the EXACT config.json used to run this sandbox alongside the
 	// checkpoint (gVisor restore enforces spec match).
@@ -256,7 +266,7 @@ func (s *server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		os.WriteFile(filepath.Join(imgDir, "config.json"), b, 0o644)
 	}
 	t0 := time.Now()
-	if err := s.runsc.checkpoint(req.SandboxID, imgDir, req.LeaveRunning); err != nil {
+	if err := s.runsc.checkpoint(req.SandboxID, imgDir, req.LeaveRunning, compress); err != nil {
 		lg("runsc checkpoint FAILED: %v", err)
 		writeErr(w, 500, err.Error())
 		return
@@ -441,11 +451,12 @@ func (s *server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 	}
 	lg := reqLogger(r, "suspend", req.SandboxID)
 	imgDir := s.imgDir(req.SandboxID)
+	os.RemoveAll(imgDir)
 	os.MkdirAll(imgDir, 0o755)
 	if b, err := os.ReadFile(filepath.Join(sb.Bundle, "config.json")); err == nil {
 		os.WriteFile(filepath.Join(imgDir, "config.json"), b, 0o644)
 	}
-	if err := s.runsc.checkpoint(req.SandboxID, imgDir, false); err != nil {
+	if err := s.runsc.checkpoint(req.SandboxID, imgDir, false, s.compress); err != nil {
 		lg("checkpoint FAILED: %v", err)
 		writeErr(w, 500, "checkpoint: "+err.Error())
 		return

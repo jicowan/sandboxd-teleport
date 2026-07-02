@@ -461,3 +461,51 @@ confusion.)
 
 Compression: verified restorable but NOT yet wired into sandboxd checkpoints
 (checkpoints are uncompressed). Still an optional TODO (SANDBOXD_COMPRESS).
+
+### COMPRESSION A/B — verdict: DEFAULT ON for suspend (2026-07-02, v29-v33)
+
+Wired compression into checkpoint (SANDBOXD_COMPRESS env default + per-request
+`compress`): `-compression=flate-best-speed -exclude-committed-zero-pages`.
+Restore is unaffected (we use `-detach`, not `-background`, so compressed images
+restore fine — verified earlier with busybox).
+
+A/B on the SAME AIO sandbox (suspend side, conclusive):
+| metric | uncompressed | compressed |
+| checkpoint image | 739 MB | **172 MB (4.3x smaller)** |
+| runsc checkpoint | 1.5 s | 2.8 s (+1.3s) |
+| S3 upload | 6.7 s | **1.6 s (-5.1s)** |
+| **checkpoint+upload** | **8.2 s** | **4.4 s (~1.9x faster)** |
+Compressed S3 DOWNLOAD also ~4x faster (1.9s vs 7.7s for the 172MB vs 739MB).
+
+Verdict: **compression should be DEFAULT ON.** The +1.3s checkpoint cost is
+dwarfed by the S3 up/down savings, and S3 transfer dominates real teleport time.
+The one theoretical cost — eager (non-`-background`) page-load on restore — we
+never used `-background` anyway. (Set SANDBOXD_COMPRESS=1 to default on;
+per-request `compress:false` to override.)
+
+### ⚠️ TOP KNOWN ISSUE: containerd-snapshot rootfs mount race (blocks reliable run/restore)
+
+Since moving to the node-containerd rootfs (v27+), `runsc run`/`restore`
+INTERMITTENTLY fails: `creating gofer filestore files: failed to create filestore
+file inside "…/rootfs": no such file or directory`. Frequency varies (sometimes
+1st-try OK, sometimes several fails in a row); a fresh worker is worse. This
+BLOCKED the restore-side compression timing today (download works — 1.9s — but
+runsc restore fails the race).
+
+Root-cause hypothesis: we `snapshotter.Prepare` a **read-write** containerd
+snapshot and mount it as the rootfs, then runsc adds ANOTHER overlay via
+`-overlay2=root:self` and writes `.gvisor.filestore` INTO that rootfs. The
+containerd rw-overlay + runsc overlay + the gofer's `--setup-root` (new mount ns,
+pivot) interact badly / with a propagation-timing race. MS_SHARED remount +
+writability probe + prepare-retry REDUCED but did NOT eliminate it; a
+runsc-run-level retry did NOT help (re-run against the same mount still fails).
+
+Candidate fixes (next session, pick one):
+1. Use a **`View` (read-only)** containerd snapshot as the rootfs LOWER and let
+   runsc's `-overlay2=root:self` own the writable layer (avoids stacking two
+   writable overlays — most promising).
+2. Pass the containerd mounts to runsc/OCI as the root mount spec (let runsc do
+   the mounting in its own ns) instead of pre-mounting in sandboxd's ns.
+3. Fall back to the (proven-stable) flatten-to-dir rootfs for correctness and
+   keep containerd only as the pull/cache source.
+This is the #1 thing to fix — it gates reliable run and teleport.

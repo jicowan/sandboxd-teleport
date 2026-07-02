@@ -111,12 +111,22 @@ func prepareRootfsContainerd(ref, destRootfs, snapKey string) (*imageConfig, err
 		}
 		// rshared so the mount PROPAGATES into runsc's gofer mount namespace.
 		syscall.Mount("", destRootfs, "", syscall.MS_SHARED|syscall.MS_REC, "")
-		// confirm the rootfs is actually usable (populated). A well-formed image
-		// rootfs always has several top-level dirs (bin, etc, usr, ...).
-		if ents, _ := os.ReadDir(destRootfs); len(ents) >= 3 {
-			return ic, nil
+		// Confirm the rootfs is actually USABLE, not just listable: runsc's gofer
+		// creates a .gvisor.filestore file in the rootfs, and right after a fresh
+		// unpack the overlay can be listable-but-not-writable, causing "filestore
+		// file ... no such file or directory". Prove writability with the same kind
+		// of op runsc will do; retry the whole prepare if it fails.
+		probe := destRootfs + "/.sbxd-probe"
+		if f, perr := os.Create(probe); perr == nil {
+			f.Close()
+			os.Remove(probe)
+			if ents, _ := os.ReadDir(destRootfs); len(ents) >= 3 {
+				return ic, nil
+			}
+			lastErr = fmt.Errorf("rootfs mount empty after prepare (parent=%s)", parent)
+		} else {
+			lastErr = fmt.Errorf("rootfs not writable after prepare: %w", perr)
 		}
-		lastErr = fmt.Errorf("rootfs mount empty after prepare (parent=%s)", parent)
 		time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
 	}
 	syscall.Unmount(destRootfs, syscall.MNT_DETACH)

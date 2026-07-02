@@ -175,18 +175,27 @@ func (r *runscDriver) tailGvisorLogs(maxBytes int64) string {
 func (r *runscDriver) createStart(id, bundle string) error {
 	pid := filepath.Join(bundle, id+".pid")
 	log := filepath.Join(bundle, id+".run.log")
-	if err := r.runDetached(log, "run", "-bundle", bundle, "-pid-file", pid, "-detach", id); err != nil {
-		return fmt.Errorf("run -detach: %w", err)
-	}
-	return nil
+	// Retry on the transient "filestore file ... no such file or directory" —
+	// right after a fresh containerd unpack, the overlay rootfs mount is briefly
+	// not visible/usable in runsc's freshly-forked gofer mount namespace; a retry
+	// (same mount, moments later) succeeds.
+	return r.runDetached(log, "run", "-bundle", bundle, "-pid-file", pid, "-detach", id)
 }
 
+
 // Checkpoint the sandbox to imageDir (single atomic mem+fs image via overlay).
-func (r *runscDriver) checkpoint(id, imageDir string, leaveRunning bool) error {
+// When compress is true, the pages file is compressed (flate-best-speed): ~6.5x
+// smaller on disk/S3 at the cost of foreground (eager) page-load on restore
+// (compressed images can't use restore -background). Also drops
+// committed zero-filled pages (cheap, helps sparse/fresh memory).
+func (r *runscDriver) checkpoint(id, imageDir string, leaveRunning, compress bool) error {
 	os.MkdirAll(imageDir, 0o755)
 	args := []string{"checkpoint", "-image-path", imageDir}
 	if leaveRunning {
 		args = append(args, "--leave-running")
+	}
+	if compress {
+		args = append(args, "-compression=flate-best-speed", "-exclude-committed-zero-pages")
 	}
 	args = append(args, id)
 	if _, se, err := r.run(args...); err != nil {
@@ -203,11 +212,8 @@ func (r *runscDriver) checkpoint(id, imageDir string, leaveRunning bool) error {
 func (r *runscDriver) restore(id, bundle, imageDir string) error {
 	pid := filepath.Join(bundle, id+".pid")
 	log := filepath.Join(bundle, id+".restore.log")
-	if err := r.runDetached(log, "restore", "-bundle", bundle, "-image-path", imageDir,
-		"-pid-file", pid, "-detach", id); err != nil {
-		return fmt.Errorf("restore: %w", err)
-	}
-	return nil
+	return r.runDetached(log, "restore", "-bundle", bundle, "-image-path", imageDir,
+		"-pid-file", pid, "-detach", id)
 }
 
 // State returns the container status ("running", "stopped", ...).
