@@ -174,8 +174,14 @@ func (s *server) gcOnce() {
 }
 
 // cleanupBundle removes a sandbox's on-disk bundle + image dir (best-effort),
-// used on failed create/restore so we don't leave half-built state around.
+// used on failed create/restore so we don't leave half-built state around. Also
+// unmounts + removes the containerd snapshot backing the rootfs (keyed by id).
 func (s *server) cleanupArtifacts(id string) {
+	teardownRootfsContainerd(filepath.Join(s.work, "bundles", id, "rootfs"), snapshotKey(id))
 	os.RemoveAll(filepath.Join(s.work, "bundles", id))
 	os.RemoveAll(filepath.Join(s.work, "img", id))
 }
+
+// snapshotKey namespaces our snapshots in the shared containerd store so they
+// don't collide with kubelet's or other workers' (all share the k8s.io ns).
+func snapshotKey(id string) string { return "sandboxd-" + id }

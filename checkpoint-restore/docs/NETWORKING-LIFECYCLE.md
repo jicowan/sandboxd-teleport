@@ -373,6 +373,32 @@ lever, orthogonal (planned for AIO).
 optional checkpoint compression to shrink the S3 payload. Drop memory-delta
 (infeasible with runsc).
 
+### SUPERSEDED by: reuse the NODE containerd image cache (decided 2026-07-02)
+
+Better than a hostPath-flatten cache: sandboxd currently pulls via
+go-containerregistry and FLATTENS an 8.9GB rootfs into its own imgcache — a
+second copy of what the node's containerd ALREADY has. Node inspection: the
+containerd overlay snapshot store is 12G of unpacked, deduped, node-shared
+layers; socket at /run/containerd/containerd.sock.
+
+Decision: **mount the containerd socket into the worker and use the containerd Go
+client** to Pull+Unpack (node-level, shared across all worker pods, survives
+worker restart natively) and `snapshotter.Prepare` a per-sandbox snapshot mounted
+as the bundle rootfs. runsc `-overlay2=root:self` layers on top (writes go to
+runsc's filestore; shared lower snapshot stays clean). This is the actual "use
+the k8s node image cache" — no parallel flatten, no 8.9GB walk/hardlink, and
+containerd handles pull retry/resume/auth/dedup.
+
+Compression: verified compressed checkpoint RESTORES fine (busybox: 108K image,
+restore rc=0, counter continued) — it only forgoes `-background` (eager page-in),
+which we don't use. So compression is safe to add (SANDBOXD_COMPRESS), separate
+from the cache work.
+
+Tradeoffs accepted: mounting the containerd socket widens the (already-privileged,
+DinD) worker's blast radius; couples to the node's containerd/snapshotter
+(overlayfs); early spikes saw occasional ctr mount-lease flakiness — use the Go
+client's lease API to avoid. Replaces cache.go's go-containerregistry+flatten path.
+
 ### AIO TELEPORT end-to-end: PROVEN ✅✅✅ (2026-07-02)
 
 Full AIO sandbox teleported between workers via S3, functional after restore:
@@ -394,3 +420,29 @@ fixed interior IP on restore).
 This realizes the whole thesis: an arbitrary heavy image (AIO: Chrome + full MCP
 hub) runs as a nested gVisor sandbox, is reachable over the network, and
 teleports (RAM+FS) between workers via S3 — driven entirely by the sandboxd API.
+
+### NODE containerd image cache — IMPLEMENTED ✅ (2026-07-02, v27)
+
+Replaced go-containerregistry pull + 8.9GB flatten + per-pod imgcache with the
+node's containerd image cache (containerd.go). sandboxd (containerd Go client
+over the mounted socket) Pull+Unpack into the shared k8s.io overlayfs store, then
+Prepare a per-sandbox snapshot (key `sandboxd-<id>`) and mount it as the bundle
+rootfs; runsc -overlay2=root:self layers on top. Dropped the go-containerregistry
+dep entirely (removed cache.go; trimmed bundle.go/spec.go).
+
+Deploy: mount /run/containerd/containerd.sock + /var/lib/containerd (Bidirectional)
+into the worker.
+
+Fixes found: (1) the snapshot mount must be made **rshared** (MS_SHARED|MS_REC)
+so it propagates into runsc's gofer mount namespace — else "filestore file ...
+no such file or directory". (2) empty-rootfs guard catches not-yet-unpacked
+images. (3) earlier AIO failures were a stale/partial unpack from before this
+change; a clean WithPullUnpack fixed it.
+
+MEASURED: AIO run **~1.5s** (pull+flatten 565ms) vs **~3min** with the old
+flatten path — and NO 8.9GB duplicate copy, shared per-node, survives worker
+restart (it's containerd's store). busybox + AIO both run AND checkpoint fine
+(containerd-snapshot rootfs + overlay2=root:self are compatible). AIO healthy:
+supervisord stable, MCP hub `Sandbox MCP Tools v2.14.7` reachable via pod IP.
+
+This is the "use the k8s node image cache" answer — supersedes the hostPath cache.

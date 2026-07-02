@@ -1,14 +1,5 @@
 package main
 
-import (
-	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/mutate"
-	"io"
-)
-
-// mutateExtract returns a reader over the flattened image filesystem tar.
-func mutateExtract(img v1.Image) io.ReadCloser { return mutate.Extract(img) }
-
 // ociSpec builds a minimal OCI runtime spec (as a generic map so we don't pull
 // the full runtime-spec module) that runsc accepts, with the corrections proven
 // necessary in the spikes: writable root, standard namespaces/mounts, no

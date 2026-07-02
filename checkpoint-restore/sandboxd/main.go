@@ -166,7 +166,7 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	lg("pulling image %s", req.Image)
 	t0 := time.Now()
-	ic, err := prepareRootfsCached(s.work, req.Image, rootfs)
+	ic, err := prepareRootfsContainerd(req.Image, rootfs, snapshotKey(id))
 	if err != nil {
 		lg("pull FAILED: %v", err)
 		s.cleanupArtifacts(id)
@@ -325,7 +325,7 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	bundle := filepath.Join(s.work, "bundles", id)
 	rootfs := filepath.Join(bundle, "rootfs")
 	tp := time.Now()
-	ic, err := prepareRootfsCached(s.work, req.Image, rootfs)
+	ic, err := prepareRootfsContainerd(req.Image, rootfs, snapshotKey(id))
 	if err != nil {
 		lg("pull FAILED: %v", err)
 		s.cleanupArtifacts(id)

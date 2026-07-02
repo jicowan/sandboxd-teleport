@@ -22,7 +22,7 @@ spec:
         - { key: sandbox, operator: Equal, value: gvisor, effect: NoSchedule }
       containers:
         - name: sandboxd
-          image: 820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v24
+          image: 820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v27
           env:
             - { name: SANDBOXD_BUCKET, value: aio-checkpoint-spike-820537372947-us-west-2 }
             - { name: AWS_REGION, value: us-west-2 }
@@ -36,3 +36,15 @@ spec:
             httpGet: { path: /healthz, port: 8090 }
             initialDelaySeconds: 2
             periodSeconds: 5
+          volumeMounts:
+            # Reuse the NODE's containerd image cache: the socket to drive pulls,
+            # and the containerd data dir so the overlay snapshot lowerdirs/upperdir
+            # the snapshot mounts reference are visible in the worker. Bidirectional
+            # so runsc sees the snapshot mount sandboxd creates at the bundle rootfs.
+            - { name: containerd-sock, mountPath: /run/containerd/containerd.sock }
+            - { name: containerd-data, mountPath: /var/lib/containerd, mountPropagation: Bidirectional }
+      volumes:
+        - name: containerd-sock
+          hostPath: { path: /run/containerd/containerd.sock, type: Socket }
+        - name: containerd-data
+          hostPath: { path: /var/lib/containerd, type: Directory }
