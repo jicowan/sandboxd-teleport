@@ -68,7 +68,7 @@ func writeOCISpec(bundle string, ic *imageConfig, cmdOverride, envOverride []str
 func writeResolvIntoRootfs(rootfsDir string) error {
 	etc := filepath.Join(rootfsDir, "etc")
 	if err := os.MkdirAll(etc, 0o755); err != nil {
-		return err
+		return fmt.Errorf("mkdir %s: %w", etc, err)
 	}
 	data, err := os.ReadFile("/etc/resolv.conf")
 	if err != nil || len(data) == 0 {
@@ -76,7 +76,17 @@ func writeResolvIntoRootfs(rootfsDir string) error {
 	}
 	target := filepath.Join(etc, "resolv.conf")
 	os.Remove(target) // break any hardlink / stale symlink
-	return os.WriteFile(target, data, 0o644)
+	if err := os.WriteFile(target, data, 0o644); err != nil {
+		// diagnostic: is /etc a symlink? does rootfs look mounted?
+		fi, statErr := os.Lstat(etc)
+		mode := "missing"
+		if statErr == nil {
+			mode = fi.Mode().String()
+		}
+		rents, _ := os.ReadDir(rootfsDir)
+		return fmt.Errorf("write %s: %w (etc mode=%s, rootfs has %d entries)", target, err, mode, len(rents))
+	}
+	return nil
 }
 
 func firstNonEmpty(vals ...string) string {

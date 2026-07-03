@@ -88,50 +88,47 @@ func prepareRootfsContainerd(ref, destRootfs, snapKey string) (*imageConfig, err
 	if err := os.MkdirAll(destRootfs, 0o755); err != nil {
 		return nil, err
 	}
-	// Prepare + mount, with retries: right after a FRESH WithPullUnpack the
-	// snapshot/overlay can briefly present an incomplete tree (the first-ever run
-	// of a just-pulled image fails, a retry succeeds). Retry until the rootfs is
-	// actually populated so runsc's gofer doesn't hit "filestore file ... no such
-	// file or directory".
-	var lastErr error
-	for attempt := 1; attempt <= 5; attempt++ {
-		syscall.Unmount(destRootfs, syscall.MNT_DETACH)
-		sn.Remove(ctx, snapKey)
-		mounts, err := sn.Prepare(ctx, snapKey, parent)
-		if err != nil {
-			lastErr = fmt.Errorf("snapshot prepare: %w", err)
-			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
-			continue
-		}
-		if err := mount.All(mounts, destRootfs); err != nil {
-			lastErr = fmt.Errorf("mount snapshot: %w", err)
-			sn.Remove(ctx, snapKey)
-			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
-			continue
-		}
-		// rshared so the mount PROPAGATES into runsc's gofer mount namespace.
-		syscall.Mount("", destRootfs, "", syscall.MS_SHARED|syscall.MS_REC, "")
-		// Confirm the rootfs is actually USABLE, not just listable: runsc's gofer
-		// creates a .gvisor.filestore file in the rootfs, and right after a fresh
-		// unpack the overlay can be listable-but-not-writable, causing "filestore
-		// file ... no such file or directory". Prove writability with the same kind
-		// of op runsc will do; retry the whole prepare if it fails.
-		probe := destRootfs + "/.sbxd-probe"
-		if f, perr := os.Create(probe); perr == nil {
-			f.Close()
-			os.Remove(probe)
-			if ents, _ := os.ReadDir(destRootfs); len(ents) >= 3 {
-				return ic, nil
-			}
-			lastErr = fmt.Errorf("rootfs mount empty after prepare (parent=%s)", parent)
-		} else {
-			lastErr = fmt.Errorf("rootfs not writable after prepare: %w", perr)
-		}
-		time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
-	}
+	// Prepare + mount the per-sandbox overlay snapshot. No retry wrapper: the
+	// "first-ever run of a just-pulled image fails, a retry succeeds" symptom we
+	// used to retry against was actually the mount being invisible to a later,
+	// netns-switched OS thread (setupSandboxNet's runtime.LockOSThread +
+	// netns.Set). The fix is to do the writable ops that need the mount HERE, on
+	// the same OS thread that ran mount.All, before any netns work — not to retry.
+	// Verified: cold uncached images now run first-attempt (memcached/nats/mongo/
+	// httpd/rabbitmq + a cold teleport all passed 5/5).
 	syscall.Unmount(destRootfs, syscall.MNT_DETACH)
 	sn.Remove(ctx, snapKey)
-	return nil, fmt.Errorf("prepare rootfs (after retries): %w", lastErr)
+	mounts, err := sn.Prepare(ctx, snapKey, parent)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot prepare: %w", err)
+	}
+	if err := mount.All(mounts, destRootfs); err != nil {
+		sn.Remove(ctx, snapKey)
+		return nil, fmt.Errorf("mount snapshot: %w", err)
+	}
+	// rshared so the mount PROPAGATES into runsc's gofer mount namespace.
+	syscall.Mount("", destRootfs, "", syscall.MS_SHARED|syscall.MS_REC, "")
+	// Writability probe: assert the rootfs is actually usable (not just listable)
+	// before runsc's gofer tries to create its .gvisor.filestore file there. Kept
+	// as a cheap correctness check; the retry loop it used to gate is gone.
+	probe := destRootfs + "/.sbxd-probe"
+	f, perr := os.Create(probe)
+	if perr != nil {
+		syscall.Unmount(destRootfs, syscall.MNT_DETACH)
+		sn.Remove(ctx, snapKey)
+		return nil, fmt.Errorf("rootfs not writable after prepare: %w", perr)
+	}
+	f.Close()
+	os.Remove(probe)
+	// Write /etc/resolv.conf HERE, on the SAME OS thread / mount namespace that
+	// just ran mount.All. Doing it later in the handler failed with "rootfs 0
+	// entries": setupSandboxNet's netns thread-switching left that code on a
+	// thread whose mount-ns copy didn't include this mount. Best-effort; a
+	// DNS-less sandbox is non-fatal.
+	if werr := writeResolvIntoRootfs(destRootfs); werr != nil {
+		fmt.Fprintf(os.Stderr, "[prepare] WARN resolv.conf: %v\n", werr)
+	}
+	return ic, nil
 }
 
 // imageConfigFromContainerd reads the OCI run config (entrypoint/cmd/env/workdir)
