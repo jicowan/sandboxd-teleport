@@ -335,16 +335,19 @@ boundary. What they add is a **governance surface**, handled outside the worker:
   (measured: cold `golang:1.23-alpine` ~5.7s end-to-end — still fast, but not the
   ~1.5s of a warm image). Warm pools are most efficient when scoped to a known
   image set; fully-arbitrary images erode the pre-warm benefit but don't break it.
-  Mitigations if this matters: a per-node image pre-puller, or pools dedicated to
-  arbitrary-image sessions with looser warm guarantees.
+  **Decided (O6c):** arbitrary-image sessions run in a **separate pool** with a
+  looser warm guarantee, so their first-pull latency and cache churn don't degrade
+  the known-template pool's warm hit-rate. (A per-node image pre-puller is an
+  optional further mitigation.)
 - **Checkpoint identity travels with the session.** `/restore` hard-checks the
   image + runsc version. The assignment table already records the session's
   `image` alongside its `snapshotURI` (§3 worked example), so restore of an
   arbitrary-image session works unchanged — the recorded image is replayed.
 
-This is the substance of open question **O6**: default template-only, with
-arbitrary-image sessions as an authz-gated opt-in. No worker change is needed to
-enable it; the work is the authz/registry-policy/quota gate in the control plane.
+See **O6**: default template-only, with arbitrary-image sessions as an
+authz-gated opt-in in their own pool (O6c decided); the authz rule (O6a) and
+registry policy (O6b) remain to be finalized. No worker change is needed either
+way — the work is the authz/registry-policy/quota gate in the control plane.
 
 ---
 
@@ -414,15 +417,16 @@ Key properties:
 
 ### 5.2 Session token → session ID
 
-The router must extract a stable session ID from each request. Options, in order
-of preference:
+The router must extract a stable session ID from each request. Per O4 (decided),
+we **reuse the existing JWT** from the Keycloak/agentgateway front door rather
+than mint a separate session token:
 
-1. **Bearer session token** (opaque or JWT) issued by the broker, carrying a
-   subject like `app/acme/user/alice/session/7f3a`. The router validates it
-   (signature/introspection) and derives `sid`. This is the substrate model and
-   the one this PRD assumes.
-2. **Header** (`X-Session-ID`) — agent-sandbox's `X-Sandbox-ID` style — for
-   trusted internal callers where the broker already authenticated.
+- The router **validates the JWT locally** (signature via cached JWKS) — no
+  per-request introspection on the hot path.
+- The **session ID is derived from the JWT** (subject + a session claim, e.g.
+  `app/acme/user/alice/session/7f3a`), giving a stable `sid` per session.
+- The same JWT carries the **arbitrary-image entitlement** checked in O6(a), so
+  authz and session identity ride one token.
 
 The token is what lets the router distinguish **"continue Alice's existing
 session"** from **"this is a new session, cold start"** from **"Alice's session
@@ -612,9 +616,12 @@ The template/session declares `idle.timeoutSeconds` + `action`. Mechanism:
    arrives during `SUSPENDING` waits and then triggers `RESUMING`).
 
 Idle detection based purely on the readiness probe is coarse (it says the
-sandbox is *up*, not *unused*). Router-observed request activity is the better
-idle signal and should be authoritative for `lastActiveAt`; the worker probe
-remains the liveness/health signal. **Open question O3.**
+sandbox is *up*, not *unused*). Per O3 (decided), **router-observed request
+activity is authoritative** for `lastActiveAt`; the worker probe remains the
+liveness/health signal. A request counts as active for its whole duration
+(stamped on start **and** end — "bracketing") so a long-running call is not
+mistaken for idle; a workload-level heartbeat is deferred unless a real workload
+needs it.
 
 ---
 
@@ -677,22 +684,38 @@ remains the liveness/health signal. **Open question O3.**
   worker-assignment authority + S3/worker credentials out of the data-plane proxy,
   and it centralizes CAS so the split-brain risk (§8 risk 2) is tractable under
   router HA. Continuation (fast path) is a plain KV read either way.
-- **O3 — Idle signal.** Router-observed request activity vs worker readiness
-  probe (§7). Recommend router activity as authoritative for idle.
-- **O4 — Token format & issuer.** Who mints the session token, and does the
-  router validate locally (JWT + JWKS) or via introspection? Ties into the
-  existing broker/front-door.
-- **O5 — Session affinity vs load.** One session = one worker at a time (sticky).
-  No load-spreading of a single session (it's stateful). Confirm no multi-worker
-  session requirement.
+- **O3 — Idle signal. → DECIDED: router request-activity, start with bracketing.**
+  Router-observed request activity is authoritative for `lastActiveAt`; the worker
+  readiness probe is liveness/health only (§7). A request counts as active for its
+  whole duration — stamp on both **start and end** ("bracketing") so a long-running
+  call isn't mistaken for idle. Deferred: a workload-level "still working"
+  heartbeat, added only if a real workload needs finer signal than bracketing.
+- **O4 — Token format & issuer. → DECIDED: reuse the existing JWT.** The
+  established Keycloak/agentgateway front door mints the JWT; the router validates
+  it **locally (JWT + JWKS, cached)** — no per-request introspection on the hot
+  path. The **session ID is derived from the JWT** (subject + session claim); we
+  do not mint a separate session token. The same JWT carries the arbitrary-image
+  entitlement checked in O6(a).
+- **O5 — Session affinity. → DECIDED: one session = one worker at a time.** Sticky
+  by construction — state lives in one gVisor sandbox on one worker, so a session
+  cannot be load-spread. The assignment table pins `sessionID → workerPodIP` while
+  RUNNING; concurrent requests for the same session hit that worker (or coalesce
+  via singleflight while SUSPENDED). A user needing multiple concurrent sandboxes
+  simply has multiple sessions.
 - **O6 — Image source: template vs. arbitrary (§4.4).** Decision taken: support
   **both** — template mode as the default (operator allow-list, like
   substrate/agent-sandbox) and **arbitrary-image mode** as an authz-gated opt-in
-  where a caller brings their own image. Remaining to confirm: (a) the authz
-  rule for who may use arbitrary-image mode (broker/front-door, per token
-  subject); (b) whether to additionally enforce registry allow-listing / image
-  signatures; (c) whether arbitrary-image sessions share the general warm pool or
-  get their own (looser warm guarantee). No worker change needed either way.
+  where a caller brings their own image. No worker change needed either way.
+  Sub-parts:
+  - **(a) authz rule — OPEN (recommended):** gate arbitrary-image mode on an
+    entitlement claim in the JWT (O4), checked at the broker/front-door; default
+    callers get template-only.
+  - **(b) registry allow-list / signatures — OPEN (recommended):** allow-list
+    registries at minimum, enforced in the control plane before `/run`; signature
+    verification (cosign) deferred to a hardening phase.
+  - **(c) pool scoping — DECIDED: separate pool.** Arbitrary-image sessions run in
+    their **own pool** with a looser warm guarantee, so first-pull latency and
+    cache churn don't degrade the known-template pool's warm hit-rate.
 - **O7 — Identity + isolation mechanism (§6). → DECIDED: SPIRE + VPC CNI
   NetworkPolicy.** Use **SPIRE** for per-workload SPIFFE mTLS (GA-only; the
   GA-native replacement for substrate's blocked pod-cert identity), not the
