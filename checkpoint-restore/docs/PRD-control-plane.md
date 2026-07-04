@@ -444,6 +444,68 @@ add-on.
   last checkpoint is in S3 — the next request restores from `SUSPENDED`. **A
   session is only as durable as its last checkpoint**; see §8 risk.
 
+### 5.4 Cold-start/restore latency vs. client timeouts
+
+A synchronous request that *triggers* a warm-up (cold start or restore-on-connect)
+must complete the warm-up **before the client's own timeout fires**, or the client
+gives up even though the sandbox comes up fine. This risk exists **only on the
+miss path** — continuation is a KV read + proxy (milliseconds) and is never at
+risk. The question is whether the *first* request to a not-running session can
+exceed the caller's deadline.
+
+**The latency budget (measured):**
+
+| Path | State | Typical | Dominated by |
+|---|---|---|---|
+| Continuation | `RUNNING` | ~ms | KV read + proxy |
+| Restore-on-connect, warm worker idle | `SUSPENDED` | sub-second to a few seconds | compressed-checkpoint `/restore` |
+| Cold start, warm worker idle | `ABSENT` | ~1.5s (cached image) … ~5.7s (cold image pull) | image pull + runsc start + ready |
+| **No idle worker available** | any | **tens of seconds** | **new worker pod scheduling** (kube-scheduler + pod start + sandboxd ready) |
+| Huge uncached arbitrary image | `ABSENT` | seconds–minutes | first-pull of a large image |
+
+The common miss (warm worker present) fits inside a normal 30s client timeout
+comfortably. The **genuine worst case is not restore — it's having no idle worker
+and waiting for a pod to schedule**, or a very large uncached image. Those can
+exceed a typical timeout.
+
+**How we handle it — two layers:**
+
+**(A) Keep the miss path inside the budget.**
+- **`minIdle > 0` (primary lever).** Always keep a warm worker idle so a miss
+  lands on an existing pod and pays only restore/run cost (seconds), never
+  pod-scheduling cost (tens of seconds). This is the single most important knob
+  and is why `minIdle` is in the `WarmPool` spec (§4.2).
+- **Compression on** (already default) shrinks the S3 transfer restore reads.
+- **Optional per-node image pre-pull** for known templates keeps cold start at
+  the ~1.5s cached number rather than the first-pull number.
+
+**(B) When a warm-up can still exceed the budget, don't make the data request eat
+the wait.** In order of transparency to the client:
+1. **Bounded wait + `503 Retry-After`** (baseline, §5.1). The router/control
+   plane hold up to a deadline (~15s), then return a retryable status; the
+   sandbox is warm by the client's retry. Requires clients that retry.
+2. **Proactive warming on an earlier signal (strongest fix).** Trigger the resume
+   when the session is *created* / authenticated at the front door — **before**
+   the first data-plane request. By the time the synchronous request arrives, the
+   session is already `RUNNING` and hits the fast path, hiding warm-up latency
+   entirely. This is especially natural for our MCP workload: the broker resumes
+   the session on MCP `initialize` (which clients already expect can be slower)
+   and keeps it warm for the session's duration.
+3. **Async `202 Accepted` + poll/callback** for clients that support it —
+   decouples warm-up from the request but changes the client contract, so it's an
+   opt-in mode, not the default.
+
+**Reconcile the timeouts explicitly.** The router's proxy timeout and the
+control-plane resume deadline must be set **relative to the known client
+timeout**. If the client's timeout is shorter than a plausible worst-case
+warm-up, we must surface `Retry-After` *early* (or warm ahead per B2) rather than
+hang until the client abandons the request. See **O8**.
+
+**Recommendation:** default to `minIdle` headroom (A) so the common miss is
+seconds, `Retry-After` as the honest fallback for the tail, and proactive
+warm-on-`initialize` in the broker for the MCP path so first-request latency is
+hidden in the common case.
+
 ---
 
 ## 6. Secure worker ↔ control-plane channel
@@ -587,6 +649,13 @@ remains the liveness/health signal. **Open question O3.**
    attack surface and a lateral-movement risk. Mitigation: §6 — mTLS on the
    control channel (SPIRE) + NetworkPolicy so the router is the only ingress.
    Depends on the CNI enforcing NetworkPolicy (O7) and on SPIRE being deployed.
+7. **Warm-up exceeds client timeout.** A synchronous request that triggers a cold
+   start or restore can, in the tail (no idle worker → pod scheduling; or a large
+   uncached image), take longer than the client's timeout — the client abandons
+   the request even though the sandbox comes up. Mitigation: §5.4 — `minIdle`
+   headroom to avoid pod-scheduling latency, bounded wait + `503 Retry-After`,
+   and proactive warm-on-`initialize` so the data-plane request hits the fast
+   path. Only affects the miss path; continuation is unaffected.
 
 **Open questions**
 
@@ -631,6 +700,12 @@ remains the liveness/health signal. **Open question O3.**
   enforced by the **VPC CNI**, which supports NetworkPolicy enforcement on EKS
   today (confirmed) — so workers can be locked to router-only ingress with no
   alpha/beta opt-in.
+- **O8 — Warm-up vs. client-timeout handling (§5.4).** Confirm the strategy mix:
+  `minIdle` headroom + `503 Retry-After` fallback + proactive
+  warm-on-`initialize` in the broker. Decide the concrete numbers — resume
+  deadline (~15s?), router proxy timeout, and how the broker learns/keeps a
+  session warm — and reconcile them against the known client timeout(s). Whether
+  to also offer an async `202`+poll mode is an opt-in, per-caller question.
 
 ---
 
