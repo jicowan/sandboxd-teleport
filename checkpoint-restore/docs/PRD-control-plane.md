@@ -83,8 +83,9 @@ This constraint is a primary input to the build-vs-adopt decision in §9.
 | **SandboxTemplate** | **Operator-authored** blueprint: the OCI **image** to run as the sandbox, ports, resources, idle policy. Referenced by a WarmPool and by Sessions. Default way to say "what to run"; a Session may instead carry an arbitrary image inline, authz-gated (§4.4, O6). | agent-sandbox `SandboxTemplate`; substrate `ActorTemplate` (immutable, versioned) |
 | **Session** | A user's logical sandbox instance, identified by an opaque **session ID**. Outlives any single worker. Maps to exactly one checkpoint lineage in S3. | substrate `(appID,userID,sessionID)`; agent-sandbox `SandboxClaim` |
 | **Session token** | Opaque bearer credential presented by the client on every request. Carries/【resolves to】the session ID. Lets the router decide continue-vs-restore. | substrate session JWT |
-| **Assignment table** | The control plane's source of truth: `sessionID → {state, workerPodIP, snapshotURI, image, ...}`. Backed by a fast KV store. | substrate Redis worker/actor state |
-| **Router** | Session-aware reverse proxy. Resolves `sessionID → worker`, triggers restore on a miss, forwards the request. | agent-sandbox `sandbox-router` + substrate `atenet` resumer |
+| **Assignment table** | The control plane's source of truth (KV-authoritative, O1): `sessionID → {state, workerPodIP, snapshotURI, image, ...}`. Backed by Valkey/ElastiCache. | substrate Redis worker/actor state |
+| **Router** | Thin session-aware reverse proxy. Resolves `sessionID → worker` from KV, serves the continuation fast path, and on a miss calls the control-plane service to resume; never assigns workers itself (O2). | agent-sandbox `sandbox-router` + substrate `atenet` |
+| **Control-plane service** | Owns the assignment/restore workflow: pick idle worker, drive `/run` or `/restore`, CAS the assignment state. Exposes `Resume(sid)` to the router. | substrate `ateapi` |
 
 A **Session** is the durable thing. A **Worker** is disposable. The assignment
 table is the bridge, and the router is the enforcement point.
@@ -285,13 +286,14 @@ status:
   lastActiveAt: 2026-07-03T14:33:00Z
 ```
 
-> **Implementation note.** `Session.status` and the **assignment table** hold the
-> same facts. Two viable implementations: (a) CRD-as-truth (controller watches
-> `Session`, KV is a cache) or (b) KV-as-truth (fast path never touches the API
-> server; `Session` CR is optional/for observability). Given the router is on the
-> hot path and must do a lookup **per request**, we lean toward **(b): KV is
-> authoritative** (Valkey/ElastiCache/DynamoDB), and the `Session` CR is an
-> optional reconciled projection. This matches substrate (Redis-authoritative).
+> **Implementation note (decided — O1).** `Session.status` and the **assignment
+> table** hold the same facts. Of the two options — (a) CRD-as-truth (controller
+> watches `Session`, KV is a cache) or (b) KV-as-truth (fast path never touches
+> the API server; `Session` CR is optional/for observability) — we take **(b):
+> KV is authoritative**, because the router is on the hot path and does a lookup
+> **per request**. Store: **Valkey/ElastiCache** (matches substrate's
+> Redis-authoritative model; supports the atomic CAS/versioning restore-on-connect
+> needs). The `Session` CR is an optional reconciled projection for observability.
 
 ### 4.4 Two ways to say "what to run": template vs. arbitrary image
 
@@ -349,49 +351,66 @@ enable it; the work is the authz/registry-policy/quota gate in the control plane
 ## 5. Router design
 
 The router is the single ingress data-plane component. One static Gateway/LB
-sits in front of it; all sandbox traffic flows through it.
+sits in front of it; all sandbox traffic flows through it. Per O2 (decided), the
+router is a **thin proxy**: it resolves the session, serves the continuation fast
+path from KV, and on a miss delegates the assignment/restore **workflow** to a
+separate **control-plane service** (`POST /resume`). The router never picks
+workers, drives `/restore`, or holds worker/S3 credentials — that authority lives
+in the control plane, mirroring substrate's `atenet`→`ateapi` split.
 
-### 5.1 Per-request algorithm
+### 5.1 Per-request algorithm (router)
 
 ```
 on request R with session token T:
   sid = resolve(T)                         # validate token → session ID (+ subject)
-  e   = KV.get(sid)                         # assignment entry (atomic)
+  e   = KV.get(sid)                         # assignment entry (single read)
 
   if e.state == RUNNING and alive(e.workerPodIP):
-        return proxy(R → e.workerPodIP)     # (1) CONTINUATION — fast path
+        return proxy(R → e.workerPodIP)     # (1) CONTINUATION — fast path, KV read only
 
-  # miss: need a worker. coalesce concurrent misses for the same sid.
-  singleflight(sid):
-     e = KV.get(sid)                        # re-check under the flight (double-checked)
-     if e.state == RUNNING: return          # someone else attached it
-     w = pickIdleWorker(e.poolRef)          # from workercache; may block up to minIdle refill
-     if e.state == SUSPENDED:
-        KV.cas(sid, RESUMING, worker=w)     # optimistic; lose→retry from top
-        sandboxd(w)./restore{snapshotURI:e.snapshotURI, image:e.image, ports, health}
-     else:                                  # ABSENT → cold start
-        KV.cas(sid, RESUMING, worker=w)
-        sandboxd(w)./run{image:template.image, cmd, env, ports, health}
-     wait until sandboxd(w)./status.ready
-     KV.cas(sid, RUNNING, workerPodIP=w.ip)
-  return proxy(R → e.workerPodIP)
+  # miss (ABSENT/SUSPENDED/stale worker): delegate to the control plane.
+  # singleflight coalesces concurrent misses for the SAME sid into one call.
+  ip = singleflight(sid, () => controlPlane.Resume(sid))   # blocking, bounded
+  return proxy(R → ip)
+```
+
+The control-plane service owns the state transition:
+
+```
+Resume(sid):                               # idempotent; safe to call concurrently
+  e = KV.get(sid)
+  if e.state == RUNNING and alive(e.workerPodIP): return e.workerPodIP
+  w = pickIdleWorker(e.poolRef)            # from workercache; may block up to minIdle refill
+  KV.cas(sid, RESUMING, worker=w)          # optimistic; lose → reload & retry
+  if e.state == SUSPENDED:
+     sandboxd(w)./restore{snapshotURI:e.snapshotURI, image:e.image, ports, health}
+  else:                                    # ABSENT → cold start
+     sandboxd(w)./run{image:e.image|template.image, cmd, env, ports, health}
+  wait until sandboxd(w)./status.ready     # bounded (~15s) → else 503 Retry-After
+  KV.cas(sid, RUNNING, workerPodIP=w.ip)
+  return w.ip
 ```
 
 Key properties:
-- **One KV read on the fast path.** Continuation must be cheap; everything
-  expensive is gated behind a cache miss.
+- **One KV read on the fast path.** Continuation is cheap; everything expensive is
+  gated behind a cache miss and handled out-of-band by the control plane.
 - **Singleflight per session.** Substrate's `ActorResumer` does exactly this: N
-  simultaneous requests to a suspended session trigger **one** restore; the rest
-  wait on it. Without this, a burst of requests would try to restore the same
-  checkpoint onto N workers — a correctness bug (split brain) and a cost bug.
-- **Optimistic concurrency (CAS + version).** Two routers (HA) must not both
-  claim the same idle worker for different sessions, nor the same session onto
-  two workers. Every assignment write is a compare-and-set on a version; the
-  loser retries. This is substrate's `version` field pattern.
-- **Bounded resume wait.** The inbound request holds until the sandbox is
-  `ready` or a deadline (substrate uses ~15s). On timeout, return 503/retry-after
-  rather than hang. Restore of a compressed checkpoint is fast (measured
-  sub-second to a few seconds), so this budget is comfortable.
+  simultaneous requests to a suspended session trigger **one** `Resume` call; the
+  rest wait on it. The router-side singleflight dedups within a replica; the
+  control plane's CAS makes `Resume` safe across replicas too. Without this, a
+  burst would try to restore the same checkpoint onto N workers — a correctness
+  bug (split brain) and a cost bug.
+- **Optimistic concurrency (CAS + version).** Centralizing the assignment writes
+  in the control plane means two router replicas can't claim the same idle worker
+  for different sessions, nor the same session onto two workers. Every assignment
+  write is a compare-and-set on a version; the loser reloads and retries. This is
+  substrate's `version` field pattern, and centralizing it (O2) is what makes the
+  split-brain risk (§8 risk 2) tractable under router HA.
+- **Bounded resume wait.** The inbound request holds until the sandbox is `ready`
+  or a deadline (substrate uses ~15s). On timeout, return 503/Retry-After rather
+  than hang. Restore of a compressed checkpoint is fast (measured sub-second to a
+  few seconds), so this budget is comfortable — and the extra router→control-plane
+  hop is negligible against restore latency.
 
 ### 5.2 Session token → session ID
 
@@ -571,15 +590,24 @@ remains the liveness/health signal. **Open question O3.**
 
 **Open questions**
 
-- **O1 — KV vs CRD as source of truth.** §4.3 leans KV-authoritative for hot-path
-  latency. Confirm, and pick the store (Valkey/ElastiCache vs DynamoDB). Affects
-  HA and consistency model.
-- **O2 — Where does resume-on-connect live?** In the router itself (lower
-  latency, but router becomes stateful/privileged), or a separate control-plane
-  service the router calls (cleaner, one more hop)? Substrate splits them
-  (`atenet` router calls `ateapi`). Recommend **separate control-plane service**
-  for the assignment/restore decision; router stays a thin proxy that consults
-  it. Confirm.
+- **O1 — KV vs CRD as source of truth. → DECIDED: KV-authoritative.** The
+  assignment table is the source of truth (§4.3 option b); the `Session` CR, if
+  used, is an optional reconciled projection for observability. The router does a
+  KV read per request and never depends on the API server on the hot path. Still
+  to pick: the store — lean **Valkey/ElastiCache** (matches substrate's Redis
+  model; supports the atomic CAS/versioning we need; DynamoDB is a viable
+  alternative if we prefer serverless, with conditional writes for CAS).
+- **O2 — Where does resume-on-connect live? → DECIDED: split (mirror
+  substrate).** A **separate control-plane service** owns the assignment/restore
+  workflow (pick idle worker, drive `/restore`, CAS the KV state); the **router
+  stays a thin proxy** that, on a KV miss, makes one blocking call to that service
+  with **singleflight dedup + bounded retry**, then routes when ready. This is
+  exactly substrate's split (`atenet` router calls `ateapi`; the router-side
+  `ActorResumer` only dedups/retries). Rationale: the extra hop lands only on a
+  cache miss (where restore latency dominates, so it's negligible), it keeps
+  worker-assignment authority + S3/worker credentials out of the data-plane proxy,
+  and it centralizes CAS so the split-brain risk (§8 risk 2) is tractable under
+  router HA. Continuation (fast path) is a plain KV read either way.
 - **O3 — Idle signal.** Router-observed request activity vs worker readiness
   probe (§7). Recommend router activity as authoritative for idle.
 - **O4 — Token format & issuer.** Who mints the session token, and does the
@@ -596,11 +624,13 @@ remains the liveness/health signal. **Open question O3.**
   subject); (b) whether to additionally enforce registry allow-listing / image
   signatures; (c) whether arbitrary-image sessions share the general warm pool or
   get their own (looser warm guarantee). No worker change needed either way.
-- **O7 — Identity + isolation mechanism (§6).** Confirm **SPIRE** for per-workload
-  SPIFFE mTLS (recommended, GA-only) vs cert-manager fallback; and confirm the
-  target cluster's CNI (VPC CNI) has **NetworkPolicy enforcement enabled** so
-  workers can be locked to router-only ingress. Both are prerequisites for the
-  "workers don't accept direct traffic" requirement.
+- **O7 — Identity + isolation mechanism (§6). → DECIDED: SPIRE + VPC CNI
+  NetworkPolicy.** Use **SPIRE** for per-workload SPIFFE mTLS (GA-only; the
+  GA-native replacement for substrate's blocked pod-cert identity), not the
+  cert-manager fallback. Network isolation uses Kubernetes `NetworkPolicy`
+  enforced by the **VPC CNI**, which supports NetworkPolicy enforcement on EKS
+  today (confirmed) — so workers can be locked to router-only ingress with no
+  alpha/beta opt-in.
 
 ---
 
