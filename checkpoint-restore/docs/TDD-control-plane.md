@@ -42,7 +42,7 @@ restate the PRD.
 | **sandboxd** | Worker agent: runs/checkpoints/restores nested gVisor sandboxes. Unchanged except adding mTLS on `:8090` (P1.5). | existing | Dockerfile (ships non-Go `runsc`) | exists |
 
 Only three deployables for the MVP: **operator**, **router**, **sandboxd**
-(+ SPIRE, + Valkey/ElastiCache as infra).
+(+ SPIRE, + Valkey in-cluster as infra).
 
 ### 2.2 Repo layout
 
@@ -327,8 +327,17 @@ arbitrary-image entitlement (O6a).
 
 ## 4. Assignment table (KV) — schema + CAS protocol
 
-**Store:** Valkey/ElastiCache (O1). Authoritative for session + worker state; the
-router reads it per request, the operator's `Resume`/lifecycle writes it.
+**Store:** **Valkey, run in-cluster** (a Deployment + Service) for both dev and
+initial production. Decision: minimize dependence on AWS-native services — the
+only AWS dependency we keep is **S3** (itself easily replaceable with any
+S3-compatible object store). ElastiCache/MemoryDB remains a drop-in later option
+(same Valkey/Redis protocol) but is not required and not assumed.
+
+Authoritative for session + worker state (O1). **The operator is the SOLE
+writer** — `Resume`/lifecycle *and* worker discovery (§4.3) all write through the
+operator. The **router only reads** it per request. sandboxd never touches KV (no
+Valkey credentials on the pod that hosts untrusted code). Single-writer is what
+makes the CAS invariants (§4.2) hold.
 
 ### 4.1 Keys & records
 
@@ -381,6 +390,24 @@ Two assignment invariants the CAS enforces:
 
 Reconciliation (post-MVP, P4) repairs drift against ground truth using sandboxd
 `/capacity`; the MVP relies on CAS + the operator being the sole writer.
+
+### 4.3 Worker discovery (operator-written, not self-registered)
+
+Workers do **not** self-register. The operator runs a **pod-label informer**
+(controller-runtime watch on worker pods, e.g. `app=sandboxd-worker` +
+pool label) and writes/updates `WorkerEntry` in KV on pod add/update/delete:
+
+- Pod **Ready** → upsert `WorkerEntry{state:idle}`, add to `pool:<pool>:idle`.
+- Pod **deleted / NotReady** → remove from the idle set and delete/mark the entry
+  (any session it held falls to `SUSPENDED`/reconcile per §5.3 / PRD §5.3).
+- Pod IP / pool come from the pod object; no KV client or Valkey credentials on
+  sandboxd.
+
+Rationale (decided): keeps the operator the **sole KV writer** (preserving the
+CAS invariants in §4.2), keeps sandboxd unchanged, and reuses the informer cache
+the operator already maintains. sandboxd's `/capacity` + `/status` stay the
+ground truth the operator reconciles against — they are *read*, never a KV write
+path from the worker.
 
 ---
 
@@ -562,8 +589,10 @@ front-door validation question (§9).
 Mirrors PRD §10; each item names the package/artifact.
 
 - **P0 — WarmPool provisioning.** `api/v1alpha1` types (§3) → `make generate`;
-  `warmpool_controller.go` reconciles the worker Deployment; workers self-register
-  (`WorkerEntry` in KV on startup) + `workercache`. Assign by hand (no router).
+  `warmpool_controller.go` reconciles the worker Deployment to `spec.replicas`
+  (defer `minIdle` autoscaling to P4 — the field exists but isn't enforced yet);
+  operator's pod-label informer writes `WorkerEntry` on pod add/ready/delete
+  (§4.3) + `workercache`. Valkey deployed in-cluster. Assign by hand (no router).
 - **P1 — Assignment table + cold start.** `assign/` (KV + CAS, §4); `resume/`
   cold-start path (`/run`); `router` fast path + `/resume` call; JWT validate.
 - **P1.5 — Security.** SPIRE **install** (new prereq, §6.1) + `go-spiffe` in
@@ -577,8 +606,8 @@ Mirrors PRD §10; each item names the package/artifact.
 - **P4+ — HA, reconciliation (`/capacity`), snapshot GC, arbitrary-image pool
   (O6c), registry policy (O6b).**
 
-Infra prerequisites (before the phases that need them): **Valkey/ElastiCache**
-(P1), **SPIRE** (P1.5).
+Infra prerequisites (before the phases that need them): **Valkey (in-cluster)**
+(P0/P1), **SPIRE** (P1.5).
 
 ---
 
