@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -25,10 +26,14 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -36,8 +41,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	corev1alpha1 "github.com/jicowan/aio-sandbox/controlplane/api/v1alpha1"
+	"github.com/jicowan/aio-sandbox/controlplane/internal/assign"
+	"github.com/jicowan/aio-sandbox/controlplane/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
+
+// envOr returns the value of env var key, or def if unset/empty.
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
 
 var (
 	scheme   = runtime.NewScheme()
@@ -60,6 +75,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var kvAddr string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -78,6 +94,8 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&kvAddr, "kv-addr", envOr("SANDBOXD_KV_ADDR", "valkey:6379"),
+		"Valkey/Redis address (host:port) for the assignment table.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -158,8 +176,23 @@ func main() {
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "4b8d1bd5.sandboxd.io",
+		// Scope the Pod informer to sandboxd worker pods at the WATCH level so the
+		// API server only streams worker pods to this operator — cluster-wide pod
+		// churn of other pods never reaches our cache. (A reconcile predicate would
+		// filter events only, not the ListWatch; the cache selector filters both.)
+		// NOTE: this means the operator's cached client can only read worker pods;
+		// it does not need any other pod.
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				&corev1.Pod{}: {
+					Label: labels.SelectorFromSet(labels.Set{
+						controller.LabelApp: controller.LabelAppWorker,
+					}),
+				},
+			},
+		},
+		LeaderElection:   enableLeaderElection,
+		LeaderElectionID: "4b8d1bd5.sandboxd.io",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -177,6 +210,31 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Assignment table (Valkey). The operator is the sole KV writer (TDD §4).
+	kv := assign.New(kvAddr)
+	defer kv.Close()
+	if err := kv.Ping(context.Background()); err != nil {
+		setupLog.Error(err, "Failed to reach Valkey assignment table", "addr", kvAddr)
+		os.Exit(1)
+	}
+	setupLog.Info("connected to assignment table", "addr", kvAddr)
+
+	if err := (&controller.WarmPoolReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		KV:     kv,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "warmpool")
+		os.Exit(1)
+	}
+	if err := (&controller.WorkerDiscoveryReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		KV:     kv,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "worker-discovery")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

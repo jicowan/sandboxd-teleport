@@ -409,6 +409,26 @@ the operator already maintains. sandboxd's `/capacity` + `/status` stay the
 ground truth the operator reconciles against — they are *read*, never a KV write
 path from the worker.
 
+**Watch scoping (churn safety).** The pod watch is scoped at the **cache /
+ListWatch level**, not merely by a reconcile predicate — the manager's Pod cache
+carries a label selector (`cache.Options.ByObject[*Pod]{Label:
+sandboxd.io/app=worker}`), so the API server only ever streams *worker* pods to
+the operator. Cluster-wide churn of unrelated pods never enters our informer or
+memory. (A `predicate.LabelSelectorPredicate` alone would filter only reconcile
+events while still watching/caching every pod — the wrong layer; we deliberately
+scope the cache instead.) Consequence: the operator's cached client can read only
+worker pods, which is all it needs.
+
+**Future scale option — watch EndpointSlices, not Pods (deferred).** Front each
+pool's workers with a **headless Service** and watch its **EndpointSlices** rather
+than Pods. EndpointSlices already carry, per ready endpoint, the IP + a
+`targetRef.name` (= pod name) with readiness precomputed — exactly the
+`{podName, podIP, ready}` tuple `WorkerEntry` needs — in far fewer objects than
+pods, on a path (kube-proxy/CoreDNS) built for high churn. Cost: a headless
+Service per pool + endpoint→pod indirection. Adopt if worker-pool size or churn
+ever justifies it; the label-scoped pod watch above is adequate for a bounded
+warm pool (tens of workers). Deferred to a P4 hardening phase.
+
 ---
 
 ## 5. The `Resume` contract & request paths

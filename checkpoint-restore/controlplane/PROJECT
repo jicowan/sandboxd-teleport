@@ -20,6 +20,7 @@ resources:
 - api:
     crdVersion: v1
     namespaced: true
+  controller: true
   domain: sandboxd.io
   group: core
   kind: WarmPool

@@ -40,8 +40,8 @@ var ErrVersionConflict = errors.New("assign: version conflict")
 var ErrNotFound = errors.New("assign: not found")
 
 // Key helpers keep the layout in one place (TDD §4.1).
-func sessionKey(sid string) string  { return "session:" + sid }
-func workerKey(pod string) string   { return "worker:" + pod }
+func sessionKey(sid string) string   { return "session:" + sid }
+func workerKey(pod string) string    { return "worker:" + pod }
 func poolIdleKey(pool string) string { return "pool:" + pool + ":idle" }
 
 // Client is a thin wrapper over a Valkey/Redis connection with the assignment

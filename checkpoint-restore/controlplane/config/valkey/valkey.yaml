@@ -1,0 +1,66 @@
+# Valkey — the control plane's assignment table (TDD §4). Run IN-CLUSTER to
+# minimize dependence on AWS-native services; S3 stays the only AWS dependency
+# (and is itself S3-compatible-replaceable). ElastiCache/MemoryDB is a drop-in
+# later option (same protocol) but is not assumed.
+#
+# MVP: a single replica with ephemeral storage. The assignment table is
+# reconstructable — worker entries are re-derived by the operator's pod informer,
+# and session entries are backed by S3 checkpoints — so Valkey is a cache of
+# authoritative-but-rebuildable state, not a system of record. HA/persistence is a
+# later hardening concern.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valkey
+  namespace: sandboxd-controlplane-system
+  labels:
+    app.kubernetes.io/name: valkey
+    app.kubernetes.io/part-of: sandboxd-controlplane
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: valkey
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: valkey
+    spec:
+      containers:
+        - name: valkey
+          image: valkey/valkey:8-alpine
+          args:
+            - "--save"
+            - ""            # disable RDB snapshots: treat as an in-memory cache
+            - "--appendonly"
+            - "no"
+            - "--maxmemory-policy"
+            - "noeviction"  # never silently drop assignment entries under pressure
+          ports:
+            - { containerPort: 6379, name: valkey }
+          readinessProbe:
+            tcpSocket: { port: 6379 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: 6379 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits: { memory: "512Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey
+  namespace: sandboxd-controlplane-system
+  labels:
+    app.kubernetes.io/name: valkey
+spec:
+  selector:
+    app.kubernetes.io/name: valkey
+  ports:
+    - { port: 6379, targetPort: 6379, name: valkey }
