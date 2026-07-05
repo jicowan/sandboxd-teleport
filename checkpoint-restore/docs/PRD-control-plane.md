@@ -499,16 +499,53 @@ the wait.** In order of transparency to the client:
    decouples warm-up from the request but changes the client contract, so it's an
    opt-in mode, not the default.
 
-**Reconcile the timeouts explicitly.** The router's proxy timeout and the
-control-plane resume deadline must be set **relative to the known client
-timeout**. If the client's timeout is shorter than a plausible worst-case
-warm-up, we must surface `Retry-After` *early* (or warm ahead per B2) rather than
-hang until the client abandons the request. See **O8**.
+**Reconcile the timeouts explicitly — two different clocks.** Streaming agent
+responses (§5.5) mean a single flat proxy timeout is wrong: a legitimate response
+can stream for minutes. Separate the two:
+- **Time-to-first-byte (warm-up clock, short, ~15s).** Bounds cold-start/restore
+  before the sandbox produces *anything*. If exceeded, surface `503 Retry-After`
+  (or warm ahead per B2) rather than hang. This is the resume deadline.
+- **Total stream duration (response clock, long / idle-based).** Once bytes flow,
+  the connection may stay open as long as the agent streams. Bound it by an
+  **idle** timeout (no bytes for N seconds) rather than a hard wall-clock cap, so
+  long-but-active agent runs aren't killed.
+
+Both must be set **relative to the known client timeout**: if the client's
+timeout is shorter than a plausible worst-case *warm-up*, surface `Retry-After`
+early or warm ahead (B2); the response clock then only needs to outlast the
+agent's stream.
 
 **Recommendation:** default to `minIdle` headroom (A) so the common miss is
 seconds, `Retry-After` as the honest fallback for the tail, and proactive
 warm-on-`initialize` in the broker for the MCP path so first-request latency is
 hidden in the common case.
+
+### 5.5 Streaming (the router must be a streaming proxy)
+
+The sandboxes run **agents that stream their output** (MCP-over-HTTP / SSE /
+chunked transfer — token-by-token or event-by-event). The stream's path is the
+data plane: agent → sandbox port → worker DNAT → **router** → client. HTTP is the
+native fit for this (SSE and MCP Streamable HTTP are how agents stream today);
+this is a reason the control channels stay HTTP too (§O4/transport), not a reason
+to reach for gRPC — the agent stream never touches the control channels.
+
+But it makes the router a **true streaming proxy**, not a buffer-and-forward one.
+Requirements:
+- **Immediate flushing.** Use `httputil.ReverseProxy` with `FlushInterval` set to
+  flush-immediately (e.g. `-1`) so SSE/chunked bytes reach the client as produced,
+  not buffered until the upstream response completes. A naive buffering proxy
+  silently breaks streaming — this is the classic footgun.
+- **No response buffering; pass `Content-Type: text/event-stream` through** and
+  preserve chunked encoding.
+- **Honor client disconnect.** Propagate context cancellation upstream so a
+  client that closes tears down the sandbox-side stream (don't leak long-lived
+  upstream connections).
+- **Long-lived-connection budget.** The response clock (§5.4) is idle-based, not a
+  short flat timeout, so a multi-minute agent stream isn't cut off.
+
+This is an implementation constraint on the router, not a change to the routing
+model — continuation still resolves `sid → worker` and proxies; it just proxies a
+stream correctly. Captured concretely in the TDD's router section.
 
 ---
 
@@ -725,10 +762,22 @@ needs it.
   alpha/beta opt-in.
 - **O8 — Warm-up vs. client-timeout handling (§5.4).** Confirm the strategy mix:
   `minIdle` headroom + `503 Retry-After` fallback + proactive
-  warm-on-`initialize` in the broker. Decide the concrete numbers — resume
-  deadline (~15s?), router proxy timeout, and how the broker learns/keeps a
-  session warm — and reconcile them against the known client timeout(s). Whether
-  to also offer an async `202`+poll mode is an opt-in, per-caller question.
+  warm-on-`initialize` in the broker. Decide the concrete numbers for the **two
+  clocks** (§5.4): the **time-to-first-byte / resume deadline** (~15s?) and the
+  **response idle timeout** for long-lived streaming agent responses (§5.5) — and
+  reconcile both against the known client timeout(s). Whether to also offer an
+  async `202`+poll mode is an opt-in, per-caller question.
+- **O9 — Internal transport: HTTP vs gRPC. → DECIDED: HTTP everywhere; shared Go
+  types for contracts; gRPC deferred.** The data plane is MCP-over-HTTP/SSE by
+  definition (§5.5); the control channels (control-plane→sandboxd lifecycle;
+  router→control-plane `Resume`) are low-frequency request/response ops. Since the
+  whole stack is Go, we get compile-time contract safety from a **shared Go types
+  package** both sides import — most of gRPC's typing benefit without protoc/codegen
+  in the build, and HTTP stays `curl`-debuggable with one TLS/mTLS story. Substrate
+  uses gRPC because it's a larger, cross-language, streaming system; that's not our
+  situation. Revisit gRPC only if a real streaming-control or polyglot need appears
+  (agent *output* streaming does not count — it rides the HTTP data plane, not the
+  control channels).
 
 ---
 
