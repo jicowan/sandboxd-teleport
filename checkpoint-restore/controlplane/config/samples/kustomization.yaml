@@ -1,0 +1,6 @@
+## Append samples of your project ##
+resources:
+- core_v1alpha1_sandboxtemplate.yaml
+- core_v1alpha1_warmpool.yaml
+- core_v1alpha1_session.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
