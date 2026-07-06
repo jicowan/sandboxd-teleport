@@ -54,6 +54,11 @@ type SandboxTemplateSpec struct {
 	// resources is a worker sizing hint informing the WarmPool pod resources.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// scheduling controls worker-pod placement (nodeSelector/tolerations/spread).
+	// Optional; the operator applies gVisor-node defaults when unset.
+	// +optional
+	Scheduling SchedulingSpec `json:"scheduling,omitempty"`
 }
 
 // SandboxTemplateStatus defines the observed state of SandboxTemplate.

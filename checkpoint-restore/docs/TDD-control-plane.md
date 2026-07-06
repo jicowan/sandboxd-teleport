@@ -165,6 +165,22 @@ API group **`sandboxd.io`**, version **`v1alpha1`** (our own serving version —
 plain `apiextensions.k8s.io/v1` CRD, GA, no feature gate; PRD platform
 constraint). All three are namespaced.
 
+> **Design note — explicit fields vs. embedded PodSpec (revisit later).** We
+> deliberately model `SandboxTemplate` with explicit fields (image/cmd/env/ports/
+> health/idle) that map onto sandboxd's `/run`, rather than embedding a full
+> `corev1.PodSpec` the way agent-sandbox's SandboxTemplate does. Rationale: the
+> *sandbox* is a nested gVisor workload driven via sandboxd's HTTP API, not a
+> kubelet-scheduled pod — so most PodSpec fields are meaningless for it. Only the
+> **worker pod** is a real pod, and it's operator-managed + generic. The seam that
+> *is* legitimately worker-pod shaping is **scheduling** (nodeSelector/tolerations/
+> anti-affinity), which we expose via `SandboxTemplate.spec.scheduling`
+> (`SchedulingSpec`) with gVisor defaults. **Future direction:** as more worker-pod
+> knobs are needed (resources already exist; later: sidecars, volumes, security
+> context), consolidate them under a small worker-pod-template sub-struct rather
+> than growing many top-level fields — moving toward agent-sandbox's embedded-spec
+> shape for the *worker* pod specifically, while keeping the *sandbox* run-config
+> explicit. Not needed for the MVP.
+
 ### 3.1 SandboxTemplate
 
 ```go

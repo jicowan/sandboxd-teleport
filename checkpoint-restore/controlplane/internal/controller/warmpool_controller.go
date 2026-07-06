@@ -101,8 +101,8 @@ func (r *WarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 
-	// Desired worker Deployment for this pool.
-	dep := r.desiredDeployment(&pool)
+	// Desired worker Deployment for this pool (scheduling comes from the template).
+	dep := r.desiredDeployment(&pool, &tmpl)
 	if err := controllerutil.SetControllerReference(&pool, dep, r.Scheme); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -140,7 +140,7 @@ func (r *WarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 // desiredDeployment builds the worker Deployment for a pool, modeled on
 // sandboxd/worker-deploy.yaml, parameterized by pool name.
-func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool) *appsv1.Deployment {
+func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool, tmpl *corev1alpha1.SandboxTemplate) *appsv1.Deployment {
 	replicas := pool.Spec.Replicas
 	labels := map[string]string{
 		LabelApp:  LabelAppWorker,
@@ -150,6 +150,36 @@ func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool) *app
 	propagation := corev1.MountPropagationBidirectional
 	hostPathSocket := corev1.HostPathSocket
 	hostPathDir := corev1.HostPathDirectory
+
+	// Placement comes from the template's scheduling spec, with gVisor defaults.
+	sched := tmpl.Spec.Scheduling
+	nodeSelector := sched.NodeSelector
+	if nodeSelector == nil {
+		nodeSelector = map[string]string{"sandbox": "gvisor"}
+	}
+	tolerations := sched.Tolerations
+	if tolerations == nil {
+		tolerations = []corev1.Toleration{{
+			Key: "sandbox", Operator: corev1.TolerationOpEqual,
+			Value: "gvisor", Effect: corev1.TaintEffectNoSchedule,
+		}}
+	}
+	var affinity *corev1.Affinity
+	if sched.SpreadAcrossNodes == nil || *sched.SpreadAcrossNodes {
+		// Soft anti-affinity: prefer distinct nodes per pool (survives node loss,
+		// gives cross-node teleport a target), but still schedule on one node.
+		affinity = &corev1.Affinity{
+			PodAntiAffinity: &corev1.PodAntiAffinity{
+				PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
+					Weight: 100,
+					PodAffinityTerm: corev1.PodAffinityTerm{
+						TopologyKey:   "kubernetes.io/hostname",
+						LabelSelector: &metav1.LabelSelector{MatchLabels: labels},
+					},
+				}},
+			},
+		}
+	}
 
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -162,16 +192,16 @@ func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool) *app
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels:      labels,
-					Annotations: map[string]string{"karpenter.sh/do-not-disrupt": "true"},
+					Labels: labels,
+					// NOTE: intentionally NO karpenter.sh/do-not-disrupt annotation.
+					// Pool workers are ephemeral/replaceable; pinning them blocks node
+					// drain/consolidation (and wedged a node-replace during testing).
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: r.Worker.ServiceAccount,
-					NodeSelector:       map[string]string{"sandbox": "gvisor"},
-					Tolerations: []corev1.Toleration{{
-						Key: "sandbox", Operator: corev1.TolerationOpEqual,
-						Value: "gvisor", Effect: corev1.TaintEffectNoSchedule,
-					}},
+					NodeSelector:       nodeSelector,
+					Tolerations:        tolerations,
+					Affinity:           affinity,
 					Containers: []corev1.Container{{
 						Name:  "sandboxd",
 						Image: WorkerImage,

@@ -171,7 +171,7 @@ func (wf *Workflow) resumeFromSnapshot(ctx context.Context, cur *resumeapi.Sessi
 	if err != nil {
 		return "", err
 	}
-	ip, err := wf.startAndBind(ctx, cur.SID, w, true, cur.Image, nil, nil, cur.Ports, nil, cur.SnapshotURI)
+	ip, err := wf.startAndBind(ctx, cur.SID, w, true, cur.Image, nil, nil, cur.Ports, cur.Health, cur.SnapshotURI)
 	if err != nil {
 		_ = wf.kv.ReleaseWorker(ctx, w.Pod, w.Pool)
 		return "", err
@@ -194,6 +194,9 @@ func (wf *Workflow) startAndBind(ctx context.Context, sid string, w *resumeapi.W
 		e.WorkerPodIP = w.PodIP
 		e.Image = img
 		e.Ports = ports
+		if health != nil {
+			e.Health = health // record so restore-on-connect can replay the probe
+		}
 	}); err != nil {
 		return "", fmt.Errorf("mark resuming: %w", err)
 	}

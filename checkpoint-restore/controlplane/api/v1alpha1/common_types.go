@@ -16,6 +16,8 @@ limitations under the License.
 
 package v1alpha1
 
+import corev1 "k8s.io/api/core/v1"
+
 // Shared subtypes used across SandboxTemplate / WarmPool / Session (TDD §3).
 // PortMap and Health mirror sandboxd's on-wire JSON tags so the operator can hand
 // them straight to sandboxd's /run and /restore; the client wire copies live in
@@ -77,4 +79,26 @@ type LocalRef struct {
 	// name of the referenced object.
 	// +kubebuilder:validation:Required
 	Name string `json:"name"`
+}
+
+// SchedulingSpec controls how the pool's worker pods are placed. All fields are
+// optional; the operator applies gVisor-node defaults when unset (nodeSelector
+// sandbox=gvisor + the matching toleration, and spread-across-nodes on), so
+// templates only specify what they want to change.
+type SchedulingSpec struct {
+	// nodeSelector constrains which nodes workers land on. Defaults to
+	// {sandbox: gvisor} when nil.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// tolerations applied to worker pods. Defaults to tolerating the
+	// sandbox=gvisor:NoSchedule taint when nil.
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// spreadAcrossNodes enables soft pod anti-affinity so a pool's workers prefer
+	// distinct nodes (survives a node loss; gives cross-node teleport a target).
+	// Defaults to true when nil.
+	// +optional
+	SpreadAcrossNodes *bool `json:"spreadAcrossNodes,omitempty"`
 }
