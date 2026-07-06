@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"strconv"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -52,6 +53,16 @@ import (
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+// envInt returns the int value of env var key, or def if unset/unparseable.
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return def
 }
@@ -112,6 +123,9 @@ func main() {
 		"AWS region for worker pods.")
 	flag.StringVar(&workerImage, "worker-image", envOr("SANDBOXD_WORKER_IMAGE", ""),
 		"sandboxd worker image (overrides the built-in default).")
+	var maxConcurrentResumes int
+	flag.IntVar(&maxConcurrentResumes, "max-concurrent-resumes", envInt("SANDBOXD_MAX_CONCURRENT_RESUMES", 0),
+		"Cap on in-flight resumes (backpressure); 0 = unlimited (default).")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -277,7 +291,8 @@ func main() {
 
 	// Internal /resume endpoint (control-plane half of the request path, TDD §5.1).
 	// P1: plain HTTP; P1.5 wraps with SPIRE mTLS. Uses the manager's cached client.
-	resumeWF := controller.BuildResumeWorkflow(mgr.GetClient(), kv, resumeNamespace, nil).WithNotifier(poolNotifier)
+	resumeWF := controller.BuildResumeWorkflow(mgr.GetClient(), kv, resumeNamespace, nil,
+		resume.Options{MaxConcurrentResumes: maxConcurrentResumes}).WithNotifier(poolNotifier)
 	if err := controller.AddResumeServer(mgr, resumeAddr, resume.NewHandler(resumeWF)); err != nil {
 		setupLog.Error(err, "Failed to add resume server")
 		os.Exit(1)

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/jicowan/aio-sandbox/controlplane/internal/assign"
+	"github.com/jicowan/aio-sandbox/controlplane/internal/metrics"
 	"github.com/jicowan/aio-sandbox/shared/resumeapi"
 )
 
@@ -110,8 +111,10 @@ func (s *Suspender) SweepOnce(ctx context.Context) (int, error) {
 		if err := s.suspendOne(ctx, e, pol.Action); err != nil {
 			// non-fatal: log-and-continue is the caller's job; surface via return only
 			// if nothing else acted. Keep sweeping other sessions.
+			metrics.SuspendsTotal.WithLabelValues(pol.Action, metrics.OutcomeError).Inc()
 			continue
 		}
+		metrics.SuspendsTotal.WithLabelValues(pol.Action, metrics.OutcomeSuccess).Inc()
 		acted++
 	}
 	return acted, nil

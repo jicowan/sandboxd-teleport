@@ -40,7 +40,7 @@ import (
 // and the KV table. namespace is where SandboxTemplate/Session objects live
 // (single-namespace MVP). httpClient is passed to sandboxd clients (nil = plain
 // HTTP for P1; P1.5 supplies an mTLS client).
-func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, httpClient *http.Client) *resume.Workflow {
+func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, httpClient *http.Client, opts resume.Options) *resume.Workflow {
 	lookup := func(ctx context.Context, name string) (*resume.TemplateSpec, error) {
 		var t corev1alpha1.SandboxTemplate
 		if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &t); err != nil {
@@ -92,7 +92,7 @@ func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, h
 		return sandboxdclient.New(podIP, httpClient)
 	}
 
-	return resume.New(kv, lookup, clientFor, planFor, resume.Options{})
+	return resume.New(kv, lookup, clientFor, planFor, opts)
 }
 
 // BuildSuspender wires resume.Suspender to the operator's cached client + KV.

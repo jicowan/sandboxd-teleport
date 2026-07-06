@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/jicowan/aio-sandbox/controlplane/internal/assign"
+	"github.com/jicowan/aio-sandbox/controlplane/internal/metrics"
 	"github.com/jicowan/aio-sandbox/controlplane/internal/sandboxdclient"
 	"github.com/jicowan/aio-sandbox/shared/resumeapi"
 	"github.com/jicowan/aio-sandbox/shared/sbxapi"
@@ -73,6 +74,13 @@ type Options struct {
 	ResumeDeadline time.Duration
 	// PollInterval is how often to poll sandboxd /status while waiting for ready.
 	PollInterval time.Duration
+	// MaxConcurrentResumes caps in-flight resumes (backpressure, P5). A restore
+	// pulls a checkpoint from S3 and drives a worker; a thundering herd (e.g. a
+	// node loss then a traffic spike) could stampede S3/sandboxd. 0 = unlimited
+	// (default off). When the cap is reached, a resume that can't acquire a slot
+	// before ResumeDeadline returns ErrNoCapacity (-> 503 Retry-After), same as a
+	// worker-exhausted pool — the caller retries.
+	MaxConcurrentResumes int
 }
 
 // Workflow runs the Resume operation. Construct once, call Resume per request.
@@ -82,6 +90,7 @@ type Workflow struct {
 	clientFor WorkerClientFactory
 	planFor   func(ctx context.Context, sid, subject string) (*SessionPlan, error)
 	notify    assign.PoolNotifier
+	sem       chan struct{} // resume concurrency limiter; nil = unlimited
 	opts      Options
 }
 
@@ -95,7 +104,11 @@ func New(kv *assign.Client, lookup TemplateLookup, clientFor WorkerClientFactory
 	if opts.PollInterval == 0 {
 		opts.PollInterval = 250 * time.Millisecond
 	}
-	return &Workflow{kv: kv, lookup: lookup, clientFor: clientFor, planFor: planFor, notify: assign.NopNotifier{}, opts: opts}
+	var sem chan struct{}
+	if opts.MaxConcurrentResumes > 0 {
+		sem = make(chan struct{}, opts.MaxConcurrentResumes)
+	}
+	return &Workflow{kv: kv, lookup: lookup, clientFor: clientFor, planFor: planFor, notify: assign.NopNotifier{}, sem: sem, opts: opts}
 }
 
 // WithNotifier wires a PoolNotifier so a claim/release nudges the WarmPool
@@ -110,7 +123,31 @@ func (wf *Workflow) WithNotifier(n assign.PoolNotifier) *Workflow {
 // Resume gets sid Running and returns the worker pod IP. Idempotent: if the
 // session is already Running on a live worker, it returns immediately. On no
 // capacity it returns assign.ErrNoCapacity (the handler maps that to 503).
+// This is a thin instrumented wrapper around resume() (metrics: kind, outcome,
+// duration).
 func (wf *Workflow) Resume(ctx context.Context, sid, subject string) (string, error) {
+	start := time.Now()
+	ip, kind, fast, err := wf.resume(ctx, sid, subject)
+	if fast {
+		return ip, err // continuation fast path: not a resume, don't record
+	}
+	outcome := metrics.OutcomeSuccess
+	switch {
+	case errors.Is(err, assign.ErrNoCapacity):
+		outcome = metrics.OutcomeNoCapacity
+	case err != nil:
+		outcome = metrics.OutcomeError
+	}
+	metrics.ResumesTotal.WithLabelValues(kind, outcome).Inc()
+	if err == nil {
+		metrics.ResumeDuration.WithLabelValues(kind).Observe(time.Since(start).Seconds())
+	}
+	return ip, err
+}
+
+// resume returns (ip, kind, fastPath, err). kind is cold_start|restore; fastPath
+// is true when the session was already Running (no resume performed).
+func (wf *Workflow) resume(ctx context.Context, sid, subject string) (string, string, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, wf.opts.ResumeDeadline)
 	defer cancel()
 
@@ -118,27 +155,44 @@ func (wf *Workflow) Resume(ctx context.Context, sid, subject string) (string, er
 	// if already Running.
 	cur, curErr := wf.kv.GetSession(ctx, sid)
 	if curErr == nil && cur.State == resumeapi.StateRunning && cur.WorkerPodIP != "" {
-		return cur.WorkerPodIP, nil // fast path
+		return cur.WorkerPodIP, "", true, nil // fast path (no slot needed)
+	}
+
+	// Backpressure (P5): acquire a resume slot before doing real work. The fast
+	// path above is exempt (it's just a KV read). If we can't get a slot before
+	// the deadline, treat it as no-capacity so the caller gets 503 Retry-After.
+	kindGuess := metrics.KindColdStart
+	if curErr == nil && cur.State == resumeapi.StateSuspended {
+		kindGuess = metrics.KindRestore
+	}
+	if wf.sem != nil {
+		select {
+		case wf.sem <- struct{}{}:
+			defer func() { <-wf.sem }()
+		case <-ctx.Done():
+			return "", kindGuess, false, assign.ErrNoCapacity
+		}
 	}
 
 	// RESTORE branch (P3): the session was suspended and has a checkpoint in S3.
 	// The image/ports were recorded at suspend time and travel with the session —
 	// we restore those, NOT the template (the sandbox may have diverged from it).
 	if curErr == nil && cur.State == resumeapi.StateSuspended && cur.SnapshotURI != "" {
-		return wf.resumeFromSnapshot(ctx, cur)
+		ip, err := wf.resumeFromSnapshot(ctx, cur)
+		return ip, metrics.KindRestore, false, err
 	}
 
 	// COLD START branch (P1): ABSENT / no checkpoint -> /run from the plan.
 	plan, err := wf.planFor(ctx, sid, subject)
 	if err != nil {
-		return "", fmt.Errorf("resolve session plan: %w", err)
+		return "", metrics.KindColdStart, false, fmt.Errorf("resolve session plan: %w", err)
 	}
 	img := plan.Image
 	cmd, env, ports, health := plan.Cmd, plan.Env, plan.Ports, plan.Health
 	if plan.TemplateName != "" {
 		tmpl, terr := wf.lookup(ctx, plan.TemplateName)
 		if terr != nil {
-			return "", fmt.Errorf("lookup template %q: %w", plan.TemplateName, terr)
+			return "", metrics.KindColdStart, false, fmt.Errorf("lookup template %q: %w", plan.TemplateName, terr)
 		}
 		img = tmpl.Image
 		if len(cmd) == 0 {
@@ -155,21 +209,21 @@ func (wf *Workflow) Resume(ctx context.Context, sid, subject string) (string, er
 		}
 	}
 	if img == "" {
-		return "", errors.New("no image to run (empty template and no inline image)")
+		return "", metrics.KindColdStart, false, errors.New("no image to run (empty template and no inline image)")
 	}
 
 	w, err := wf.kv.ClaimIdleWorker(ctx, plan.Pool, sid)
 	if err != nil {
-		return "", err // ErrNoCapacity -> 503 at the handler
+		return "", metrics.KindColdStart, false, err // ErrNoCapacity -> 503 at the handler
 	}
 	wf.notify.PoolChanged(w.Pool) // idle->busy: refresh pool status
 	ip, err := wf.startAndBind(ctx, sid, w, false, img, cmd, env, ports, health, "")
 	if err != nil {
 		_ = wf.kv.ReleaseWorker(ctx, w.Pod, w.Pool)
 		wf.notify.PoolChanged(w.Pool) // busy->idle (rolled back)
-		return "", err
+		return "", metrics.KindColdStart, false, err
 	}
-	return ip, nil
+	return ip, metrics.KindColdStart, false, nil
 }
 
 // resumeFromSnapshot claims a (typically different) idle worker and restores the

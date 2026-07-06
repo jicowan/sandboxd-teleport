@@ -204,3 +204,44 @@ func TestResumeIdempotentWhenRunning(t *testing.T) {
 		t.Fatalf("idempotent resume failed: ip=%q err=%v", ip, err)
 	}
 }
+
+func TestBackpressureCapReturnsNoCapacity(t *testing.T) {
+	ctx := context.Background()
+	kv := testKV(t)
+	kv.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w1", Pool: "p", PodIP: "10.0.0.1", State: resumeapi.WorkerIdle})
+	kv.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w2", Pool: "p", PodIP: "10.0.0.2", State: resumeapi.WorkerIdle})
+
+	inWait := make(chan struct{}, 1)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/run") {
+			json.NewEncoder(w).Encode(sbxapi.RunResponse{Status: "running"})
+			return
+		}
+		// /status: signal we're holding the slot, then block until released.
+		select {
+		case inWait <- struct{}{}:
+		default:
+		}
+		<-release
+		json.NewEncoder(w).Encode(sbxapi.StatusResponse{Status: "running", Ready: true})
+	}))
+	t.Cleanup(srv.Close)
+
+	// Holder: long deadline so it keeps the single slot for the whole test.
+	holder := New(kv, lookupImage("img"), clientForStub(srv), planTemplate("p", "tmpl"),
+		Options{ResumeDeadline: 10 * time.Second, PollInterval: 5 * time.Millisecond, MaxConcurrentResumes: 1})
+	go holder.Resume(ctx, "s1", "alice")
+	<-inWait // holder is now blocked in WaitReady, slot held
+
+	// Contender shares the SAME workflow (same semaphore). Give it a short caller
+	// context so it fails fast when it can't acquire the slot (resume derives its
+	// deadline from the passed ctx).
+	cctx, ccancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer ccancel()
+	_, err := holder.Resume(cctx, "s2", "bob")
+	if err != assign.ErrNoCapacity {
+		t.Fatalf("want ErrNoCapacity from backpressure, got %v", err)
+	}
+	close(release)
+}

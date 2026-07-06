@@ -36,6 +36,7 @@ import (
 
 	corev1alpha1 "github.com/jicowan/aio-sandbox/controlplane/api/v1alpha1"
 	"github.com/jicowan/aio-sandbox/controlplane/internal/assign"
+	"github.com/jicowan/aio-sandbox/controlplane/internal/metrics"
 )
 
 // Labels the operator stamps on worker pods so the discovery informer (TDD §4.3)
@@ -258,6 +259,7 @@ func (r *WarmPoolReconciler) updateStatus(ctx context.Context, pool *corev1alpha
 		if err == nil {
 			pool.Status.Idle = int32(idle)
 			pool.Status.Busy = int32(total - idle)
+			metrics.SetPoolWorkers(pool.Name, idle, total-idle) // real-time gauge
 		}
 	}
 	setReadyCond(&pool.Status.Conditions, metav1.ConditionTrue, "Provisioned", "worker deployment reconciled")
