@@ -81,41 +81,33 @@ type LocalRef struct {
 	Name string `json:"name"`
 }
 
-// SchedulingSpec controls how the pool's worker pods are placed. All fields are
-// optional; the operator applies gVisor-node defaults when unset (nodeSelector
-// sandbox=gvisor + the matching toleration, and spread-across-nodes on), so
-// templates only specify what they want to change.
+// SchedulingSpec controls how the pool's worker pods are placed. It is a
+// pass-through of the standard Kubernetes scheduling primitives — the operator
+// injects NO defaults. Whatever you set here is applied verbatim to the worker
+// pod spec; whatever you leave empty is simply not set.
+//
+// This makes placement an explicit operator decision. Choose one:
+//   - topologySpreadConstraints — distribute workers across nodes/zones,
+//   - affinity — (anti-)affinity rules for finer control,
+//   - or set nothing — the scheduler places workers at will.
+//
+// Note: to pin workers to gVisor nodes you must set nodeSelector/tolerations
+// explicitly (e.g. nodeSelector {sandbox: gvisor} + the matching toleration);
+// this is no longer assumed.
 type SchedulingSpec struct {
-	// nodeSelector constrains which nodes workers land on. Defaults to
-	// {sandbox: gvisor} when nil.
+	// nodeSelector constrains which nodes workers may land on. Applied verbatim.
 	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
-	// tolerations applied to worker pods. Defaults to tolerating the
-	// sandbox=gvisor:NoSchedule taint when nil.
+	// tolerations applied to worker pods. Applied verbatim.
 	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
-	// spreadAcrossNodes adds a topology-spread constraint so a pool's workers are
-	// distributed across nodes (survives a node loss; gives cross-node teleport a
-	// target; drives cluster-autoscaler/Karpenter to add nodes). Defaults to true
-	// when nil.
+	// affinity (node/pod/anti- affinity) applied verbatim to the worker pods.
 	// +optional
-	SpreadAcrossNodes *bool `json:"spreadAcrossNodes,omitempty"`
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
-	// spreadTopologyKey is the node label the spread is computed over.
-	// Defaults to "kubernetes.io/hostname" (per-node) when empty.
+	// topologySpreadConstraints applied verbatim to the worker pods.
 	// +optional
-	SpreadTopologyKey string `json:"spreadTopologyKey,omitempty"`
-
-	// spreadMaxSkew is the maximum allowed difference in worker count between
-	// topology domains. Defaults to 1 when 0.
-	// +optional
-	SpreadMaxSkew int32 `json:"spreadMaxSkew,omitempty"`
-
-	// spreadWhenUnsatisfiable is DoNotSchedule (hard — forces scale-up) or
-	// ScheduleAnyway (soft — best-effort). Defaults to DoNotSchedule when empty.
-	// +kubebuilder:validation:Enum=DoNotSchedule;ScheduleAnyway
-	// +optional
-	SpreadWhenUnsatisfiable corev1.UnsatisfiableConstraintAction `json:"spreadWhenUnsatisfiable,omitempty"`
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
 }

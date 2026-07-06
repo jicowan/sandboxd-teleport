@@ -165,6 +165,19 @@ API group **`sandboxd.io`**, version **`v1alpha1`** (our own serving version —
 plain `apiextensions.k8s.io/v1` CRD, GA, no feature gate; PRD platform
 constraint). All three are namespaced.
 
+> **Scheduling & resources are pure pass-through (no operator defaults).** The
+> operator injects NO nodeSelector/toleration/affinity/topologySpread/resources.
+> `SandboxTemplate.spec.scheduling` (nodeSelector, tolerations, affinity,
+> topologySpreadConstraints) and `spec.resources` are applied verbatim; omit them
+> and the scheduler places workers at will. To pin to gVisor nodes, set
+> nodeSelector `{sandbox: gvisor}` + the matching toleration explicitly. To spread
+> across nodes AND force a node scale-up, a plain `maxSkew`/`DoNotSchedule` is NOT
+> enough — with one node there is one topology domain and any packing satisfies
+> the skew, so nothing goes Pending and the autoscaler never adds a node. Use
+> **`minDomains: 2`** (GA) so the scheduler requires 2 domains → the 2nd replica
+> goes Pending → Karpenter provisions a node. Pool workers carry labels
+> `{sandboxd.io/app: worker, sandboxd.io/pool: <name>}` for the spread selector.
+
 > **Design note — explicit fields vs. embedded PodSpec (revisit later).** We
 > deliberately model `SandboxTemplate` with explicit fields (image/cmd/env/ports/
 > health/idle) that map onto sandboxd's `/run`, rather than embedding a full

@@ -226,10 +226,17 @@ func (in *SchedulingSpec) DeepCopyInto(out *SchedulingSpec) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
-	if in.SpreadAcrossNodes != nil {
-		in, out := &in.SpreadAcrossNodes, &out.SpreadAcrossNodes
-		*out = new(bool)
-		**out = **in
+	if in.Affinity != nil {
+		in, out := &in.Affinity, &out.Affinity
+		*out = new(v1.Affinity)
+		(*in).DeepCopyInto(*out)
+	}
+	if in.TopologySpreadConstraints != nil {
+		in, out := &in.TopologySpreadConstraints, &out.TopologySpreadConstraints
+		*out = make([]v1.TopologySpreadConstraint, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
 	}
 }
 

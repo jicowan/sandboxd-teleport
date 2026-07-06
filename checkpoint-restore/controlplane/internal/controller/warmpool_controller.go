@@ -23,7 +23,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -152,56 +151,17 @@ func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool, tmpl
 	hostPathSocket := corev1.HostPathSocket
 	hostPathDir := corev1.HostPathDirectory
 
-	// Placement comes from the template's scheduling spec, with gVisor defaults.
+	// Placement and resources are pure pass-through from the template — the
+	// operator injects NO defaults (no nodeSelector, toleration, spread, affinity,
+	// or resource requests). Whatever the template sets is applied verbatim;
+	// whatever it omits is left unset, and the scheduler places workers at will.
+	// This makes placement/sizing an explicit operator decision.
+	//
+	// NOTE: the topology-spread label selector, if the user wants per-pool spread,
+	// must target this pool's workers — document that pool workers carry the
+	// labels {sandboxd.io/app: worker, sandboxd.io/pool: <name>}.
 	sched := tmpl.Spec.Scheduling
-	nodeSelector := sched.NodeSelector
-	if nodeSelector == nil {
-		nodeSelector = map[string]string{"sandbox": "gvisor"}
-	}
-	tolerations := sched.Tolerations
-	if tolerations == nil {
-		tolerations = []corev1.Toleration{{
-			Key: "sandbox", Operator: corev1.TolerationOpEqual,
-			Value: "gvisor", Effect: corev1.TaintEffectNoSchedule,
-		}}
-	}
-	// Spread a pool's workers across nodes. We use a topology-spread constraint
-	// with DoNotSchedule (not soft anti-affinity): soft preference can't force a
-	// scale-up — the scheduler just bin-packs onto the one existing node and
-	// Karpenter never adds capacity. maxSkew=1 + DoNotSchedule makes the 2nd
-	// replica on a single node UNSCHEDULABLE, which triggers Karpenter to
-	// provision another node; it still allows balanced multi-per-node as the pool
-	// grows beyond the node count (unlike hard one-per-node anti-affinity).
-	var spreads []corev1.TopologySpreadConstraint
-	if sched.SpreadAcrossNodes == nil || *sched.SpreadAcrossNodes {
-		key := sched.SpreadTopologyKey
-		if key == "" {
-			key = "kubernetes.io/hostname"
-		}
-		skew := sched.SpreadMaxSkew
-		if skew == 0 {
-			skew = 1
-		}
-		when := sched.SpreadWhenUnsatisfiable
-		if when == "" {
-			when = corev1.DoNotSchedule // hard by default: forces node scale-up
-		}
-		spreads = []corev1.TopologySpreadConstraint{{
-			MaxSkew:           skew,
-			TopologyKey:       key,
-			WhenUnsatisfiable: when,
-			LabelSelector:     &metav1.LabelSelector{MatchLabels: labels},
-		}}
-	}
-	// Worker resource requests: from the template when set, else a small default
-	// so the scheduler accounts for capacity (without requests it treats the node
-	// as infinitely packable, defeating scale-up).
-	workerResources := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("250m"),
-			corev1.ResourceMemory: resource.MustParse("256Mi"),
-		},
-	}
+	var workerResources corev1.ResourceRequirements
 	if tmpl.Spec.Resources != nil {
 		workerResources = *tmpl.Spec.Resources
 	}
@@ -224,9 +184,10 @@ func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool, tmpl
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName:        r.Worker.ServiceAccount,
-					NodeSelector:              nodeSelector,
-					Tolerations:               tolerations,
-					TopologySpreadConstraints: spreads,
+					NodeSelector:              sched.NodeSelector,
+					Tolerations:               sched.Tolerations,
+					Affinity:                  sched.Affinity,
+					TopologySpreadConstraints: sched.TopologySpreadConstraints,
 					Containers: []corev1.Container{{
 						Name:      "sandboxd",
 						Image:     WorkerImage,
