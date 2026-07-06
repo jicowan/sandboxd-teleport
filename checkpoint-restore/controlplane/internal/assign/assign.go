@@ -39,6 +39,9 @@ var ErrVersionConflict = errors.New("assign: version conflict")
 // ErrNotFound is returned when a key does not exist.
 var ErrNotFound = errors.New("assign: not found")
 
+// ErrNoCapacity is returned when a pool has no idle worker to claim.
+var ErrNoCapacity = errors.New("assign: no idle worker in pool")
+
 // Key helpers keep the layout in one place (TDD §4.1).
 func sessionKey(sid string) string   { return "session:" + sid }
 func workerKey(pod string) string    { return "worker:" + pod }
@@ -192,6 +195,72 @@ func (c *Client) RemoveWorker(ctx context.Context, pod, pool string) error {
 // IdleWorkers returns the pod names currently idle in a pool.
 func (c *Client) IdleWorkers(ctx context.Context, pool string) ([]string, error) {
 	return c.rdb.SMembers(ctx, poolIdleKey(pool)).Result()
+}
+
+// claimWorkerScript atomically pops an idle worker from the pool idle set, marks
+// its worker record busy+bound to the session, and returns the worker JSON. It
+// enforces both CAS invariants (TDD §4.2) in one transaction: a worker leaves the
+// idle set exactly once, so two concurrent claims cannot grab the same worker.
+// Returns "" (empty) when the pool has no idle worker.
+//
+// KEYS[1]=poolIdleKey  ARGV[1]=sid
+var claimWorkerScript = redis.NewScript(`
+local pod = redis.call('SPOP', KEYS[1])
+if not pod then
+  return ''
+end
+local wkey = 'worker:' .. pod
+local cur = redis.call('GET', wkey)
+if not cur then
+  return ''            -- stale idle-set entry; caller retries
+end
+local w = cjson.decode(cur)
+w.state = 'busy'
+w.sid = ARGV[1]
+w.version = (w.version or 0) + 1
+redis.call('SET', wkey, cjson.encode(w))
+return cjson.encode(w)
+`)
+
+// ClaimIdleWorker atomically claims one idle worker in pool for sid, marking it
+// busy. Returns ErrNoCapacity if none are idle. The claim is durable in KV; the
+// caller then drives /run|/restore and binds the session.
+func (c *Client) ClaimIdleWorker(ctx context.Context, pool, sid string) (*resumeapi.WorkerEntry, error) {
+	res, err := claimWorkerScript.Run(ctx, c.rdb, []string{poolIdleKey(pool)}, sid).Text()
+	if err != nil {
+		return nil, err
+	}
+	if res == "" {
+		return nil, ErrNoCapacity
+	}
+	var w resumeapi.WorkerEntry
+	if err := json.Unmarshal([]byte(res), &w); err != nil {
+		return nil, err
+	}
+	return &w, nil
+}
+
+// releaseWorkerScript marks a worker idle again and re-adds it to the pool idle
+// set (used to roll back a failed claim). KEYS[1]=workerKey KEYS[2]=poolIdleKey
+// ARGV[1]=pod
+var releaseWorkerScript = redis.NewScript(`
+local cur = redis.call('GET', KEYS[1])
+if cur then
+  local w = cjson.decode(cur)
+  w.state = 'idle'
+  w.sid = ''
+  w.version = (w.version or 0) + 1
+  redis.call('SET', KEYS[1], cjson.encode(w))
+end
+redis.call('SADD', KEYS[2], ARGV[1])
+return 1
+`)
+
+// ReleaseWorker returns a claimed worker to the idle pool (rollback on a failed
+// resume, before the pod-informer would otherwise repair it).
+func (c *Client) ReleaseWorker(ctx context.Context, pod, pool string) error {
+	return releaseWorkerScript.Run(ctx, c.rdb,
+		[]string{workerKey(pod), poolIdleKey(pool)}, pod).Err()
 }
 
 // CountWorkers returns (idle, total) worker counts for a pool by scanning the

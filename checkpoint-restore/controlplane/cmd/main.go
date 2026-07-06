@@ -43,6 +43,7 @@ import (
 	corev1alpha1 "github.com/jicowan/aio-sandbox/controlplane/api/v1alpha1"
 	"github.com/jicowan/aio-sandbox/controlplane/internal/assign"
 	"github.com/jicowan/aio-sandbox/controlplane/internal/controller"
+	"github.com/jicowan/aio-sandbox/controlplane/internal/resume"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -96,6 +97,11 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.StringVar(&kvAddr, "kv-addr", envOr("SANDBOXD_KV_ADDR", "valkey:6379"),
 		"Valkey/Redis address (host:port) for the assignment table.")
+	var resumeAddr, resumeNamespace string
+	flag.StringVar(&resumeAddr, "resume-addr", envOr("SANDBOXD_RESUME_ADDR", ":8082"),
+		"Address for the internal /resume endpoint the router calls.")
+	flag.StringVar(&resumeNamespace, "resume-namespace", envOr("SANDBOXD_NAMESPACE", "sandboxd-controlplane-system"),
+		"Namespace where SandboxTemplate/WarmPool/Session objects live.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -233,6 +239,14 @@ func main() {
 		KV:     kv,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "worker-discovery")
+		os.Exit(1)
+	}
+
+	// Internal /resume endpoint (control-plane half of the request path, TDD §5.1).
+	// P1: plain HTTP; P1.5 wraps with SPIRE mTLS. Uses the manager's cached client.
+	resumeWF := controller.BuildResumeWorkflow(mgr.GetClient(), kv, resumeNamespace, nil)
+	if err := controller.AddResumeServer(mgr, resumeAddr, resume.NewHandler(resumeWF)); err != nil {
+		setupLog.Error(err, "Failed to add resume server")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
