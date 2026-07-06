@@ -48,6 +48,15 @@ const (
 // Configurable so we don't hardcode a registry in code.
 var WorkerImage = "820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v40"
 
+// WorkerConfig carries the deployment-time settings for provisioned worker pods
+// that aren't part of the WarmPool API (cluster-specific: S3 identity + bucket).
+// Defaults match the proven static worker-deploy.yaml.
+type WorkerConfig struct {
+	ServiceAccount string // Pod Identity SA for S3 (checkpoint/restore)
+	Bucket         string // SANDBOXD_BUCKET
+	Region         string // AWS_REGION
+}
+
 // WarmPoolReconciler reconciles a WarmPool object into a Deployment of sandboxd
 // worker pods (TDD §3.2, P0). It reconciles to spec.replicas; minIdle-driven
 // autoscaling is deferred to a later phase.
@@ -57,12 +66,16 @@ type WarmPoolReconciler struct {
 	// KV is the assignment table, used only to compute idle/busy status counts.
 	// Optional: nil disables status counts (useful in envtest without Valkey).
 	KV *assign.Client
+	// Worker configures provisioned worker pods (SA, bucket, region).
+	Worker WorkerConfig
 }
 
 // +kubebuilder:rbac:groups=core.sandboxd.io,resources=warmpools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.sandboxd.io,resources=warmpools/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.sandboxd.io,resources=warmpools/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core.sandboxd.io,resources=sandboxtemplates,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core.sandboxd.io,resources=sessions,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=core.sandboxd.io,resources=sessions/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 
@@ -153,7 +166,8 @@ func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool) *app
 					Annotations: map[string]string{"karpenter.sh/do-not-disrupt": "true"},
 				},
 				Spec: corev1.PodSpec{
-					NodeSelector: map[string]string{"sandbox": "gvisor"},
+					ServiceAccountName: r.Worker.ServiceAccount,
+					NodeSelector:       map[string]string{"sandbox": "gvisor"},
 					Tolerations: []corev1.Toleration{{
 						Key: "sandbox", Operator: corev1.TolerationOpEqual,
 						Value: "gvisor", Effect: corev1.TaintEffectNoSchedule,
@@ -162,11 +176,7 @@ func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool) *app
 						Name:  "sandboxd",
 						Image: WorkerImage,
 						Ports: []corev1.ContainerPort{{ContainerPort: 8090, Name: "http"}},
-						Env: []corev1.EnvVar{
-							{Name: "SANDBOXD_DEBUG", Value: "0"},
-							{Name: "SANDBOXD_POD_IP", ValueFrom: &corev1.EnvVarSource{
-								FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}},
-						},
+						Env:   r.workerEnv(),
 						SecurityContext: &corev1.SecurityContext{Privileged: &privileged},
 						ReadinessProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
@@ -188,6 +198,23 @@ func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool) *app
 			},
 		},
 	}
+}
+
+// workerEnv builds the env for a worker container: pod IP (downward API),
+// debug off, and — when configured — the S3 bucket/region for checkpoint/restore.
+func (r *WarmPoolReconciler) workerEnv() []corev1.EnvVar {
+	env := []corev1.EnvVar{
+		{Name: "SANDBOXD_DEBUG", Value: "0"},
+		{Name: "SANDBOXD_POD_IP", ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}},
+	}
+	if r.Worker.Bucket != "" {
+		env = append(env, corev1.EnvVar{Name: "SANDBOXD_BUCKET", Value: r.Worker.Bucket})
+	}
+	if r.Worker.Region != "" {
+		env = append(env, corev1.EnvVar{Name: "AWS_REGION", Value: r.Worker.Region})
+	}
+	return env
 }
 
 // updateStatus refreshes replicas/idle/busy/selector on the pool.

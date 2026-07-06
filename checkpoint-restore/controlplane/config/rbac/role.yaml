@@ -35,6 +35,25 @@ rules:
 - apiGroups:
   - core.sandboxd.io
   resources:
+  - sessions
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - core.sandboxd.io
+  resources:
+  - sessions/status
+  - warmpools/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - core.sandboxd.io
+  resources:
   - warmpools
   verbs:
   - create
@@ -49,12 +68,4 @@ rules:
   resources:
   - warmpools/finalizers
   verbs:
-  - update
-- apiGroups:
-  - core.sandboxd.io
-  resources:
-  - warmpools/status
-  verbs:
-  - get
-  - patch
   - update

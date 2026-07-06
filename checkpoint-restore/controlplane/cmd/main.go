@@ -102,6 +102,15 @@ func main() {
 		"Address for the internal /resume endpoint the router calls.")
 	flag.StringVar(&resumeNamespace, "resume-namespace", envOr("SANDBOXD_NAMESPACE", "sandboxd-controlplane-system"),
 		"Namespace where SandboxTemplate/WarmPool/Session objects live.")
+	var workerSA, workerBucket, workerRegion, workerImage string
+	flag.StringVar(&workerSA, "worker-sa", envOr("SANDBOXD_WORKER_SA", ""),
+		"ServiceAccount for provisioned worker pods (S3 Pod Identity).")
+	flag.StringVar(&workerBucket, "worker-bucket", envOr("SANDBOXD_BUCKET", ""),
+		"S3 bucket for worker checkpoints.")
+	flag.StringVar(&workerRegion, "worker-region", envOr("AWS_REGION", ""),
+		"AWS region for worker pods.")
+	flag.StringVar(&workerImage, "worker-image", envOr("SANDBOXD_WORKER_IMAGE", ""),
+		"sandboxd worker image (overrides the built-in default).")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -225,10 +234,18 @@ func main() {
 	}
 	setupLog.Info("connected to assignment table", "addr", kvAddr)
 
+	if workerImage != "" {
+		controller.WorkerImage = workerImage
+	}
 	if err := (&controller.WarmPoolReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 		KV:     kv,
+		Worker: controller.WorkerConfig{
+			ServiceAccount: workerSA,
+			Bucket:         workerBucket,
+			Region:         workerRegion,
+		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "warmpool")
 		os.Exit(1)
