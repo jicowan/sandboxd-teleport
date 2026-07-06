@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jicowan/aio-sandbox/shared/resumeapi"
+	"github.com/jicowan/aio-sandbox/shared/sbxapi"
 )
 
 // fakeKV is an in-memory KVReader for router tests.
@@ -101,6 +102,30 @@ func TestFastPathProxies(t *testing.T) {
 	}
 	if kv.stamps["s1"] == 0 {
 		t.Fatalf("expected activity stamp")
+	}
+}
+
+func TestFastPathUsesSessionPort(t *testing.T) {
+	// Worker serves on the stub's port; session declares it as the exposed host
+	// port. Router must target the session port, not the default WorkerPort.
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("workload"))
+	}))
+	defer worker.Close()
+	host, port := splitHostPort(t, worker)
+
+	kv := newFakeKV()
+	kv.sessions["s1"] = &resumeapi.SessionEntry{
+		SID: "s1", State: resumeapi.StateRunning, WorkerPodIP: host,
+		Ports: []sbxapi.PortMap{{Container: port, Host: port}},
+	}
+	// WorkerPort deliberately WRONG (would 404/refuse); session port must win.
+	rt := New(kv, &fakeResumer{}, NewHeaderResolver(), http.DefaultTransport, Options{WorkerPort: 1})
+
+	rr := httptest.NewRecorder()
+	rt.ServeHTTP(rr, req("s1"))
+	if rr.Code != 200 || rr.Body.String() != "workload" {
+		t.Fatalf("session-port routing failed: %d %q", rr.Code, rr.Body.String())
 	}
 }
 

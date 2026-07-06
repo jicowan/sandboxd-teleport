@@ -107,7 +107,7 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		e.State == resumeapi.StateRunning && e.WorkerPodIP != "" {
 		rt.stamp(id.SID)       // O3 bracketing: active at start
 		defer rt.stamp(id.SID) // and at end
-		rt.proxyTo(w, r, e.WorkerPodIP)
+		rt.proxyTo(w, r, e.WorkerPodIP, hostPort(e))
 		return
 	}
 
@@ -131,14 +131,38 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "resume returned no worker", http.StatusBadGateway)
 		return
 	}
+	// Re-read the (now Running) entry to learn the exposed host port to target.
+	port := rt.opts.WorkerPort
+	if e, gerr := rt.kv.GetSession(r.Context(), id.SID); gerr == nil {
+		port = hostPort(e)
+	}
 	rt.stamp(id.SID)
 	defer rt.stamp(id.SID)
-	rt.proxyTo(w, r, ip)
+	rt.proxyTo(w, r, ip, port)
 }
 
-// proxyTo streams the request to the worker at podIP:WorkerPort.
-func (rt *Router) proxyTo(w http.ResponseWriter, r *http.Request, podIP string) {
-	target := &url.URL{Scheme: "http", Host: podIP + ":" + strconv.Itoa(rt.opts.WorkerPort)}
+// hostPort returns the worker-pod host port to proxy to: the session's first
+// exposed port (host, or container if host==0). Falls back to 0 (caller uses its
+// default) when the session declares no ports.
+func hostPort(e *resumeapi.SessionEntry) int {
+	if len(e.Ports) == 0 {
+		return 0
+	}
+	p := e.Ports[0]
+	if p.Host != 0 {
+		return p.Host
+	}
+	return p.Container
+}
+
+// proxyTo streams the request to the worker at podIP:port. port==0 falls back to
+// the configured WorkerPort (sandboxd control port) — only used when a session
+// declares no exposed ports.
+func (rt *Router) proxyTo(w http.ResponseWriter, r *http.Request, podIP string, port int) {
+	if port == 0 {
+		port = rt.opts.WorkerPort
+	}
+	target := &url.URL{Scheme: "http", Host: podIP + ":" + strconv.Itoa(port)}
 	// Per-request rewrite: point at the worker, preserve path/query.
 	outreq := r.Clone(r.Context())
 	outreq.URL.Scheme = target.Scheme
