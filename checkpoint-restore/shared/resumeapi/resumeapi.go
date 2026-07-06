@@ -33,8 +33,9 @@ type SessionEntry struct {
 	SnapshotURI  string           `json:"snapshotURI,omitempty"`  // current checkpoint (one lineage)
 	Ports        []sbxapi.PortMap `json:"ports,omitempty"`
 	Health       *sbxapi.Health   `json:"health,omitempty"`       // replayed on restore (probe config)
-	Version      int64            `json:"version"`
-	LastActiveAt int64            `json:"lastActiveAt,omitempty"` // unix ms; stamped by router (O3)
+	Version          int64 `json:"version"`
+	LastActiveAt     int64 `json:"lastActiveAt,omitempty"`     // unix ms; stamped by router (O3)
+	LastCheckpointAt int64 `json:"lastCheckpointAt,omitempty"` // unix ms; periodic checkpoint (P5)
 }
 
 // WorkerEntry registers a worker in the assignment table (key worker:<pod>).

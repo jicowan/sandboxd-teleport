@@ -51,6 +51,15 @@ type SandboxTemplateSpec struct {
 	// +optional
 	Idle IdlePolicy `json:"idle,omitempty"`
 
+	// checkpointIntervalSeconds enables periodic background checkpoints (P5):
+	// while a session is Running, checkpoint it to S3 (leaving it running) every
+	// N seconds so a worker crash loses at most ~N seconds of state instead of
+	// everything since the last idle-suspend. 0 = disabled (default). Opt-in
+	// because it adds S3 churn + brief checkpoint pauses.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	CheckpointIntervalSeconds int `json:"checkpointIntervalSeconds,omitempty"`
+
 	// resources is a worker sizing hint informing the WarmPool pod resources.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`

@@ -41,6 +41,15 @@ spec:
           spec:
             description: spec defines the desired state of SandboxTemplate
             properties:
+              checkpointIntervalSeconds:
+                description: |-
+                  checkpointIntervalSeconds enables periodic background checkpoints (P5):
+                  while a session is Running, checkpoint it to S3 (leaving it running) every
+                  N seconds so a worker crash loses at most ~N seconds of state instead of
+                  everything since the last idle-suspend. 0 = disabled (default). Opt-in
+                  because it adds S3 churn + brief checkpoint pauses.
+                minimum: 0
+                type: integer
               cmd:
                 description: cmd overrides the image entrypoint+cmd (optional; image
                   default otherwise).

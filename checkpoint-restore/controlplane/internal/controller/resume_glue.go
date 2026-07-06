@@ -126,6 +126,70 @@ func BuildSuspender(c client.Client, kv *assign.Client, namespace string, httpCl
 	return resume.NewSuspender(kv, clientFor, policyFor, resume.SuspendOptions{})
 }
 
+// BuildCheckpointer wires resume.Checkpointer to the cached client + KV, resolving
+// each session's periodic-checkpoint interval from its pool's template (P5).
+func BuildCheckpointer(c client.Client, kv *assign.Client, namespace string, httpClient *http.Client) *resume.Checkpointer {
+	clientFor := func(podIP string) *sandboxdclient.Client {
+		return sandboxdclient.New(podIP, httpClient)
+	}
+	policyFor := func(ctx context.Context, sid string) (resume.CheckpointPolicy, error) {
+		var s corev1alpha1.Session
+		if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: sid}, &s); err != nil {
+			return resume.CheckpointPolicy{}, err
+		}
+		if s.Spec.PoolRef == nil {
+			return resume.CheckpointPolicy{}, nil
+		}
+		tmplName, err := templateForPool(ctx, c, namespace, s.Spec.PoolRef.Name)
+		if err != nil {
+			return resume.CheckpointPolicy{}, err
+		}
+		var t corev1alpha1.SandboxTemplate
+		if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: tmplName}, &t); err != nil {
+			return resume.CheckpointPolicy{}, err
+		}
+		return resume.CheckpointPolicy{IntervalSeconds: t.Spec.CheckpointIntervalSeconds}, nil
+	}
+	return resume.NewCheckpointer(kv, clientFor, policyFor, 0, nil)
+}
+
+// CheckpointSweeper is a manager Runnable that periodically checkpoints opted-in
+// long-lived Running sessions (P5).
+type CheckpointSweeper struct {
+	Checkpointer *resume.Checkpointer
+	Interval     time.Duration
+}
+
+// Start runs the checkpoint sweep loop until the manager context is cancelled.
+func (s *CheckpointSweeper) Start(ctx context.Context) error {
+	iv := s.Interval
+	if iv == 0 {
+		iv = 15 * time.Second
+	}
+	t := time.NewTicker(iv)
+	defer t.Stop()
+	log := logf.FromContext(ctx).WithName("checkpoint-sweeper")
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
+			if n, err := s.Checkpointer.SweepOnce(ctx); err != nil {
+				log.Error(err, "periodic checkpoint sweep failed")
+			} else if n > 0 {
+				log.Info("periodic-checkpointed running sessions", "count", n)
+			}
+		}
+	}
+}
+
+var _ manager.Runnable = &CheckpointSweeper{}
+
+// AddCheckpointSweeper registers the periodic-checkpoint sweeper.
+func AddCheckpointSweeper(mgr ctrl.Manager, cp *resume.Checkpointer, interval time.Duration) error {
+	return mgr.Add(&CheckpointSweeper{Checkpointer: cp, Interval: interval})
+}
+
 // SuspendSweeper is a manager Runnable that periodically suspends idle sessions.
 type SuspendSweeper struct {
 	Suspender *resume.Suspender

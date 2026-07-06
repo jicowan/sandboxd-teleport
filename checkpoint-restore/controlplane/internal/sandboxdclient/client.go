@@ -90,6 +90,18 @@ func (c *Client) Suspend(ctx context.Context, sandboxID string) (*sbxapi.Suspend
 	return &out, nil
 }
 
+// Checkpoint checkpoints the sandbox to S3 while leaving it running (POST
+// /checkpoint, leaveRunning=true) — used for periodic background checkpoints.
+// Returns the snapshot S3 prefix.
+func (c *Client) Checkpoint(ctx context.Context, sandboxID string, leaveRunning bool) (*sbxapi.CheckpointResponse, error) {
+	var out sbxapi.CheckpointResponse
+	req := sbxapi.CheckpointRequest{SandboxID: sandboxID, LeaveRunning: leaveRunning}
+	if err := c.do(ctx, http.MethodPost, "/checkpoint", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Status returns the sandbox runtime status (GET /status?sandboxId=).
 func (c *Client) Status(ctx context.Context, sandboxID string) (*sbxapi.StatusResponse, error) {
 	var out sbxapi.StatusResponse

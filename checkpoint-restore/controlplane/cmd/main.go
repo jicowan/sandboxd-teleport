@@ -306,6 +306,15 @@ func main() {
 		setupLog.Error(err, "Failed to add suspend sweeper")
 		os.Exit(1)
 	}
+
+	// Periodic background checkpoints (P5, opt-in per template): checkpoint
+	// long-lived Running sessions in place so a worker crash loses at most the
+	// interval, not everything since the last idle-suspend.
+	checkpointer := controller.BuildCheckpointer(mgr.GetClient(), kv, resumeNamespace, nil)
+	if err := controller.AddCheckpointSweeper(mgr, checkpointer, 0); err != nil {
+		setupLog.Error(err, "Failed to add checkpoint sweeper")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
