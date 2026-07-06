@@ -133,6 +133,25 @@ func (c *Client) DeleteSession(ctx context.Context, sid string) error {
 	return c.rdb.Del(ctx, sessionKey(sid)).Err()
 }
 
+// stampActiveScript sets only the lastActiveAt field on an existing session entry
+// WITHOUT touching version — activity stamping (O3) is advisory metadata, not a
+// state transition, so it must not contend with the operator's CAS writes. No-op
+// if the session key is absent. KEYS[1]=sessionKey ARGV[1]=unixMillis
+var stampActiveScript = redis.NewScript(`
+local cur = redis.call('GET', KEYS[1])
+if not cur then return 0 end
+local obj = cjson.decode(cur)
+obj.lastActiveAt = tonumber(ARGV[1])
+redis.call('SET', KEYS[1], cjson.encode(obj))
+return 1
+`)
+
+// StampActive updates a session's lastActiveAt (router-observed request activity,
+// O3). Advisory: does not bump version, so it never conflicts with resume CAS.
+func (c *Client) StampActive(ctx context.Context, sid string, unixMillis int64) error {
+	return stampActiveScript.Run(ctx, c.rdb, []string{sessionKey(sid)}, unixMillis).Err()
+}
+
 // ---- workers (written only by the operator's discovery informer, TDD §4.3) ----
 
 // GetWorker returns the worker entry, or ErrNotFound.

@@ -57,9 +57,9 @@ func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, h
 			return nil, err
 		}
 		plan := &resume.SessionPlan{
-			Cmd:    s.Spec.Cmd,
-			Env:    s.Spec.Env,
-			Ports:  portsFromCRD(s.Spec.Ports),
+			Cmd:   s.Spec.Cmd,
+			Env:   s.Spec.Env,
+			Ports: portsFromCRD(s.Spec.Ports),
 		}
 		switch {
 		case s.Spec.Image != "": // arbitrary-image mode (O6)

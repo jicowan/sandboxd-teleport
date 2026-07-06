@@ -50,9 +50,9 @@ type TemplateSpec struct {
 // SessionPlan is what to run for a session: either a template reference (resolved
 // via TemplateLookup) or an inline arbitrary image (O6). Exactly one path is used.
 type SessionPlan struct {
-	Pool         string           // pool to claim a worker from
-	TemplateName string           // "" when inline image mode
-	Image        string           // inline image (arbitrary-image mode), else ""
+	Pool         string // pool to claim a worker from
+	TemplateName string // "" when inline image mode
+	Image        string // inline image (arbitrary-image mode), else ""
 	Cmd          []string
 	Env          []string
 	Ports        []sbxapi.PortMap
@@ -77,11 +77,11 @@ type Options struct {
 
 // Workflow runs the Resume operation. Construct once, call Resume per request.
 type Workflow struct {
-	kv         *assign.Client
-	lookup     TemplateLookup
-	clientFor  WorkerClientFactory
-	planFor    func(ctx context.Context, sid, subject string) (*SessionPlan, error)
-	opts       Options
+	kv        *assign.Client
+	lookup    TemplateLookup
+	clientFor WorkerClientFactory
+	planFor   func(ctx context.Context, sid, subject string) (*SessionPlan, error)
+	opts      Options
 }
 
 // New builds a Workflow. planFor resolves a session id (+subject) to what should
