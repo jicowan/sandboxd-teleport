@@ -145,6 +145,22 @@ func (wf *Workflow) Resume(ctx context.Context, sid, subject string) (string, er
 	return ip, err
 }
 
+// workerHolds reports whether the KV worker entry for pod still exists and is
+// busy-bound to sid. The worker-discovery prune loop removes the entry when the
+// pod is gone, so this is a cheap (KV-only) liveness fence: false means the
+// worker crashed/was reassigned and the RUNNING record is stale. Empty pod
+// (older entries) is treated as "not held" so we re-verify via restore/cold path.
+func (wf *Workflow) workerHolds(ctx context.Context, pod, sid string) bool {
+	if pod == "" {
+		return false
+	}
+	w, err := wf.kv.GetWorker(ctx, pod)
+	if err != nil {
+		return false // entry gone -> pod gone (pruned) -> stale RUNNING
+	}
+	return w.State == resumeapi.WorkerBusy && w.SID == sid
+}
+
 // resume returns (ip, kind, fastPath, err). kind is cold_start|restore; fastPath
 // is true when the session was already Running (no resume performed).
 func (wf *Workflow) resume(ctx context.Context, sid, subject string) (string, string, bool, error) {
@@ -155,7 +171,21 @@ func (wf *Workflow) resume(ctx context.Context, sid, subject string) (string, st
 	// if already Running.
 	cur, curErr := wf.kv.GetSession(ctx, sid)
 	if curErr == nil && cur.State == resumeapi.StateRunning && cur.WorkerPodIP != "" {
-		return cur.WorkerPodIP, "", true, nil // fast path (no slot needed)
+		// Fencing (P4): only fast-path to the recorded worker if it is still live.
+		// The worker-discovery prune loop deletes a WorkerEntry when its pod is
+		// gone, so an absent/reassigned entry means the worker crashed and this
+		// RUNNING record is stale — do NOT route to a dead IP, and it is now safe
+		// to restore (the old copy is confirmed gone). If the worker is live and
+		// still bound to this session, prefer it (never restore over a live copy).
+		if wf.workerHolds(ctx, cur.WorkerPod, sid) {
+			return cur.WorkerPodIP, "", true, nil // live: fast path (no slot needed)
+		}
+		// Stale RUNNING: fall through. Prefer restore from the last checkpoint;
+		// else cold start. Clear the dead binding so the branches below fire.
+		if cur.SnapshotURI != "" {
+			cur.State = resumeapi.StateSuspended
+			cur.WorkerPod, cur.WorkerPodIP = "", ""
+		}
 	}
 
 	// Backpressure (P5): acquire a resume slot before doing real work. The fast

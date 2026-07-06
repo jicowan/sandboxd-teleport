@@ -197,11 +197,46 @@ func TestResumeFromSnapshot(t *testing.T) {
 func TestResumeIdempotentWhenRunning(t *testing.T) {
 	ctx := context.Background()
 	kv := testKV(t)
-	kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{SID: "s1", State: resumeapi.StateRunning, WorkerPodIP: "10.9.9.9"})
+	// A genuinely-live Running session: the worker entry exists, busy-bound to s1.
+	kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{SID: "s1", State: resumeapi.StateRunning, WorkerPod: "w1", WorkerPodIP: "10.9.9.9"})
+	kv.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w1", Pool: "p", PodIP: "10.9.9.9", State: resumeapi.WorkerBusy, SID: "s1"})
 	wf := New(kv, lookupImage("x"), clientForStub(stubWorker(t, 1)), planTemplate("p", "tmpl"), Options{})
 	ip, err := wf.Resume(ctx, "s1", "alice")
 	if err != nil || ip != "10.9.9.9" {
 		t.Fatalf("idempotent resume failed: ip=%q err=%v", ip, err)
+	}
+}
+
+// TestFencingStaleRunningRestores verifies that a RUNNING entry whose worker is
+// gone (crash: no WorkerEntry) is fenced — we do NOT route to the dead IP; we
+// restore from the last checkpoint onto a fresh worker instead.
+func TestFencingStaleRunningRestores(t *testing.T) {
+	ctx := context.Background()
+	kv := testKV(t)
+	// RUNNING pointing at a dead worker (no WorkerEntry for w-dead), but a
+	// checkpoint exists (e.g. from a periodic checkpoint before the crash).
+	kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{
+		SID: "s1", State: resumeapi.StateRunning, Pool: "p",
+		WorkerPod: "w-dead", WorkerPodIP: "10.0.0.9",
+		Image: "redis:7-alpine", SnapshotURI: "sandboxes/s1/snap-1",
+		Ports: []sbxapi.PortMap{{Container: 6379, Host: 6379}},
+	})
+	// a fresh idle worker to restore onto
+	kv.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w-new", Pool: "p", PodIP: "10.0.0.2", State: resumeapi.WorkerIdle})
+
+	var gotRestore bool
+	srv := stubWorkerRestore(t, &gotRestore)
+	wf := New(kv, lookupImage("unused"), clientForStub(srv),
+		func(context.Context, string, string) (*SessionPlan, error) {
+			return nil, fmt.Errorf("planFor must not be called; should restore")
+		}, Options{ResumeDeadline: 3 * time.Second, PollInterval: 5 * time.Millisecond})
+
+	ip, err := wf.Resume(ctx, "s1", "alice")
+	if err != nil {
+		t.Fatalf("fenced resume: %v", err)
+	}
+	if ip != "10.0.0.2" || !gotRestore {
+		t.Fatalf("expected restore onto fresh worker 10.0.0.2, got ip=%q restore=%v", ip, gotRestore)
 	}
 }
 

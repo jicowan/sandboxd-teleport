@@ -678,6 +678,15 @@ Infra prerequisites (before the phases that need them): **Valkey (in-cluster)**
   updated on the same claim/release transitions, so dashboards/HPA can consume it
   without reading CRD status. CRD status stays the coarse `kubectl get` view.
   Deferred.
+- **Router fast-path liveness / stale-RUNNING (follow-up).** The operator's
+  Resume fences stale RUNNING sessions: it fast-paths to the recorded worker only
+  if that worker's KV entry still exists (busy-bound), else treats RUNNING as
+  stale and restores (P4 fencing). The ROUTER's fast path, however, proxies to a
+  RUNNING worker's IP without that liveness check — so a crashed worker yields a
+  502 rather than an automatic re-resume. Options: (a) extend the router KVReader
+  with a worker-liveness check mirroring workerHolds(), or (b) on a fast-path
+  upstream error, fall through to /resume once. Deferred to P4 router hardening;
+  the operator-side fencing already prevents restoring over a live copy.
 - **Multi-namespace workers (future).** Today the operator assumes a single
   namespace for SandboxTemplate/WarmPool/Session *and* worker pods
   (`--resume-namespace`, and the discovery/prune sweep looks pods up there).
