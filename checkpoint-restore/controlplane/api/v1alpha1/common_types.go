@@ -96,9 +96,26 @@ type SchedulingSpec struct {
 	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
-	// spreadAcrossNodes enables soft pod anti-affinity so a pool's workers prefer
-	// distinct nodes (survives a node loss; gives cross-node teleport a target).
-	// Defaults to true when nil.
+	// spreadAcrossNodes adds a topology-spread constraint so a pool's workers are
+	// distributed across nodes (survives a node loss; gives cross-node teleport a
+	// target; drives cluster-autoscaler/Karpenter to add nodes). Defaults to true
+	// when nil.
 	// +optional
 	SpreadAcrossNodes *bool `json:"spreadAcrossNodes,omitempty"`
+
+	// spreadTopologyKey is the node label the spread is computed over.
+	// Defaults to "kubernetes.io/hostname" (per-node) when empty.
+	// +optional
+	SpreadTopologyKey string `json:"spreadTopologyKey,omitempty"`
+
+	// spreadMaxSkew is the maximum allowed difference in worker count between
+	// topology domains. Defaults to 1 when 0.
+	// +optional
+	SpreadMaxSkew int32 `json:"spreadMaxSkew,omitempty"`
+
+	// spreadWhenUnsatisfiable is DoNotSchedule (hard — forces scale-up) or
+	// ScheduleAnyway (soft — best-effort). Defaults to DoNotSchedule when empty.
+	// +kubebuilder:validation:Enum=DoNotSchedule;ScheduleAnyway
+	// +optional
+	SpreadWhenUnsatisfiable corev1.UnsatisfiableConstraintAction `json:"spreadWhenUnsatisfiable,omitempty"`
 }

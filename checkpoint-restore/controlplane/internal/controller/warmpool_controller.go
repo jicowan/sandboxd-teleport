@@ -23,6 +23,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -164,21 +165,45 @@ func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool, tmpl
 			Value: "gvisor", Effect: corev1.TaintEffectNoSchedule,
 		}}
 	}
-	var affinity *corev1.Affinity
+	// Spread a pool's workers across nodes. We use a topology-spread constraint
+	// with DoNotSchedule (not soft anti-affinity): soft preference can't force a
+	// scale-up — the scheduler just bin-packs onto the one existing node and
+	// Karpenter never adds capacity. maxSkew=1 + DoNotSchedule makes the 2nd
+	// replica on a single node UNSCHEDULABLE, which triggers Karpenter to
+	// provision another node; it still allows balanced multi-per-node as the pool
+	// grows beyond the node count (unlike hard one-per-node anti-affinity).
+	var spreads []corev1.TopologySpreadConstraint
 	if sched.SpreadAcrossNodes == nil || *sched.SpreadAcrossNodes {
-		// Soft anti-affinity: prefer distinct nodes per pool (survives node loss,
-		// gives cross-node teleport a target), but still schedule on one node.
-		affinity = &corev1.Affinity{
-			PodAntiAffinity: &corev1.PodAntiAffinity{
-				PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
-					Weight: 100,
-					PodAffinityTerm: corev1.PodAffinityTerm{
-						TopologyKey:   "kubernetes.io/hostname",
-						LabelSelector: &metav1.LabelSelector{MatchLabels: labels},
-					},
-				}},
-			},
+		key := sched.SpreadTopologyKey
+		if key == "" {
+			key = "kubernetes.io/hostname"
 		}
+		skew := sched.SpreadMaxSkew
+		if skew == 0 {
+			skew = 1
+		}
+		when := sched.SpreadWhenUnsatisfiable
+		if when == "" {
+			when = corev1.DoNotSchedule // hard by default: forces node scale-up
+		}
+		spreads = []corev1.TopologySpreadConstraint{{
+			MaxSkew:           skew,
+			TopologyKey:       key,
+			WhenUnsatisfiable: when,
+			LabelSelector:     &metav1.LabelSelector{MatchLabels: labels},
+		}}
+	}
+	// Worker resource requests: from the template when set, else a small default
+	// so the scheduler accounts for capacity (without requests it treats the node
+	// as infinitely packable, defeating scale-up).
+	workerResources := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("250m"),
+			corev1.ResourceMemory: resource.MustParse("256Mi"),
+		},
+	}
+	if tmpl.Spec.Resources != nil {
+		workerResources = *tmpl.Spec.Resources
 	}
 
 	return &appsv1.Deployment{
@@ -198,15 +223,16 @@ func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool, tmpl
 					// drain/consolidation (and wedged a node-replace during testing).
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: r.Worker.ServiceAccount,
-					NodeSelector:       nodeSelector,
-					Tolerations:        tolerations,
-					Affinity:           affinity,
+					ServiceAccountName:        r.Worker.ServiceAccount,
+					NodeSelector:              nodeSelector,
+					Tolerations:               tolerations,
+					TopologySpreadConstraints: spreads,
 					Containers: []corev1.Container{{
-						Name:  "sandboxd",
-						Image: WorkerImage,
-						Ports: []corev1.ContainerPort{{ContainerPort: 8090, Name: "http"}},
-						Env:   r.workerEnv(),
+						Name:      "sandboxd",
+						Image:     WorkerImage,
+						Ports:     []corev1.ContainerPort{{ContainerPort: 8090, Name: "http"}},
+						Env:       r.workerEnv(),
+						Resources: workerResources,
 						SecurityContext: &corev1.SecurityContext{Privileged: &privileged},
 						ReadinessProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
