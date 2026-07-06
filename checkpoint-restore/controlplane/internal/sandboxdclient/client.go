@@ -80,6 +80,16 @@ func (c *Client) Restore(ctx context.Context, req sbxapi.RestoreRequest) (*sbxap
 	return &out, nil
 }
 
+// Suspend checkpoints the sandbox to S3 and frees the worker (POST /suspend).
+// Returns the snapshot S3 prefix to record in the assignment table.
+func (c *Client) Suspend(ctx context.Context, sandboxID string) (*sbxapi.SuspendResponse, error) {
+	var out sbxapi.SuspendResponse
+	if err := c.do(ctx, http.MethodPost, "/suspend", sbxapi.SuspendRequest{SandboxID: sandboxID}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Status returns the sandbox runtime status (GET /status?sandboxId=).
 func (c *Client) Status(ctx context.Context, sandboxID string) (*sbxapi.StatusResponse, error) {
 	var out sbxapi.StatusResponse

@@ -152,6 +152,30 @@ func (c *Client) StampActive(ctx context.Context, sid string, unixMillis int64) 
 	return stampActiveScript.Run(ctx, c.rdb, []string{sessionKey(sid)}, unixMillis).Err()
 }
 
+// ListSessions scans and returns all session entries. O(N) over sessions; used by
+// the idle-suspend sweep (session counts are modest). For very large fleets this
+// would move to a secondary index, but that's a later concern.
+func (c *Client) ListSessions(ctx context.Context) ([]*resumeapi.SessionEntry, error) {
+	var out []*resumeapi.SessionEntry
+	var cursor uint64
+	for {
+		keys, cur, err := c.rdb.Scan(ctx, cursor, "session:*", 100).Result()
+		if err != nil {
+			return nil, err
+		}
+		for _, k := range keys {
+			if e, gerr := c.GetSession(ctx, k[len("session:"):]); gerr == nil {
+				out = append(out, e)
+			}
+		}
+		cursor = cur
+		if cursor == 0 {
+			break
+		}
+	}
+	return out, nil
+}
+
 // ---- workers (written only by the operator's discovery informer, TDD §4.3) ----
 
 // GetWorker returns the worker entry, or ErrNotFound.

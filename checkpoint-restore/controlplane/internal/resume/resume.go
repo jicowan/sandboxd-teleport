@@ -104,18 +104,25 @@ func (wf *Workflow) Resume(ctx context.Context, sid, subject string) (string, er
 	ctx, cancel := context.WithTimeout(ctx, wf.opts.ResumeDeadline)
 	defer cancel()
 
-	// Fast path: already Running.
-	if e, err := wf.kv.GetSession(ctx, sid); err == nil && e.State == resumeapi.StateRunning && e.WorkerPodIP != "" {
-		return e.WorkerPodIP, nil
+	// Read the current entry: it decides cold-start vs restore, and short-circuits
+	// if already Running.
+	cur, curErr := wf.kv.GetSession(ctx, sid)
+	if curErr == nil && cur.State == resumeapi.StateRunning && cur.WorkerPodIP != "" {
+		return cur.WorkerPodIP, nil // fast path
 	}
 
+	// RESTORE branch (P3): the session was suspended and has a checkpoint in S3.
+	// The image/ports were recorded at suspend time and travel with the session —
+	// we restore those, NOT the template (the sandbox may have diverged from it).
+	if curErr == nil && cur.State == resumeapi.StateSuspended && cur.SnapshotURI != "" {
+		return wf.resumeFromSnapshot(ctx, cur)
+	}
+
+	// COLD START branch (P1): ABSENT / no checkpoint -> /run from the plan.
 	plan, err := wf.planFor(ctx, sid, subject)
 	if err != nil {
 		return "", fmt.Errorf("resolve session plan: %w", err)
 	}
-
-	// Resolve what to run: template mode resolves the image from the template;
-	// inline mode uses the plan's image directly (O6).
 	img := plan.Image
 	cmd, env, ports, health := plan.Cmd, plan.Env, plan.Ports, plan.Health
 	if plan.TemplateName != "" {
@@ -141,15 +148,11 @@ func (wf *Workflow) Resume(ctx context.Context, sid, subject string) (string, er
 		return "", errors.New("no image to run (empty template and no inline image)")
 	}
 
-	// Claim an idle worker atomically (CAS: leaves idle set exactly once).
 	w, err := wf.kv.ClaimIdleWorker(ctx, plan.Pool, sid)
 	if err != nil {
 		return "", err // ErrNoCapacity -> 503 at the handler
 	}
-
-	// From here, on any failure we release the worker back to the idle pool so a
-	// transient error doesn't strand capacity.
-	ip, err := wf.startAndBind(ctx, sid, w, img, cmd, env, ports, health)
+	ip, err := wf.startAndBind(ctx, sid, w, false, img, cmd, env, ports, health, "")
 	if err != nil {
 		_ = wf.kv.ReleaseWorker(ctx, w.Pod, w.Pool)
 		return "", err
@@ -157,10 +160,31 @@ func (wf *Workflow) Resume(ctx context.Context, sid, subject string) (string, er
 	return ip, nil
 }
 
-// startAndBind records Resuming, drives sandboxd /run, waits for ready, then
-// records Running. sid is used as the sandbox id on the worker (one per worker).
+// resumeFromSnapshot claims a (typically different) idle worker and restores the
+// session's S3 checkpoint onto it — the teleport (PRD §3 path 2). Pool, image,
+// ports, and snapshot all come from the recorded SessionEntry.
+func (wf *Workflow) resumeFromSnapshot(ctx context.Context, cur *resumeapi.SessionEntry) (string, error) {
+	if cur.Pool == "" {
+		return "", errors.New("suspended session has no pool to restore into")
+	}
+	w, err := wf.kv.ClaimIdleWorker(ctx, cur.Pool, cur.SID)
+	if err != nil {
+		return "", err
+	}
+	ip, err := wf.startAndBind(ctx, cur.SID, w, true, cur.Image, nil, nil, cur.Ports, nil, cur.SnapshotURI)
+	if err != nil {
+		_ = wf.kv.ReleaseWorker(ctx, w.Pod, w.Pool)
+		return "", err
+	}
+	return ip, nil
+}
+
+// startAndBind records Resuming, drives sandboxd /run (cold) or /restore (from a
+// snapshot), waits for ready, then records Running. sid is the sandbox id on the
+// worker (one per worker).
 func (wf *Workflow) startAndBind(ctx context.Context, sid string, w *resumeapi.WorkerEntry,
-	img string, cmd, env []string, ports []sbxapi.PortMap, health *sbxapi.Health) (string, error) {
+	restore bool, img string, cmd, env []string, ports []sbxapi.PortMap, health *sbxapi.Health,
+	snapshot string) (string, error) {
 
 	// Record Resuming (CAS from whatever we last read; create if absent).
 	if err := wf.casSession(ctx, sid, func(e *resumeapi.SessionEntry) {
@@ -175,10 +199,18 @@ func (wf *Workflow) startAndBind(ctx context.Context, sid string, w *resumeapi.W
 	}
 
 	cl := wf.clientFor(w.PodIP)
-	if _, err := cl.Run(ctx, sbxapi.RunRequest{
-		SandboxID: sid, Image: img, Cmd: cmd, Env: env, Ports: ports, Health: health,
-	}); err != nil {
-		return "", fmt.Errorf("worker /run: %w", err)
+	if restore {
+		if _, err := cl.Restore(ctx, sbxapi.RestoreRequest{
+			SandboxID: sid, Image: img, Snapshot: snapshot, Ports: ports, Health: health,
+		}); err != nil {
+			return "", fmt.Errorf("worker /restore: %w", err)
+		}
+	} else {
+		if _, err := cl.Run(ctx, sbxapi.RunRequest{
+			SandboxID: sid, Image: img, Cmd: cmd, Env: env, Ports: ports, Health: health,
+		}); err != nil {
+			return "", fmt.Errorf("worker /run: %w", err)
+		}
 	}
 	if err := cl.WaitReady(ctx, sid, wf.opts.PollInterval); err != nil {
 		return "", fmt.Errorf("wait ready: %w", err)

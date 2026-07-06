@@ -74,6 +74,19 @@ type RestoreResponse struct {
 	Ports        []PortMap `json:"ports,omitempty"`
 }
 
+// SuspendRequest is the body of POST /suspend (checkpoint -> S3 -> free worker).
+type SuspendRequest struct {
+	SandboxID string `json:"sandboxId"`
+}
+
+// SuspendResponse is the body of a successful POST /suspend.
+type SuspendResponse struct {
+	SandboxID string `json:"sandboxId"`
+	Snapshot  string `json:"snapshot"` // S3 prefix of the checkpoint
+	Image     string `json:"image"`
+	Suspended bool   `json:"suspended"`
+}
+
 // StatusResponse is the body of GET /status?sandboxId=.
 type StatusResponse struct {
 	SandboxID string `json:"sandboxId"`

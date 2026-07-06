@@ -266,6 +266,15 @@ func main() {
 		setupLog.Error(err, "Failed to add resume server")
 		os.Exit(1)
 	}
+
+	// Idle-suspend sweeper (P2): periodically checkpoint idle Running sessions to
+	// S3 and free their workers. The teleport completes when a later request hits
+	// the router and the resume path restores from the recorded snapshot (P3).
+	suspender := controller.BuildSuspender(mgr.GetClient(), kv, resumeNamespace, nil)
+	if err := controller.AddSuspendSweeper(mgr, suspender, 0); err != nil {
+		setupLog.Error(err, "Failed to add suspend sweeper")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

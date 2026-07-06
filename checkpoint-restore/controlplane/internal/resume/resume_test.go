@@ -3,6 +3,7 @@ package resume
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -129,6 +130,67 @@ func TestResumeReleasesWorkerOnRunFailure(t *testing.T) {
 	idle, _ := kv.IdleWorkers(ctx, "p")
 	if len(idle) != 1 || idle[0] != "w1" {
 		t.Fatalf("worker not released: %v", idle)
+	}
+}
+
+// stubWorkerRestore serves /restore + /status; records whether /restore (not
+// /run) was called.
+func stubWorkerRestore(t *testing.T, gotRestore *bool) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/restore"):
+			*gotRestore = true
+			var req sbxapi.RestoreRequest
+			json.NewDecoder(r.Body).Decode(&req)
+			json.NewEncoder(w).Encode(sbxapi.RestoreResponse{SandboxID: req.SandboxID, Status: "running", RestoredFrom: req.Snapshot})
+		case strings.HasPrefix(r.URL.Path, "/run"):
+			t.Error("expected /restore, got /run")
+			w.WriteHeader(500)
+		case strings.HasPrefix(r.URL.Path, "/status"):
+			json.NewEncoder(w).Encode(sbxapi.StatusResponse{Status: "running", Ready: true})
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestResumeFromSnapshot(t *testing.T) {
+	ctx := context.Background()
+	kv := testKV(t)
+	// a SUSPENDED session with a recorded checkpoint + image + pool
+	if err := kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{
+		SID: "s1", State: resumeapi.StateSuspended, Pool: "p",
+		Image: "redis:7-alpine", SnapshotURI: "sandboxes/s1/snap-123",
+		Ports: []sbxapi.PortMap{{Container: 6379, Host: 6379}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// idle worker to restore ONTO (a different worker than the original)
+	kv.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w2", Pool: "p", PodIP: "10.0.0.2", State: resumeapi.WorkerIdle})
+
+	var gotRestore bool
+	srv := stubWorkerRestore(t, &gotRestore)
+	// planFor should NOT be consulted on the restore path; make it fail if called.
+	plan := func(context.Context, string, string) (*SessionPlan, error) {
+		return nil, fmt.Errorf("planFor must not be called on restore")
+	}
+	wf := New(kv, lookupImage("SHOULD-NOT-BE-USED"), clientForStub(srv), plan,
+		Options{ResumeDeadline: 3 * time.Second, PollInterval: 5 * time.Millisecond})
+
+	ip, err := wf.Resume(ctx, "s1", "alice")
+	if err != nil {
+		t.Fatalf("Resume(restore): %v", err)
+	}
+	if ip != "10.0.0.2" {
+		t.Fatalf("restored on wrong worker: %q", ip)
+	}
+	if !gotRestore {
+		t.Fatal("expected /restore to be called")
+	}
+	e, _ := kv.GetSession(ctx, "s1")
+	if e.State != resumeapi.StateRunning || e.WorkerPodIP != "10.0.0.2" || e.Image != "redis:7-alpine" {
+		t.Fatalf("post-restore entry wrong: %+v", e)
 	}
 }
 

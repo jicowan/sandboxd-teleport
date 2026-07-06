@@ -20,12 +20,14 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/jicowan/aio-sandbox/controlplane/api/v1alpha1"
 	"github.com/jicowan/aio-sandbox/controlplane/internal/assign"
@@ -91,6 +93,73 @@ func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, h
 	}
 
 	return resume.New(kv, lookup, clientFor, planFor, resume.Options{})
+}
+
+// BuildSuspender wires resume.Suspender to the operator's cached client + KV.
+// It resolves each session's idle policy from its pool's SandboxTemplate.
+func BuildSuspender(c client.Client, kv *assign.Client, namespace string, httpClient *http.Client) *resume.Suspender {
+	clientFor := func(podIP string) *sandboxdclient.Client {
+		return sandboxdclient.New(podIP, httpClient)
+	}
+	policyFor := func(ctx context.Context, sid string) (resume.IdlePolicy, error) {
+		var s corev1alpha1.Session
+		if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: sid}, &s); err != nil {
+			return resume.IdlePolicy{}, err
+		}
+		// Session lifecycle idle timeout overrides the template's when set.
+		var pol resume.IdlePolicy
+		if s.Spec.PoolRef != nil {
+			tmplName, err := templateForPool(ctx, c, namespace, s.Spec.PoolRef.Name)
+			if err == nil {
+				var t corev1alpha1.SandboxTemplate
+				if e := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: tmplName}, &t); e == nil {
+					pol.TimeoutSeconds = t.Spec.Idle.TimeoutSeconds
+					pol.Action = t.Spec.Idle.Action
+				}
+			}
+		}
+		if s.Spec.Lifecycle.IdleTimeoutSeconds > 0 {
+			pol.TimeoutSeconds = s.Spec.Lifecycle.IdleTimeoutSeconds
+		}
+		return pol, nil
+	}
+	return resume.NewSuspender(kv, clientFor, policyFor, resume.SuspendOptions{})
+}
+
+// SuspendSweeper is a manager Runnable that periodically suspends idle sessions.
+type SuspendSweeper struct {
+	Suspender *resume.Suspender
+	Interval  time.Duration
+}
+
+// Start runs the sweep loop until the manager context is cancelled.
+func (s *SuspendSweeper) Start(ctx context.Context) error {
+	iv := s.Interval
+	if iv == 0 {
+		iv = 15 * time.Second
+	}
+	t := time.NewTicker(iv)
+	defer t.Stop()
+	log := logf.FromContext(ctx).WithName("suspend-sweeper")
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
+			if n, err := s.Suspender.SweepOnce(ctx); err != nil {
+				log.Error(err, "idle-suspend sweep failed")
+			} else if n > 0 {
+				log.Info("suspended idle sessions", "count", n)
+			}
+		}
+	}
+}
+
+var _ manager.Runnable = &SuspendSweeper{}
+
+// AddSuspendSweeper registers the periodic idle-suspend sweeper.
+func AddSuspendSweeper(mgr ctrl.Manager, susp *resume.Suspender, interval time.Duration) error {
+	return mgr.Add(&SuspendSweeper{Suspender: susp, Interval: interval})
 }
 
 // templateForPool returns the SandboxTemplate name a WarmPool references.
