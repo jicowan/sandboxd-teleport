@@ -687,6 +687,13 @@ Infra prerequisites (before the phases that need them): **Valkey (in-cluster)**
   with a worker-liveness check mirroring workerHolds(), or (b) on a fast-path
   upstream error, fall through to /resume once. Deferred to P4 router hardening;
   the operator-side fencing already prevents restoring over a live copy.
+- **HA validated (P4).** Ran 2 router + 2 operator replicas (operator via leader
+  election) and fired 12-15 concurrent requests for the same fresh session through
+  the load-balanced router Service. Result: a single clean assignment (KV version
+  reflects one Absent->Resuming->Running transition sequence, not N racing
+  writers), exactly one worker claimed, none stuck/leaked. Confirms router
+  singleflight (per-replica dedup) + operator CAS-on-version (cross-replica
+  serialization) + atomic SPOP ClaimIdleWorker together prevent split assignment.
 - **Multi-namespace workers (future).** Today the operator assumes a single
   namespace for SandboxTemplate/WarmPool/Session *and* worker pods
   (`--resume-namespace`, and the discovery/prune sweep looks pods up there).
