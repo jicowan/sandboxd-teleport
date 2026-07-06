@@ -29,7 +29,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	corev1alpha1 "github.com/jicowan/aio-sandbox/controlplane/api/v1alpha1"
 	"github.com/jicowan/aio-sandbox/controlplane/internal/assign"
@@ -68,6 +71,10 @@ type WarmPoolReconciler struct {
 	KV *assign.Client
 	// Worker configures provisioned worker pods (SA, bucket, region).
 	Worker WorkerConfig
+	// PoolEvents is the channel the resume/suspend paths write pool names to when
+	// they change worker busy/idle state; the controller watches it to reconcile
+	// the affected pool immediately (near-real-time status without polling).
+	PoolEvents <-chan event.GenericEvent
 }
 
 // +kubebuilder:rbac:groups=core.sandboxd.io,resources=warmpools,verbs=get;list;watch;create;update;patch;delete
@@ -130,9 +137,12 @@ func (r *WarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 	}
 
-	// Refresh status.
+	// Refresh status (idle/busy are derived from the KV assignment table). The
+	// resume/suspend paths mutate KV out-of-band and enqueue a reconcile of the
+	// affected pool via a channel event source (see PoolEvents / SetupWithManager),
+	// so this projection tracks reality in near-real-time without polling — O(1)
+	// per state change rather than O(pools) on a timer.
 	if err := r.updateStatus(ctx, &pool); err != nil {
-		// status failures are non-fatal to reconcile; requeue implicitly via watch
 		log.Error(err, "update status")
 	}
 	return ctrl.Result{}, nil
@@ -189,11 +199,11 @@ func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool, tmpl
 					Affinity:                  sched.Affinity,
 					TopologySpreadConstraints: sched.TopologySpreadConstraints,
 					Containers: []corev1.Container{{
-						Name:      "sandboxd",
-						Image:     WorkerImage,
-						Ports:     []corev1.ContainerPort{{ContainerPort: 8090, Name: "http"}},
-						Env:       r.workerEnv(),
-						Resources: workerResources,
+						Name:            "sandboxd",
+						Image:           WorkerImage,
+						Ports:           []corev1.ContainerPort{{ContainerPort: 8090, Name: "http"}},
+						Env:             r.workerEnv(),
+						Resources:       workerResources,
 						SecurityContext: &corev1.SecurityContext{Privileged: &privileged},
 						ReadinessProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
@@ -261,9 +271,15 @@ func (r *WarmPoolReconciler) setReady(ctx context.Context, pool *corev1alpha1.Wa
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *WarmPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.WarmPool{}).
 		Owns(&appsv1.Deployment{}).
-		Named("warmpool").
-		Complete(r)
+		Named("warmpool")
+	// Watch the resume/suspend nudge channel: each event names a WarmPool whose
+	// worker busy/idle state just changed, so we reconcile it immediately to
+	// refresh status (near-real-time, event-driven — no polling).
+	if r.PoolEvents != nil {
+		b = b.WatchesRawSource(source.Channel(r.PoolEvents, &handler.EnqueueRequestForObject{}))
+	}
+	return b.Complete(r)
 }

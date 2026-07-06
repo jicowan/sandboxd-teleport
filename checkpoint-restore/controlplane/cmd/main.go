@@ -238,6 +238,10 @@ func main() {
 	if workerImage != "" {
 		controller.WorkerImage = workerImage
 	}
+	// Pool notifier: resume/suspend push the changed pool name here; the WarmPool
+	// controller watches it to refresh idle/busy status in near-real-time (O(1)
+	// per change, event-driven — no polling).
+	poolNotifier := controller.NewPoolNotifier(resumeNamespace, 256)
 	if err := (&controller.WarmPoolReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -247,6 +251,7 @@ func main() {
 			Bucket:         workerBucket,
 			Region:         workerRegion,
 		},
+		PoolEvents: poolNotifier.Events(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "warmpool")
 		os.Exit(1)
@@ -272,7 +277,7 @@ func main() {
 
 	// Internal /resume endpoint (control-plane half of the request path, TDD §5.1).
 	// P1: plain HTTP; P1.5 wraps with SPIRE mTLS. Uses the manager's cached client.
-	resumeWF := controller.BuildResumeWorkflow(mgr.GetClient(), kv, resumeNamespace, nil)
+	resumeWF := controller.BuildResumeWorkflow(mgr.GetClient(), kv, resumeNamespace, nil).WithNotifier(poolNotifier)
 	if err := controller.AddResumeServer(mgr, resumeAddr, resume.NewHandler(resumeWF)); err != nil {
 		setupLog.Error(err, "Failed to add resume server")
 		os.Exit(1)
@@ -281,7 +286,7 @@ func main() {
 	// Idle-suspend sweeper (P2): periodically checkpoint idle Running sessions to
 	// S3 and free their workers. The teleport completes when a later request hits
 	// the router and the resume path restores from the recorded snapshot (P3).
-	suspender := controller.BuildSuspender(mgr.GetClient(), kv, resumeNamespace, nil)
+	suspender := controller.BuildSuspender(mgr.GetClient(), kv, resumeNamespace, nil).WithNotifier(poolNotifier)
 	if err := controller.AddSuspendSweeper(mgr, suspender, 0); err != nil {
 		setupLog.Error(err, "Failed to add suspend sweeper")
 		os.Exit(1)

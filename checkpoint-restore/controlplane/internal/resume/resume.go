@@ -81,6 +81,7 @@ type Workflow struct {
 	lookup    TemplateLookup
 	clientFor WorkerClientFactory
 	planFor   func(ctx context.Context, sid, subject string) (*SessionPlan, error)
+	notify    assign.PoolNotifier
 	opts      Options
 }
 
@@ -94,7 +95,16 @@ func New(kv *assign.Client, lookup TemplateLookup, clientFor WorkerClientFactory
 	if opts.PollInterval == 0 {
 		opts.PollInterval = 250 * time.Millisecond
 	}
-	return &Workflow{kv: kv, lookup: lookup, clientFor: clientFor, planFor: planFor, opts: opts}
+	return &Workflow{kv: kv, lookup: lookup, clientFor: clientFor, planFor: planFor, notify: assign.NopNotifier{}, opts: opts}
+}
+
+// WithNotifier wires a PoolNotifier so a claim/release nudges the WarmPool
+// controller to refresh status (near-real-time). Returns wf for chaining.
+func (wf *Workflow) WithNotifier(n assign.PoolNotifier) *Workflow {
+	if n != nil {
+		wf.notify = n
+	}
+	return wf
 }
 
 // Resume gets sid Running and returns the worker pod IP. Idempotent: if the
@@ -152,9 +162,11 @@ func (wf *Workflow) Resume(ctx context.Context, sid, subject string) (string, er
 	if err != nil {
 		return "", err // ErrNoCapacity -> 503 at the handler
 	}
+	wf.notify.PoolChanged(w.Pool) // idle->busy: refresh pool status
 	ip, err := wf.startAndBind(ctx, sid, w, false, img, cmd, env, ports, health, "")
 	if err != nil {
 		_ = wf.kv.ReleaseWorker(ctx, w.Pod, w.Pool)
+		wf.notify.PoolChanged(w.Pool) // busy->idle (rolled back)
 		return "", err
 	}
 	return ip, nil
@@ -171,9 +183,11 @@ func (wf *Workflow) resumeFromSnapshot(ctx context.Context, cur *resumeapi.Sessi
 	if err != nil {
 		return "", err
 	}
+	wf.notify.PoolChanged(w.Pool) // idle->busy: refresh pool status
 	ip, err := wf.startAndBind(ctx, cur.SID, w, true, cur.Image, nil, nil, cur.Ports, cur.Health, cur.SnapshotURI)
 	if err != nil {
 		_ = wf.kv.ReleaseWorker(ctx, w.Pod, w.Pool)
+		wf.notify.PoolChanged(w.Pool)
 		return "", err
 	}
 	return ip, nil

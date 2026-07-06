@@ -46,6 +46,7 @@ type Suspender struct {
 	kv        *assign.Client
 	clientFor WorkerClientFactory
 	policyFor IdlePolicyLookup
+	notify    assign.PoolNotifier
 	now       func() time.Time
 	opts      SuspendOptions
 }
@@ -68,7 +69,16 @@ func NewSuspender(kv *assign.Client, clientFor WorkerClientFactory, policyFor Id
 	if now == nil {
 		now = time.Now
 	}
-	return &Suspender{kv: kv, clientFor: clientFor, policyFor: policyFor, now: now, opts: opts}
+	return &Suspender{kv: kv, clientFor: clientFor, policyFor: policyFor, notify: assign.NopNotifier{}, now: now, opts: opts}
+}
+
+// WithNotifier wires a PoolNotifier so a suspend/reset release nudges the
+// WarmPool controller to refresh status. Returns s for chaining.
+func (s *Suspender) WithNotifier(n assign.PoolNotifier) *Suspender {
+	if n != nil {
+		s.notify = n
+	}
+	return s
 }
 
 // SweepOnce scans all sessions and suspends (or resets) those that have been idle
@@ -127,6 +137,7 @@ func (s *Suspender) suspendOne(ctx context.Context, e *resumeapi.SessionEntry, a
 		}
 		// Discarded: delete the session entry entirely.
 		_ = s.kv.ReleaseWorker(ctx, e.WorkerPod, e.Pool)
+		s.notify.PoolChanged(e.Pool) // busy->idle: refresh pool status
 		return s.kv.DeleteSession(ctx, e.SID)
 	}
 
@@ -151,7 +162,9 @@ func (s *Suspender) suspendOne(ctx context.Context, e *resumeapi.SessionEntry, a
 
 	// Return the (now sandbox-free) worker to the idle pool so it can accept the
 	// next session. sandboxd already deleted the sandbox during /suspend.
-	return s.kv.ReleaseWorker(ctx, e.WorkerPod, e.Pool)
+	err = s.kv.ReleaseWorker(ctx, e.WorkerPod, e.Pool)
+	s.notify.PoolChanged(e.Pool) // busy->idle: refresh pool status
+	return err
 }
 
 // casSession mirrors the resume workflow's CAS-with-retry.

@@ -670,6 +670,14 @@ Infra prerequisites (before the phases that need them): **Valkey (in-cluster)**
   and the arbitrary-image entitlement. MVP: enforce at the front door / operator
   admission logic; a validating webhook is a P4 hardening option.
 - **Merge→split of `Resume`** — kept mergeable (§2.4); split only if scaling needs it.
+- **Pool busy/idle as a metric (future).** `WarmPool.status.busy/idle` is
+  refreshed near-real-time via an event-driven nudge (resume/suspend push the
+  changed pool name to a channel the WarmPool controller watches — O(1) per
+  change, no polling). For real-time observability at scale we should ALSO expose
+  worker busy/idle as a Prometheus gauge (e.g. `sandboxd_pool_workers{pool,state}`)
+  updated on the same claim/release transitions, so dashboards/HPA can consume it
+  without reading CRD status. CRD status stays the coarse `kubectl get` view.
+  Deferred.
 - **Multi-namespace workers (future).** Today the operator assumes a single
   namespace for SandboxTemplate/WarmPool/Session *and* worker pods
   (`--resume-namespace`, and the discovery/prune sweep looks pods up there).
