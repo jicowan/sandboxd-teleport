@@ -52,7 +52,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Coalesce concurrent resumes for the same session within this replica.
 	v, err, _ := h.single.Do(req.SID, func() (any, error) {
-		return h.wf.Resume(r.Context(), req.SID, req.Subject)
+		return h.wf.Resume(r.Context(), req.SID, req.Subject, req.Pool)
 	})
 
 	if err != nil {

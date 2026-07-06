@@ -50,7 +50,7 @@ type fakeResumer struct {
 	err   error
 }
 
-func (r *fakeResumer) Resume(_ context.Context, _, _ string) (string, error) {
+func (r *fakeResumer) Resume(_ context.Context, _, _, _ string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++

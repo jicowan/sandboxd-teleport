@@ -53,6 +53,10 @@ type WorkerEntry struct {
 type ResumeRequest struct {
 	SID     string `json:"sid"`
 	Subject string `json:"subject,omitempty"`
+	// Pool is an optional hint (from the broker's X-Sandbox-Pool header): when the
+	// session has no Session CR yet, the operator lazily creates one referencing
+	// this pool. Ignored once the session exists.
+	Pool string `json:"pool,omitempty"`
 }
 
 // ResumeResponse is a successful POST /resume body.

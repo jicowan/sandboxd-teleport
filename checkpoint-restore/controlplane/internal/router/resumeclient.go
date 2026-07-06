@@ -49,8 +49,8 @@ func NewResumeClient(url string, hc *http.Client) *ResumeClient {
 
 // Resume asks the operator to get sid Running and return the worker IP. Returns
 // ErrNoCapacity on 503 so the router can surface Retry-After.
-func (c *ResumeClient) Resume(ctx context.Context, sid, subject string) (string, error) {
-	body, _ := json.Marshal(resumeapi.ResumeRequest{SID: sid, Subject: subject})
+func (c *ResumeClient) Resume(ctx context.Context, sid, subject, poolHint string) (string, error) {
+	body, _ := json.Marshal(resumeapi.ResumeRequest{SID: sid, Subject: subject, Pool: poolHint})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
 	if err != nil {
 		return "", err

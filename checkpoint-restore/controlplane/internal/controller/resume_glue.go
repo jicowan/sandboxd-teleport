@@ -23,6 +23,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -49,13 +50,34 @@ func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, h
 		return templateSpecFromCRD(&t), nil
 	}
 
-	planFor := func(ctx context.Context, sid, subject string) (*resume.SessionPlan, error) {
-		// Resolve the plan from the Session CR (the front door / broker creates it).
+	planFor := func(ctx context.Context, sid, subject, poolHint string) (*resume.SessionPlan, error) {
+		// Resolve the plan from the Session CR. If none exists yet, lazily create
+		// one from the broker's pool hint (option b: the broker passes only a
+		// session id + X-Sandbox-Pool header and stays free of our CRDs). Creating
+		// the CR — not just synthesizing a transient plan — is required so the
+		// idle-suspend and GC lookups (which read the Session CR) work for
+		// broker-created sessions, and so `kubectl get sessions` shows them.
 		var s corev1alpha1.Session
-		if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: sid}, &s); err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil, fmt.Errorf("session %q not found", sid)
+		err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: sid}, &s)
+		if apierrors.IsNotFound(err) {
+			if poolHint == "" {
+				return nil, fmt.Errorf("session %q not found and no pool hint given", sid)
 			}
+			s = corev1alpha1.Session{
+				ObjectMeta: metav1.ObjectMeta{Name: sid, Namespace: namespace},
+				Spec: corev1alpha1.SessionSpec{
+					PoolRef: &corev1alpha1.LocalRef{Name: poolHint},
+					Subject: subject,
+				},
+			}
+			if cerr := c.Create(ctx, &s); cerr != nil && !apierrors.IsAlreadyExists(cerr) {
+				return nil, fmt.Errorf("create session %q from pool hint %q: %w", sid, poolHint, cerr)
+			}
+			// re-get if it already existed from a concurrent create
+			if apierrors.IsAlreadyExists(err) {
+				_ = c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: sid}, &s)
+			}
+		} else if err != nil {
 			return nil, err
 		}
 		plan := &resume.SessionPlan{

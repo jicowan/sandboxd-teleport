@@ -36,7 +36,10 @@ rules:
   - core.sandboxd.io
   resources:
   - sessions
+  - warmpools
   verbs:
+  - create
+  - delete
   - get
   - list
   - patch
@@ -51,18 +54,6 @@ rules:
   - get
   - patch
   - update
-- apiGroups:
-  - core.sandboxd.io
-  resources:
-  - warmpools
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
 - apiGroups:
   - core.sandboxd.io
   resources:

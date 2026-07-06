@@ -83,21 +83,27 @@ type Options struct {
 	MaxConcurrentResumes int
 }
 
+// PlanFunc resolves a session id (+subject, +optional pool hint) to what should
+// run. The pool hint comes from the broker (X-Sandbox-Pool) and lets the operator
+// lazily create a Session CR on first contact when none exists yet.
+type PlanFunc func(ctx context.Context, sid, subject, poolHint string) (*SessionPlan, error)
+
 // Workflow runs the Resume operation. Construct once, call Resume per request.
 type Workflow struct {
 	kv        *assign.Client
 	lookup    TemplateLookup
 	clientFor WorkerClientFactory
-	planFor   func(ctx context.Context, sid, subject string) (*SessionPlan, error)
+	planFor   PlanFunc
 	notify    assign.PoolNotifier
 	sem       chan struct{} // resume concurrency limiter; nil = unlimited
 	opts      Options
 }
 
-// New builds a Workflow. planFor resolves a session id (+subject) to what should
-// run — for P1 the operator supplies a plan from the Session CR or a default pool.
+// New builds a Workflow. planFor resolves a session id (+subject, +pool hint) to
+// what should run — the operator supplies a plan from the Session CR, creating
+// one from the pool hint if absent.
 func New(kv *assign.Client, lookup TemplateLookup, clientFor WorkerClientFactory,
-	planFor func(ctx context.Context, sid, subject string) (*SessionPlan, error), opts Options) *Workflow {
+	planFor PlanFunc, opts Options) *Workflow {
 	if opts.ResumeDeadline == 0 {
 		opts.ResumeDeadline = 15 * time.Second
 	}
@@ -125,9 +131,9 @@ func (wf *Workflow) WithNotifier(n assign.PoolNotifier) *Workflow {
 // capacity it returns assign.ErrNoCapacity (the handler maps that to 503).
 // This is a thin instrumented wrapper around resume() (metrics: kind, outcome,
 // duration).
-func (wf *Workflow) Resume(ctx context.Context, sid, subject string) (string, error) {
+func (wf *Workflow) Resume(ctx context.Context, sid, subject, poolHint string) (string, error) {
 	start := time.Now()
-	ip, kind, fast, err := wf.resume(ctx, sid, subject)
+	ip, kind, fast, err := wf.resume(ctx, sid, subject, poolHint)
 	if fast {
 		return ip, err // continuation fast path: not a resume, don't record
 	}
@@ -163,7 +169,7 @@ func (wf *Workflow) workerHolds(ctx context.Context, pod, sid string) bool {
 
 // resume returns (ip, kind, fastPath, err). kind is cold_start|restore; fastPath
 // is true when the session was already Running (no resume performed).
-func (wf *Workflow) resume(ctx context.Context, sid, subject string) (string, string, bool, error) {
+func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint string) (string, string, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, wf.opts.ResumeDeadline)
 	defer cancel()
 
@@ -213,7 +219,7 @@ func (wf *Workflow) resume(ctx context.Context, sid, subject string) (string, st
 	}
 
 	// COLD START branch (P1): ABSENT / no checkpoint -> /run from the plan.
-	plan, err := wf.planFor(ctx, sid, subject)
+	plan, err := wf.planFor(ctx, sid, subject, poolHint)
 	if err != nil {
 		return "", metrics.KindColdStart, false, fmt.Errorf("resolve session plan: %w", err)
 	}

@@ -23,10 +23,12 @@ import (
 )
 
 // Identity is the resolved caller: a stable session id and the subject it came
-// from (for authz / logging). Derived from the request per O4.
+// from (for authz / logging). Derived from the request per O4. PoolHint carries
+// the broker's requested pool (X-Sandbox-Pool) for lazy Session creation.
 type Identity struct {
-	SID     string
-	Subject string
+	SID      string
+	Subject  string
+	PoolHint string
 }
 
 // ErrUnauthenticated is returned when a request carries no usable identity.
@@ -47,11 +49,12 @@ type Resolver interface {
 type HeaderResolver struct {
 	SessionHeader string // default "X-Session-ID"
 	SubjectHeader string // default "X-Session-Subject"
+	PoolHeader    string // default "X-Sandbox-Pool"
 }
 
 // NewHeaderResolver returns a HeaderResolver with default header names.
 func NewHeaderResolver() *HeaderResolver {
-	return &HeaderResolver{SessionHeader: "X-Session-ID", SubjectHeader: "X-Session-Subject"}
+	return &HeaderResolver{SessionHeader: "X-Session-ID", SubjectHeader: "X-Session-Subject", PoolHeader: "X-Sandbox-Pool"}
 }
 
 func (h *HeaderResolver) Resolve(r *http.Request) (Identity, error) {
@@ -63,5 +66,6 @@ func (h *HeaderResolver) Resolve(r *http.Request) (Identity, error) {
 	if subj == "" {
 		subj = sid
 	}
-	return Identity{SID: sid, Subject: subj}, nil
+	pool := strings.TrimSpace(r.Header.Get(h.PoolHeader))
+	return Identity{SID: sid, Subject: subj, PoolHint: pool}, nil
 }

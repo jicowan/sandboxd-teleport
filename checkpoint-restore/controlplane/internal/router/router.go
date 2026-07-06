@@ -42,9 +42,11 @@ type KVReader interface {
 	StampActive(ctx context.Context, sid string, unixMillis int64) error
 }
 
-// Resumer triggers a resume on a KV miss (implemented by ResumeClient).
+// Resumer triggers a resume on a KV miss (implemented by ResumeClient). poolHint
+// (from the broker's X-Sandbox-Pool header) lets the operator lazily create a
+// Session CR when none exists yet.
 type Resumer interface {
-	Resume(ctx context.Context, sid, subject string) (string, error)
+	Resume(ctx context.Context, sid, subject, poolHint string) (string, error)
 }
 
 // Options configure the Router.
@@ -115,7 +117,7 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), rt.opts.ResumeDeadline)
 	defer cancel()
 	v, err, _ := rt.single.Do(id.SID, func() (any, error) {
-		return rt.resumer.Resume(ctx, id.SID, id.Subject)
+		return rt.resumer.Resume(ctx, id.SID, id.Subject, id.PoolHint)
 	})
 	if err != nil {
 		if errors.Is(err, ErrNoCapacity) {
