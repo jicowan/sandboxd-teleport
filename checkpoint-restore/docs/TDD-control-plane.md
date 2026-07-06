@@ -657,3 +657,12 @@ Infra prerequisites (before the phases that need them): **Valkey (in-cluster)**
   and the arbitrary-image entitlement. MVP: enforce at the front door / operator
   admission logic; a validating webhook is a P4 hardening option.
 - **Merge→split of `Resume`** — kept mergeable (§2.4); split only if scaling needs it.
+- **Multi-namespace workers (future).** Today the operator assumes a single
+  namespace for SandboxTemplate/WarmPool/Session *and* worker pods
+  (`--resume-namespace`, and the discovery/prune sweep looks pods up there).
+  Eventually workers (and pools) should be able to run in **different namespaces**
+  — e.g. per-tenant namespaces, or workers isolated from control-plane objects.
+  Requires: namespace on the `WorkerEntry`/pool, the discovery watch spanning
+  namespaces (or per-namespace caches), and RBAC across them. Not needed for the
+  MVP; the KV records already key on pod name so the data model mostly carries
+  over.

@@ -306,6 +306,28 @@ func (c *Client) ReleaseWorker(ctx context.Context, pod, pool string) error {
 		[]string{workerKey(pod), poolIdleKey(pool)}, pod).Err()
 }
 
+// ListWorkerPods returns the pod names of all worker entries currently in KV
+// (across all pools). Used by the reconciliation sweep to prune entries whose
+// pods no longer exist.
+func (c *Client) ListWorkerPods(ctx context.Context) ([]string, error) {
+	var pods []string
+	var cursor uint64
+	for {
+		keys, cur, err := c.rdb.Scan(ctx, cursor, "worker:*", 100).Result()
+		if err != nil {
+			return nil, err
+		}
+		for _, k := range keys {
+			pods = append(pods, k[len("worker:"):])
+		}
+		cursor = cur
+		if cursor == 0 {
+			break
+		}
+	}
+	return pods, nil
+}
+
 // CountWorkers returns (idle, total) worker counts for a pool by scanning the
 // worker:* keys. Used for WarmPool status; O(N) but N is small (pool size).
 func (c *Client) CountWorkers(ctx context.Context, pool string) (idle, total int, err error) {

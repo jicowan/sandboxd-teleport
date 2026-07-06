@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -250,12 +251,22 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "warmpool")
 		os.Exit(1)
 	}
-	if err := (&controller.WorkerDiscoveryReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		KV:     kv,
-	}).SetupWithManager(mgr); err != nil {
+	discovery := &controller.WorkerDiscoveryReconciler{
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		KV:        kv,
+		Namespace: resumeNamespace,
+	}
+	if err := discovery.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "worker-discovery")
+		os.Exit(1)
+	}
+	// Periodic reconciliation: prune KV worker entries whose pods no longer exist
+	// (catches deletes missed while the operator was down). TDD §4.2.
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		return discovery.StartPruneLoop(ctx, 0)
+	})); err != nil {
+		setupLog.Error(err, "Failed to add worker prune loop")
 		os.Exit(1)
 	}
 

@@ -18,10 +18,12 @@ package controller
 
 import (
 	"context"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -43,6 +45,8 @@ type WorkerDiscoveryReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	KV     *assign.Client
+	// Namespace is where worker pods live (used by the prune sweep to look them up).
+	Namespace string
 }
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
@@ -126,6 +130,51 @@ func (r *WorkerDiscoveryReconciler) removeByPod(ctx context.Context, pod string)
 		return // already gone
 	}
 	r.remove(ctx, pod, w.Pool)
+}
+
+// PruneStaleWorkers removes KV worker entries whose pods no longer exist. This
+// closes the gap where pod-delete events are MISSED — e.g. pods deleted while the
+// operator was down/restarting (edge-triggered delete handling alone can't catch
+// those). Level-triggered reconciliation against the live pod list is the durable
+// fix (TDD §4.2 reconciliation). Returns the number pruned.
+func (r *WorkerDiscoveryReconciler) PruneStaleWorkers(ctx context.Context) (int, error) {
+	pods, err := r.KV.ListWorkerPods(ctx)
+	if err != nil {
+		return 0, err
+	}
+	pruned := 0
+	for _, podName := range pods {
+		var pod corev1.Pod
+		gerr := r.Get(ctx, types.NamespacedName{Namespace: r.Namespace, Name: podName}, &pod)
+		if apierrors.IsNotFound(gerr) {
+			// pod gone: prune its KV entry (and idle-set membership).
+			r.removeByPod(ctx, podName)
+			pruned++
+		}
+	}
+	return pruned, nil
+}
+
+// StartPruneLoop runs PruneStaleWorkers periodically (manager Runnable).
+func (r *WorkerDiscoveryReconciler) StartPruneLoop(ctx context.Context, interval time.Duration) error {
+	if interval == 0 {
+		interval = 30 * time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	log := logf.FromContext(ctx).WithName("worker-prune")
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
+			if n, err := r.PruneStaleWorkers(ctx); err != nil {
+				log.Error(err, "prune stale workers")
+			} else if n > 0 {
+				log.Info("pruned stale worker entries", "count", n)
+			}
+		}
+	}
 }
 
 func podReady(pod *corev1.Pod) bool {
