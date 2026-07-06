@@ -22,6 +22,7 @@ import (
 	"flag"
 	"os"
 	"strconv"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -126,6 +127,12 @@ func main() {
 	var maxConcurrentResumes int
 	flag.IntVar(&maxConcurrentResumes, "max-concurrent-resumes", envInt("SANDBOXD_MAX_CONCURRENT_RESUMES", 0),
 		"Cap on in-flight resumes (backpressure); 0 = unlimited (default).")
+	var enableGC bool
+	var gcIntervalSec int
+	flag.BoolVar(&enableGC, "enable-checkpoint-gc", envOr("SANDBOXD_ENABLE_GC", "") == "1",
+		"Enable S3 checkpoint GC (TTL + orphans). Off by default (deletes data; needs scoped S3 role).")
+	flag.IntVar(&gcIntervalSec, "checkpoint-gc-interval-seconds", envInt("SANDBOXD_GC_INTERVAL_SECONDS", 300),
+		"Checkpoint GC sweep interval in seconds.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -314,6 +321,26 @@ func main() {
 	if err := controller.AddCheckpointSweeper(mgr, checkpointer, 0); err != nil {
 		setupLog.Error(err, "Failed to add checkpoint sweeper")
 		os.Exit(1)
+	}
+
+	// Checkpoint GC (P4): reap TTL-expired + orphaned S3 checkpoints. Opt-in
+	// (deletes data) and needs the operator's scoped S3 role (list+delete on
+	// sandboxes/* only; worker keeps read/write, no delete).
+	if enableGC {
+		if workerBucket == "" {
+			setupLog.Error(nil, "checkpoint GC enabled but no --worker-bucket set")
+			os.Exit(1)
+		}
+		col, err := controller.BuildCollector(context.Background(), mgr.GetClient(), kv, resumeNamespace, workerBucket)
+		if err != nil {
+			setupLog.Error(err, "Failed to build checkpoint collector")
+			os.Exit(1)
+		}
+		if err := controller.AddGCSweeper(mgr, col, time.Duration(gcIntervalSec)*time.Second); err != nil {
+			setupLog.Error(err, "Failed to add GC sweeper")
+			os.Exit(1)
+		}
+		setupLog.Info("checkpoint GC enabled", "bucket", workerBucket, "intervalSec", gcIntervalSec)
 	}
 	// +kubebuilder:scaffold:builder
 
