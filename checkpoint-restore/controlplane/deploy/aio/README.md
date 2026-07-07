@@ -59,6 +59,12 @@ The Claude client needs **no config change** — same endpoint/OAuth.
 - **First tool call is slow (~45s)** while AIO cold-starts, unless the session is
   pre-warmed. The broker warms on MCP `initialize`; still, a client with a short
   per-request timeout may need one retry on a truly cold session.
+- **Keep `minIdle` >= expected concurrent new-session rate.** A cold-start `503`
+  (no idle worker) can poison an MCP client's cached tool list — the client shows
+  "connected · tools fetch failed" and needs a reconnect/re-auth to recover. Sizing
+  `minIdle` so a new session almost always finds a warm worker avoids the 503
+  entirely. This matters most for slow-booting images (AIO ~45s): without headroom,
+  the first user of a saturated pool eats the cold start AND may hit 503.
 - **Capacity**: a new session needs an idle worker. `minIdle` keeps headroom; if
   the pool is saturated a new session gets `503 Retry-After`.
 - The resume/warm-up deadline defaults to 90s (`SANDBOXD_RESUME_DEADLINE_SECONDS`)
