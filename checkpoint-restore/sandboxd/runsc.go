@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,15 +21,21 @@ type runscDriver struct {
 	root     string // runsc state -root (owned by this worker)
 	debugDir string // where sentry/gofer --debug-log files land
 	network  string // runsc --network mode: "host" | "sandbox" | "none"
+	// streamConsole streams the nested workload's own stdout/stderr to sandboxd
+	// stdout (→ kubectl logs). OFF by default (SANDBOXD_STREAM_CONSOLE=1): the
+	// workload console is UNTRUSTED, attacker-controlled output — see
+	// tailConsoleToStdout for the sanitize/cap mitigations and why this is opt-in.
+	streamConsole bool
 }
 
 func newRunsc(bin, root string) *runscDriver {
 	os.MkdirAll(root, 0o755)
 	d := &runscDriver{
-		bin:      bin,
-		root:     root,
-		debugDir: filepath.Join(filepath.Dir(root), "gvisor-logs"),
-		network:  envOr("SANDBOXD_NETWORK", "sandbox"),
+		bin:           bin,
+		root:          root,
+		debugDir:      filepath.Join(filepath.Dir(root), "gvisor-logs"),
+		network:       envOr("SANDBOXD_NETWORK", "sandbox"),
+		streamConsole: os.Getenv("SANDBOXD_STREAM_CONSOLE") == "1",
 	}
 	os.MkdirAll(d.debugDir, 0o755)
 	return d
@@ -110,18 +117,139 @@ func (r *runscDriver) run(id string, args ...string) (string, string, error) {
 func (r *runscDriver) runDetached(id, logPath string, args ...string) error {
 	full := append(r.base(id), args...)
 	cmd := exec.Command(r.bin, full...)
+
+	// stdin is always /dev/null (the workload has no interactive input).
 	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
 		return err
 	}
 	defer devnull.Close()
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = devnull, devnull, devnull
+	cmd.Stdin = devnull
+
+	// stdout/stderr: by default /dev/null (the workload console is discarded;
+	// only gVisor --debug-log FILES are surfaced). When console streaming is on,
+	// point them at a per-sandbox console FILE (never a pipe — a detached sandbox
+	// keeps these fds open, so a pipe would block cmd.Run() forever; a real *os.File
+	// fd does not, exactly like /dev/null). A background tailer then relays the
+	// file to sandboxd stdout. logPath is the console file for this run.
+	cmd.Stdout, cmd.Stderr = devnull, devnull
+	if r.streamConsole && logPath != "" {
+		console, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+		if err != nil {
+			return err
+		}
+		defer console.Close()
+		cmd.Stdout, cmd.Stderr = console, console
+		go r.tailConsoleToStdout(id, logPath)
+	}
+
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Run(); err != nil {
 		// on failure, the useful detail is in the --debug-log; include a tail
 		return fmt.Errorf("%v; gvisor logs: %s", err, r.tailGvisorLogs(4096))
 	}
 	return nil
+}
+
+// sanitizeConsole strips C0 control bytes and DEL (0x7f) from a console line,
+// EXCEPT tab (\t) and carriage return (\r) which are harmless. Newlines are
+// already consumed as line delimiters upstream. This defeats terminal escape
+// sequences (ESC=0x1b drives cursor moves, color, title-set, clear-screen) a
+// malicious workload could otherwise inject into `kubectl logs`. Bytes >= 0x80
+// are passed through untouched so legitimate UTF-8 multibyte text survives.
+func sanitizeConsole(b []byte) string {
+	out := make([]byte, 0, len(b))
+	for _, c := range b {
+		if c < 0x20 && c != '\t' && c != '\r' {
+			continue // C0 control (incl. ESC 0x1b) — drop
+		}
+		if c == 0x7f {
+			continue // DEL — drop
+		}
+		out = append(out, c)
+	}
+	return string(out)
+}
+
+// tailConsoleToStdout relays a per-sandbox console file to sandboxd stdout as
+// `[sandbox <id>] …` lines so the nested workload's own output shows up in
+// `kubectl logs` on the worker pod. It runs in a background goroutine, fully
+// decoupled from the exec'd runsc process.
+//
+// The console is UNTRUSTED (attacker-controlled). Mitigations here:
+//   - unambiguous per-line prefix `[sandbox <id>]` that is NOT sandboxd's
+//     structured-log schema, so a workload can't forge sandboxd log lines;
+//   - control-char/ANSI stripping (see controlChars) against terminal escapes;
+//   - a byte cap (SANDBOXD_STREAM_CONSOLE_MAX_BYTES, default 8 MiB) so a
+//     log-bomb workload (Chrome is chatty) can't run the node out of log
+//     space/cost — past the cap we stop relaying and print one truncation note.
+//
+// The multi-tenant concern (a worker hosts many tenants' sessions over its
+// lifetime, so this shared log plane mixes tenants under one pod identity) is
+// inherent and cannot be fixed here — it's why this is opt-in and the
+// session-scoped /logs API stays the production path.
+func (r *runscDriver) tailConsoleToStdout(id, path string) {
+	prefix := "[sandbox " + id + "] "
+	maxBytes := envInt64("SANDBOXD_STREAM_CONSOLE_MAX_BYTES", 8<<20)
+
+	var f *os.File
+	// The console file is created by runDetached just before the child starts;
+	// wait briefly for it to appear.
+	for i := 0; i < 25; i++ {
+		if fh, err := os.Open(path); err == nil {
+			f = fh
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if f == nil {
+		return
+	}
+	defer f.Close()
+
+	var relayed int64
+	var truncated bool
+	buf := make([]byte, 0, 4096)
+	rd := make([]byte, 4096)
+	t := time.NewTicker(1 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		for {
+			n, err := f.Read(rd)
+			if n > 0 && !truncated {
+				buf = append(buf, rd[:n]...)
+				// emit complete lines; hold any partial trailing line for next read
+				for {
+					i := bytes.IndexByte(buf, '\n')
+					if i < 0 {
+						break
+					}
+					line := buf[:i]
+					buf = buf[i+1:]
+					clean := sanitizeConsole(line)
+					if relayed+int64(len(clean)) > maxBytes {
+						truncated = true
+						fmt.Fprintf(os.Stdout, "%s<console truncated: exceeded %d bytes>\n", prefix, maxBytes)
+						break
+					}
+					relayed += int64(len(clean))
+					fmt.Fprintf(os.Stdout, "%s%s\n", prefix, clean)
+				}
+			}
+			if err == io.EOF || n == 0 {
+				break
+			}
+			if err != nil {
+				return
+			}
+		}
+		// Exit once the sandbox is gone: its console file was unlinked (by
+		// delete/cleanupArtifacts) and we've drained what we held open. Without
+		// this the per-run goroutine would spin forever after teardown.
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			return
+		}
+	}
 }
 
 // tailToStdout streams NEW content from the gVisor debug-log files to stdout, so

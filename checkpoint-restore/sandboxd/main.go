@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -588,6 +589,14 @@ func envDuration(k string, d time.Duration) time.Duration {
 	if v := os.Getenv(k); v != "" {
 		if p, err := time.ParseDuration(v); err == nil {
 			return p
+		}
+	}
+	return d
+}
+func envInt64(k string, d int64) int64 {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return n
 		}
 	}
 	return d
