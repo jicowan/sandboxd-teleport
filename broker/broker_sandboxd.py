@@ -25,7 +25,7 @@ What's DIFFERENT (the backend half — no claim):
   - The session id is **derived from the principal** (one durable session per
     user), so a user reconnecting on a new MCP session lands back on their own
     teleported state.
-  - Routing headers are X-Session-ID + X-Sandbox-Pool (not X-Sandbox-*).
+  - Routing headers are X-Session-ID + X-Session-Pool (not X-Sandbox-*).
 """
 
 import hashlib
@@ -46,7 +46,7 @@ from jwt import PyJWKClient
 # ---- config ----
 
 # The sandboxd pool a session should run in (maps to a SandboxTemplate via a
-# WarmPool). Passed as X-Sandbox-Pool so the control plane lazily creates the
+# WarmPool). Passed as X-Session-Pool so the control plane lazily creates the
 # Session CR on first contact (no k8s client in the broker).
 POOL = os.environ.get("SANDBOXD_POOL", "aio-pool")
 
@@ -220,11 +220,11 @@ def _rewrite_init_version(payload: bytes) -> bytes:
 async def _forward(body: bytes, sid: str, content_type: str, accept: str):
     """Forward the MCP request to the sandboxd router. The router resolves
     X-Session-ID -> worker (cold start / restore-on-connect via the control
-    plane) and streams the response back. X-Sandbox-Pool tells the control plane
+    plane) and streams the response back. X-Session-Pool tells the control plane
     which pool to place a brand-new session in."""
     headers = {
         "X-Session-ID": sid,
-        "X-Sandbox-Pool": POOL,
+        "X-Session-Pool": POOL,
         "Content-Type": content_type or "application/json",
     }
     if accept:
