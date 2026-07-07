@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -43,12 +44,14 @@ func envOr(k, def string) string {
 
 func main() {
 	var listenAddr, kvAddr, resumeURL string
-	var workerPort int
+	var workerPort, resumeDeadlineSec int
 	flag.StringVar(&listenAddr, "listen", envOr("ROUTER_LISTEN", ":8080"), "Router data-plane listen address.")
 	flag.StringVar(&kvAddr, "kv-addr", envOr("SANDBOXD_KV_ADDR", "valkey:6379"), "Valkey address (host:port).")
 	flag.StringVar(&resumeURL, "resume-url", envOr("SANDBOXD_RESUME_URL",
 		"http://sandboxd-controlplane-operator:8082/resume"), "Operator /resume endpoint.")
 	flag.IntVar(&workerPort, "worker-port", 8090, "sandboxd port on worker pods.")
+	flag.IntVar(&resumeDeadlineSec, "resume-deadline-seconds", envInt("SANDBOXD_RESUME_DEADLINE_SECONDS", 90),
+		"Time-to-first-byte / warm-up deadline for a miss (must exceed cold-start for large images like AIO).")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -68,7 +71,7 @@ func main() {
 		router.NewResumeClient(resumeURL, nil), // P1: plain HTTP; P1.5 mTLS transport
 		router.NewHeaderResolver(),             // P1: header identity; JWT at broker cutover (O4)
 		http.DefaultTransport,                  // P1.5: SPIRE mTLS transport
-		router.Options{WorkerPort: workerPort},
+		router.Options{WorkerPort: workerPort, ResumeDeadline: time.Duration(resumeDeadlineSec) * time.Second},
 	)
 
 	mux := http.NewServeMux()
@@ -92,4 +95,13 @@ func main() {
 		log.Error("router server error", "err", err)
 		os.Exit(1)
 	}
+}
+
+func envInt(k string, def int) int {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
 }

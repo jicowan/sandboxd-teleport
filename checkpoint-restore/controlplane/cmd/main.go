@@ -127,6 +127,9 @@ func main() {
 	var maxConcurrentResumes int
 	flag.IntVar(&maxConcurrentResumes, "max-concurrent-resumes", envInt("SANDBOXD_MAX_CONCURRENT_RESUMES", 0),
 		"Cap on in-flight resumes (backpressure); 0 = unlimited (default).")
+	var resumeDeadlineSec int
+	flag.IntVar(&resumeDeadlineSec, "resume-deadline-seconds", envInt("SANDBOXD_RESUME_DEADLINE_SECONDS", 90),
+		"Max time for a resume (cold start/restore) to reach ready. Large images (AIO) need >default.")
 	var enableGC bool
 	var gcIntervalSec int
 	flag.BoolVar(&enableGC, "enable-checkpoint-gc", envOr("SANDBOXD_ENABLE_GC", "") == "1",
@@ -299,7 +302,10 @@ func main() {
 	// Internal /resume endpoint (control-plane half of the request path, TDD §5.1).
 	// P1: plain HTTP; P1.5 wraps with SPIRE mTLS. Uses the manager's cached client.
 	resumeWF := controller.BuildResumeWorkflow(mgr.GetClient(), kv, resumeNamespace, nil,
-		resume.Options{MaxConcurrentResumes: maxConcurrentResumes}).WithNotifier(poolNotifier)
+		resume.Options{
+			MaxConcurrentResumes: maxConcurrentResumes,
+			ResumeDeadline:       time.Duration(resumeDeadlineSec) * time.Second,
+		}).WithNotifier(poolNotifier)
 	if err := controller.AddResumeServer(mgr, resumeAddr, resume.NewHandler(resumeWF)); err != nil {
 		setupLog.Error(err, "Failed to add resume server")
 		os.Exit(1)
