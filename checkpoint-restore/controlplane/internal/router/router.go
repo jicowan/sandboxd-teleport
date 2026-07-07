@@ -22,8 +22,10 @@ limitations under the License.
 package router
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -36,11 +38,19 @@ import (
 )
 
 // KVReader is the read-only slice of the assignment table the router needs.
-// (assign.Client satisfies it; the router must not write.)
+// (assign.Client satisfies it; the router must not write.) GetWorker mirrors the
+// operator resume path's workerHolds() fence so the fast path can verify the
+// worker is still live before proxying.
 type KVReader interface {
 	GetSession(ctx context.Context, sid string) (*resumeapi.SessionEntry, error)
 	StampActive(ctx context.Context, sid string, unixMillis int64) error
+	GetWorker(ctx context.Context, pod string) (*resumeapi.WorkerEntry, error)
 }
+
+// maxBufferBody bounds how large a request body the router will buffer to enable
+// a fast-path retry (see ServeHTTP). MCP tool calls are small JSON POSTs; bodies
+// larger than this stream directly and forgo the retry safety net.
+const maxBufferBody = 1 << 20 // 1 MiB
 
 // Resumer triggers a resume on a KV miss (implemented by ResumeClient). poolHint
 // (from the broker's X-Sandbox-Pool header) lets the operator lazily create a
@@ -113,13 +123,34 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fast path: session already Running on a live worker.
+	// Fast path: session already Running AND the bound worker is still live.
+	// Liveness mirrors the operator resume path's workerHolds() fence
+	// (resume.go): the worker:<pod> KV entry must still exist, be busy, and be
+	// bound to THIS session. Without this a crashed/pruned worker's stale
+	// Running record would proxy to a dead IP (a long dial timeout, then 502)
+	// until a resume re-verified it. On a stale/missing worker we fall straight
+	// through to ensureRunning (transparent teleport-restore).
 	if e, err := rt.kv.GetSession(r.Context(), id.SID); err == nil &&
-		e.State == resumeapi.StateRunning && e.WorkerPodIP != "" {
+		e.State == resumeapi.StateRunning && e.WorkerPodIP != "" &&
+		rt.workerLive(r.Context(), e.WorkerPod, id.SID) {
 		rt.stamp(id.SID)       // O3 bracketing: active at start
 		defer rt.stamp(id.SID) // and at end
-		rt.proxyTo(w, r, e.WorkerPodIP, hostPort(e))
-		return
+		// Reactive safety net: a worker can die inside the ~30s prune window, so
+		// the KV entry above may still look live. Buffer a small body so that if
+		// the upstream connection fails BEFORE any bytes reach the client, we can
+		// fall through to a resume once instead of returning 502.
+		body, ok := bufferBody(r)
+		if ok {
+			if rt.proxyWithRetry(w, r, e.WorkerPodIP, hostPort(e), body) {
+				return
+			}
+			// upstream failed with nothing written yet — fall through to resume,
+			// rewinding the buffered body for the retried request.
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		} else {
+			rt.proxyTo(w, r, e.WorkerPodIP, hostPort(e))
+			return
+		}
 	}
 
 	ip, port, err := rt.ensureRunning(r.Context(), id)
@@ -135,6 +166,43 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rt.stamp(id.SID)
 	defer rt.stamp(id.SID)
 	rt.proxyTo(w, r, ip, port)
+}
+
+// workerLive reports whether the worker bound to a Running session is still
+// alive in the assignment table — the router-side equivalent of the resume
+// path's workerHolds(). A missing/idle/rebound worker entry means the Running
+// record is stale (pod crashed or was pruned). An empty pod name (older record)
+// is treated as NOT live so we re-resume rather than trust a dangling IP.
+func (rt *Router) workerLive(ctx context.Context, pod, sid string) bool {
+	if pod == "" {
+		return false
+	}
+	w, err := rt.kv.GetWorker(ctx, pod)
+	if err != nil {
+		return false
+	}
+	return w.State == resumeapi.WorkerBusy && w.SID == sid
+}
+
+// bufferBody reads a request body into memory when it is small enough to enable
+// a fast-path retry. Returns (nil, true) for an empty/absent body, (buf, true)
+// when fully buffered, and (nil, false) when the body is too large or unknown-
+// length — in which case the caller must stream without the retry net. On a
+// successful buffer the request's Body is replaced with a reader over buf.
+func bufferBody(r *http.Request) ([]byte, bool) {
+	if r.Body == nil || r.ContentLength == 0 {
+		return nil, true
+	}
+	if r.ContentLength < 0 || r.ContentLength > maxBufferBody {
+		return nil, false // unknown or too large: stream, no retry
+	}
+	buf, err := io.ReadAll(io.LimitReader(r.Body, maxBufferBody+1))
+	r.Body.Close()
+	if err != nil || int64(len(buf)) > maxBufferBody {
+		return nil, false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(buf))
+	return buf, true
 }
 
 // ensureRunning resolves the session to a Running worker, resuming via the
@@ -206,6 +274,66 @@ func (rt *Router) proxyTo(w http.ResponseWriter, r *http.Request, podIP string, 
 	outreq.URL.Host = target.Host
 	outreq.Host = target.Host
 	rt.proxy.ServeHTTP(w, outreq)
+}
+
+// retryWriter wraps a ResponseWriter to record whether the upstream response has
+// begun reaching the client. Once wrote==true a request can no longer be safely
+// retried (the client has seen part of a response), so the fast-path fall-through
+// must give up. It also swallows the proxy's ErrorHandler write when nothing has
+// been sent yet, letting the caller retry with a clean writer.
+type retryWriter struct {
+	http.ResponseWriter
+	wrote  bool // any header or body byte forwarded to the client
+	failed bool // proxy ErrorHandler fired before anything was written
+}
+
+func (rw *retryWriter) WriteHeader(code int) {
+	rw.wrote = true
+	rw.ResponseWriter.WriteHeader(code)
+}
+func (rw *retryWriter) Write(b []byte) (int, error) {
+	rw.wrote = true
+	return rw.ResponseWriter.Write(b)
+}
+func (rw *retryWriter) Flush() {
+	if fl, ok := rw.ResponseWriter.(http.Flusher); ok {
+		fl.Flush()
+	}
+}
+
+// proxyWithRetry proxies to the worker and reports whether the request was
+// served (true) or failed at the transport BEFORE any bytes reached the client
+// (false). A false return means the caller may safely retry via resume: nothing
+// was written, so no partial/duplicate response is possible. body is the
+// buffered request payload, re-attached to the cloned upstream request so the
+// proxy can send it.
+func (rt *Router) proxyWithRetry(w http.ResponseWriter, r *http.Request, podIP string, port int, body []byte) bool {
+	if port == 0 {
+		port = rt.opts.WorkerPort
+	}
+	target := &url.URL{Scheme: "http", Host: podIP + ":" + strconv.Itoa(port)}
+	rw := &retryWriter{ResponseWriter: w}
+
+	outreq := r.Clone(r.Context())
+	outreq.URL.Scheme = target.Scheme
+	outreq.URL.Host = target.Host
+	outreq.Host = target.Host
+	outreq.Body = io.NopCloser(bytes.NewReader(body))
+	outreq.ContentLength = int64(len(body))
+
+	// Per-request ErrorHandler: if the upstream fails with nothing yet written,
+	// mark failed (and DON'T emit a 502) so the caller can fall through. If bytes
+	// were already forwarded, surface the 502 — retry is no longer safe.
+	proxy := *rt.proxy // shallow copy: per-request ErrorHandler without racing others
+	proxy.ErrorHandler = func(hw http.ResponseWriter, hr *http.Request, err error) {
+		if !rw.wrote {
+			rw.failed = true
+			return
+		}
+		http.Error(hw, "upstream error: "+err.Error(), http.StatusBadGateway)
+	}
+	proxy.ServeHTTP(rw, outreq)
+	return !rw.failed
 }
 
 // stamp records request activity for idle detection (O3). Best-effort: a failed

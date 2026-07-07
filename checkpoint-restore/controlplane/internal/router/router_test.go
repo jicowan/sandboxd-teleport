@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -20,11 +21,16 @@ import (
 type fakeKV struct {
 	mu       sync.Mutex
 	sessions map[string]*resumeapi.SessionEntry
+	workers  map[string]*resumeapi.WorkerEntry
 	stamps   map[string]int64
 }
 
 func newFakeKV() *fakeKV {
-	return &fakeKV{sessions: map[string]*resumeapi.SessionEntry{}, stamps: map[string]int64{}}
+	return &fakeKV{
+		sessions: map[string]*resumeapi.SessionEntry{},
+		workers:  map[string]*resumeapi.WorkerEntry{},
+		stamps:   map[string]int64{},
+	}
 }
 func (f *fakeKV) GetSession(_ context.Context, sid string) (*resumeapi.SessionEntry, error) {
 	f.mu.Lock()
@@ -40,6 +46,24 @@ func (f *fakeKV) StampActive(_ context.Context, sid string, ms int64) error {
 	defer f.mu.Unlock()
 	f.stamps[sid] = ms
 	return nil
+}
+func (f *fakeKV) GetWorker(_ context.Context, pod string) (*resumeapi.WorkerEntry, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	w, ok := f.workers[pod]
+	if !ok {
+		return nil, fmt.Errorf("not found")
+	}
+	return w, nil
+}
+
+// liveWorker binds a busy worker entry to a session so the fast-path liveness
+// gate (workerLive) passes. Tests that want the fast path must register both a
+// Running session (with WorkerPod set) and its live worker.
+func (f *fakeKV) liveWorker(pod, sid string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.workers[pod] = &resumeapi.WorkerEntry{Pod: pod, State: resumeapi.WorkerBusy, SID: sid}
 }
 
 // fakeResumer records calls and returns a fixed IP.
@@ -88,7 +112,8 @@ func TestFastPathProxies(t *testing.T) {
 	host, port := splitHostPort(t, worker)
 
 	kv := newFakeKV()
-	kv.sessions["s1"] = &resumeapi.SessionEntry{SID: "s1", State: resumeapi.StateRunning, WorkerPodIP: host}
+	kv.sessions["s1"] = &resumeapi.SessionEntry{SID: "s1", State: resumeapi.StateRunning, WorkerPod: "w1", WorkerPodIP: host}
+	kv.liveWorker("w1", "s1")
 	res := &fakeResumer{}
 	rt := New(kv, res, NewHeaderResolver(), http.DefaultTransport, Options{WorkerPort: port})
 
@@ -116,9 +141,10 @@ func TestFastPathUsesSessionPort(t *testing.T) {
 
 	kv := newFakeKV()
 	kv.sessions["s1"] = &resumeapi.SessionEntry{
-		SID: "s1", State: resumeapi.StateRunning, WorkerPodIP: host,
+		SID: "s1", State: resumeapi.StateRunning, WorkerPod: "w1", WorkerPodIP: host,
 		Ports: []sbxapi.PortMap{{Container: port, Host: port}},
 	}
+	kv.liveWorker("w1", "s1")
 	// WorkerPort deliberately WRONG (would 404/refuse); session port must win.
 	rt := New(kv, &fakeResumer{}, NewHeaderResolver(), http.DefaultTransport, Options{WorkerPort: 1})
 
@@ -126,6 +152,92 @@ func TestFastPathUsesSessionPort(t *testing.T) {
 	rt.ServeHTTP(rr, req("s1"))
 	if rr.Code != 200 || rr.Body.String() != "workload" {
 		t.Fatalf("session-port routing failed: %d %q", rr.Code, rr.Body.String())
+	}
+}
+
+// TestStaleWorkerFallsThroughToResume: session is Running with a WorkerPodIP,
+// but the worker KV entry is gone (pod crashed/pruned). The fast-path liveness
+// gate must fail and the router must resume instead of proxying to the dead IP.
+func TestStaleWorkerFallsThroughToResume(t *testing.T) {
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("resumed-fresh"))
+	}))
+	defer worker.Close()
+	host, port := splitHostPort(t, worker)
+
+	kv := newFakeKV()
+	// Running record points at a now-dead IP; NO worker entry registered.
+	kv.sessions["s1"] = &resumeapi.SessionEntry{
+		SID: "s1", State: resumeapi.StateRunning, WorkerPod: "w-dead", WorkerPodIP: "10.255.255.1",
+	}
+	res := &fakeResumer{ip: host}
+	rt := New(kv, res, NewHeaderResolver(), http.DefaultTransport, Options{WorkerPort: port})
+
+	rr := httptest.NewRecorder()
+	rt.ServeHTTP(rr, req("s1"))
+	if rr.Code != 200 || rr.Body.String() != "resumed-fresh" {
+		t.Fatalf("stale-worker fall-through failed: %d %q", rr.Code, rr.Body.String())
+	}
+	if res.calls != 1 {
+		t.Fatalf("want 1 resume call on stale worker, got %d", res.calls)
+	}
+}
+
+// deadIP is an unreachable TEST-NET-3 address; the failing transport short-
+// circuits it so we don't depend on real dial timeouts.
+const deadIP = "203.0.113.1"
+
+// failFor is a RoundTripper that returns a connection error for requests to a
+// specific host and delegates everything else to a healthy backend transport.
+type failFor struct {
+	host string
+	ok   http.RoundTripper
+}
+
+func (f *failFor) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Hostname() == f.host {
+		return nil, &net.OpError{Op: "dial", Err: errors.New("connection refused")}
+	}
+	return f.ok.RoundTrip(r)
+}
+
+// TestFastPathUpstreamErrorFallsThrough: the worker looks live in KV (crash
+// inside the prune window) but the connection fails with nothing written yet.
+// The reactive safety net must fall through to resume once and re-send the
+// buffered body, rather than returning 502.
+func TestFastPathUpstreamErrorFallsThrough(t *testing.T) {
+	// Healthy resume target that echoes the request body (proves body survived).
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		w.Write([]byte("resumed:" + string(b)))
+	}))
+	defer good.Close()
+	goodHost, port := splitHostPort(t, good)
+
+	kv := newFakeKV()
+	// Session Running on the dead IP, and the worker STILL looks live in KV.
+	kv.sessions["s1"] = &resumeapi.SessionEntry{
+		SID: "s1", State: resumeapi.StateRunning, WorkerPod: "w1", WorkerPodIP: deadIP,
+	}
+	kv.liveWorker("w1", "s1")
+	res := &fakeResumer{ip: goodHost} // resume returns the healthy worker IP
+
+	// Transport fails for the dead IP (fast path), succeeds for the good IP
+	// (resume). Both use the same port, so only the IP differentiates them.
+	tr := &failFor{host: deadIP, ok: http.DefaultTransport}
+	rt := New(kv, res, NewHeaderResolver(), tr, Options{WorkerPort: port})
+
+	body := `{"tool":"echo","arg":"narwhal"}`
+	r := httptest.NewRequest(http.MethodPost, "/tools/call", strings.NewReader(body))
+	r.Header.Set("X-Session-ID", "s1")
+	rr := httptest.NewRecorder()
+	rt.ServeHTTP(rr, r)
+
+	if res.calls != 1 {
+		t.Fatalf("want 1 resume call after upstream failure, got %d", res.calls)
+	}
+	if rr.Code != 200 || rr.Body.String() != "resumed:"+body {
+		t.Fatalf("fall-through/resume failed: %d %q", rr.Code, rr.Body.String())
 	}
 }
 
@@ -193,7 +305,8 @@ func TestStreamingFlushes(t *testing.T) {
 	host, port := splitHostPort(t, worker)
 
 	kv := newFakeKV()
-	kv.sessions["s1"] = &resumeapi.SessionEntry{SID: "s1", State: resumeapi.StateRunning, WorkerPodIP: host}
+	kv.sessions["s1"] = &resumeapi.SessionEntry{SID: "s1", State: resumeapi.StateRunning, WorkerPod: "w1", WorkerPodIP: host}
+	kv.liveWorker("w1", "s1")
 	rt := New(kv, &fakeResumer{}, NewHeaderResolver(), http.DefaultTransport, Options{WorkerPort: port})
 
 	srv := httptest.NewServer(rt)
