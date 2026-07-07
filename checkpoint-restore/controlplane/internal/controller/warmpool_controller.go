@@ -191,6 +191,14 @@ func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool, tmpl
 		workerResources = *tmpl.Spec.Resources
 	}
 
+	// Worker image: global default, optionally overridden per-pool by the template
+	// (canarying a new worker build). See SandboxTemplateSpec.WorkerImage for the
+	// restore-compatibility caveat.
+	workerImage := WorkerImage
+	if tmpl.Spec.WorkerImage != "" {
+		workerImage = tmpl.Spec.WorkerImage
+	}
+
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sandboxd-worker-" + pool.Name,
@@ -215,9 +223,9 @@ func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool, tmpl
 					TopologySpreadConstraints: sched.TopologySpreadConstraints,
 					Containers: []corev1.Container{{
 						Name:            "sandboxd",
-						Image:           WorkerImage,
+						Image:           workerImage,
 						Ports:           []corev1.ContainerPort{{ContainerPort: 8090, Name: "http"}},
-						Env:             r.workerEnv(),
+						Env:             r.workerEnv(tmpl),
 						Resources:       workerResources,
 						SecurityContext: &corev1.SecurityContext{Privileged: &privileged},
 						ReadinessProbe: &corev1.Probe{
@@ -243,12 +251,17 @@ func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool, tmpl
 }
 
 // workerEnv builds the env for a worker container: pod IP (downward API),
-// debug off, and — when configured — the S3 bucket/region for checkpoint/restore.
-func (r *WarmPoolReconciler) workerEnv() []corev1.EnvVar {
+// debug off, per-pool console streaming, and — when configured — the S3
+// bucket/region for checkpoint/restore.
+func (r *WarmPoolReconciler) workerEnv(tmpl *corev1alpha1.SandboxTemplate) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "SANDBOXD_DEBUG", Value: "0"},
 		{Name: "SANDBOXD_POD_IP", ValueFrom: &corev1.EnvVarSource{
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}},
+	}
+	// Per-pool opt-in: surface the nested workload console to kubectl logs.
+	if tmpl != nil && tmpl.Spec.StreamConsole {
+		env = append(env, corev1.EnvVar{Name: "SANDBOXD_STREAM_CONSOLE", Value: "1"})
 	}
 	if r.Worker.Bucket != "" {
 		env = append(env, corev1.EnvVar{Name: "SANDBOXD_BUCKET", Value: r.Worker.Bucket})

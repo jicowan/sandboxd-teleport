@@ -60,6 +60,26 @@ type SandboxTemplateSpec struct {
 	// +optional
 	CheckpointIntervalSeconds int `json:"checkpointIntervalSeconds,omitempty"`
 
+	// workerImage optionally overrides the sandboxd WORKER image for this pool's
+	// workers (NOT the sandbox workload image — that is .image above). The worker
+	// image carries the pinned runsc binary that checkpoint/restore depends on, so
+	// it is normally a single global value (operator --worker-image) to keep all
+	// workers restore/teleport-compatible. Set this only to canary a new worker
+	// build on one pool; sessions cannot teleport across workers running
+	// incompatible runsc, so a divergent override steps outside that guarantee.
+	// Empty = use the operator's global default.
+	// +optional
+	WorkerImage string `json:"workerImage,omitempty"`
+
+	// streamConsole enables surfacing the nested workload's stdout/stderr to the
+	// worker's stdout (→ kubectl logs) for this pool's workers, via the worker's
+	// SANDBOXD_STREAM_CONSOLE flag. Default false. The workload console is
+	// attacker-controlled and multi-tenant over a worker's lifetime, so this is
+	// opt-in per pool (e.g. on for a debug/AIO pool, off for others). The
+	// session-scoped /logs API remains the production path regardless.
+	// +optional
+	StreamConsole bool `json:"streamConsole,omitempty"`
+
 	// resources is a worker sizing hint informing the WarmPool pod resources.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`

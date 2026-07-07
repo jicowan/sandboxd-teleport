@@ -6,6 +6,16 @@ spec:
   ports: [{ container: 8080, host: 8080 }]
   health: { probe: http, probePort: 8080, probePath: /v1/health }
   idle: { timeoutSeconds: 600, action: suspend }
+  # Per-pool: surface the nested AIO workload's stdout/stderr to the worker's
+  # `kubectl logs` (sets SANDBOXD_STREAM_CONSOLE=1 on THIS pool's workers only).
+  # Off by default; opt-in here for debuggability. The console is attacker-
+  # controlled, so sandboxd prefixes/sanitizes/caps it; the session-scoped /logs
+  # API stays the production path.
+  streamConsole: true
+  # Per-pool worker-image override (canary). The worker image carries the pinned
+  # runsc that checkpoint/restore depends on; keep it aligned across pools you
+  # teleport between. Omit to use the operator's global --worker-image default.
+  workerImage: 820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v42
   resources:
     requests: { cpu: "500m", memory: "1Gi" }
   scheduling:
