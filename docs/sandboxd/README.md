@@ -1,0 +1,64 @@
+# sandboxd documentation
+
+`sandboxd` is a session‑teleport control plane on Amazon EKS. Warm pools of
+privileged worker pods run arbitrary OCI images as **nested gVisor sandboxes**;
+a session's RAM + filesystem state is checkpointed to S3 and can be restored
+("teleported") onto a different worker or node. An MCP client (e.g. Claude) talks
+to it through an authenticating front door and a session‑aware router, so a user
+keeps one durable session that survives suspend/resume.
+
+This directory holds the operational documentation. Everything here is grounded
+in the code and manifests on the `checkpoint-restore` branch; where a document
+describes the live reference cluster it says so explicitly.
+
+## Documents
+
+| # | Document | Audience | What it covers |
+|---|----------|----------|----------------|
+| 1 | [end-user-guide-broker.md](end-user-guide-broker.md) | End users | Point Claude / an MCP client at the broker and authenticate. |
+| 2 | [admin-guide-broker.md](admin-guide-broker.md) | Platform admins | Install & configure the broker, agentgateway, and Keycloak. |
+| 3 | [architecture-broker.md](architecture-broker.md) | Architects / admins | How the broker, agentgateway, and Keycloak fit together (the auth front door). |
+| 4 | [install-guide-sandboxd.md](install-guide-sandboxd.md) | Platform admins | Deploy the operator, router, Valkey, RBAC, Pod Identity, CRDs, and a pool. |
+| 5 | [admin-guide-crds.md](admin-guide-crds.md) | Platform admins | Reference for every CRD field (SandboxTemplate, WarmPool, Session). |
+| 6 | [architecture-sandboxd.md](architecture-sandboxd.md) | Architects / admins | How sandboxd, the router, the operator, Valkey, and workers relate. |
+| 7 | [runbook-reproduce-test-env.md](runbook-reproduce-test-env.md) | Operators | End‑to‑end reproduction of the test environment + run a sample container. |
+| 8 | [api-reference-sandboxd-worker.md](api-reference-sandboxd-worker.md) | Operators / integrators | HTTP API surface of the sandboxd worker agent (`:8090`). |
+
+## The whole picture in one diagram
+
+```
+                 Keycloak (OIDC IdP, realm "sandbox")
+                        ▲  issues user JWT (aud=sandbox-router, groups)
+                        │
+   MCP client ──HTTPS──►│  agentgateway  ──passthrough JWT──►  broker
+   (Claude)   /mcp      │  (JWT verify +     (re-verify JWT,      │ X-Session-ID
+                        │   tool allowlist)   derive session id)  │ X-Session-Pool
+                        │                                         ▼
+                        │                              sandboxd router  ──resume──►  operator
+                        │                              (session→worker,               (assignment +
+                        │                               stream proxy)                  teleport workflow)
+                        │                                         │                          │
+                        │                                         ▼                          ▼
+                        │                              sandboxd worker pod  ◄── Valkey (assignment table)
+                        │                              (nested gVisor sandbox)
+                        │                                         │  checkpoint / restore
+                        │                                         ▼
+                        │                                        S3  (per-session snapshots)
+```
+
+- Documents 1–3 cover the **front door** (left of the router).
+- Documents 4–6 cover the **control plane** (router, operator, Valkey, workers, S3).
+- Document 7 stitches it together into a reproducible walkthrough.
+
+## Reference cluster coordinates
+
+The live examples throughout these docs use the reference environment:
+
+- EKS cluster `EKSClusterStack-cluster`, region `us-west-2`, account `820537372947`.
+- gVisor nodes labeled `sandbox=gvisor` with taint `sandbox=gvisor:NoSchedule`.
+- Control plane in namespace `sandboxd-controlplane-system`; pools/sessions/workers
+  in namespace `default`.
+- S3 bucket `aio-checkpoint-spike-820537372947-us-west-2`.
+- Public front door `agentgateway.jicomusic.com`; identity provider `keycloak.jicomusic.com`.
+
+Substitute your own account, cluster, DNS, and bucket where you deploy.
