@@ -28,7 +28,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
+
 	corev1alpha1 "github.com/jicowan/aio-sandbox/controlplane/api/v1alpha1"
+	"github.com/jicowan/aio-sandbox/controlplane/internal/assign"
+	"github.com/jicowan/aio-sandbox/shared/resumeapi"
 )
 
 var _ = Describe("WarmPool Controller", func() {
@@ -103,5 +108,43 @@ var _ = Describe("WarmPool Controller", func() {
 		var dep appsv1.Deployment
 		err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "sandboxd-worker-pool-missing"}, &dep)
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
+	})
+
+	It("scales up to busy+minIdle to preserve warm headroom", func() {
+		ctx := context.Background()
+		mr, err := miniredis.Run()
+		Expect(err).NotTo(HaveOccurred())
+		defer mr.Close()
+		kv := assign.NewFromRedis(redis.NewClient(&redis.Options{Addr: mr.Addr()}))
+
+		tmpl := &corev1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "tmpl-mi", Namespace: ns},
+			Spec:       corev1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+		}
+		Expect(k8sClient.Create(ctx, tmpl)).To(Succeed())
+		pool := &corev1alpha1.WarmPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "pool-mi", Namespace: ns},
+			Spec: corev1alpha1.WarmPoolSpec{
+				TemplateRef: corev1alpha1.LocalRef{Name: "tmpl-mi"},
+				Replicas:    2, MinIdle: 2,
+			},
+		}
+		Expect(k8sClient.Create(ctx, pool)).To(Succeed())
+
+		// Two busy workers in KV -> effective replicas should become busy(2)+minIdle(2)=4,
+		// above the spec baseline of 2.
+		for _, p := range []string{"w1", "w2"} {
+			Expect(kv.UpsertWorker(ctx, &resumeapi.WorkerEntry{
+				Pod: p, Pool: "pool-mi", PodIP: "10.0.0.1", State: resumeapi.WorkerBusy, SID: "s-" + p,
+			})).To(Succeed())
+		}
+
+		r := &WarmPoolReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), KV: kv}
+		_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: "pool-mi"}})
+		Expect(err).NotTo(HaveOccurred())
+
+		var dep appsv1.Deployment
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "sandboxd-worker-pool-mi"}, &dep)).To(Succeed())
+		Expect(*dep.Spec.Replicas).To(Equal(int32(4)), "busy(2)+minIdle(2) should raise replicas above the spec baseline of 2")
 	})
 })

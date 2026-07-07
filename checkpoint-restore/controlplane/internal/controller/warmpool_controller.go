@@ -109,8 +109,23 @@ func (r *WarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 
+	// minIdle autoscaling: keep at least minIdle idle workers by raising the
+	// effective replica count to max(spec.Replicas, busy + minIdle). spec.Replicas
+	// stays the baseline (HPA-driven); minIdle only ever scales UP to guarantee
+	// warm headroom, so it doesn't fight an HPA. Busy is read from KV (the
+	// assignment table is the source of truth).
+	effReplicas := pool.Spec.Replicas
+	if r.KV != nil && pool.Spec.MinIdle > 0 {
+		if idle, total, cerr := r.KV.CountWorkers(ctx, pool.Name); cerr == nil {
+			busy := int32(total - idle)
+			if want := busy + pool.Spec.MinIdle; want > effReplicas {
+				effReplicas = want
+			}
+		}
+	}
+
 	// Desired worker Deployment for this pool (scheduling comes from the template).
-	dep := r.desiredDeployment(&pool, &tmpl)
+	dep := r.desiredDeployment(&pool, &tmpl, effReplicas)
 	if err := controllerutil.SetControllerReference(&pool, dep, r.Scheme); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -151,8 +166,7 @@ func (r *WarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 // desiredDeployment builds the worker Deployment for a pool, modeled on
 // sandboxd/worker-deploy.yaml, parameterized by pool name.
-func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool, tmpl *corev1alpha1.SandboxTemplate) *appsv1.Deployment {
-	replicas := pool.Spec.Replicas
+func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool, tmpl *corev1alpha1.SandboxTemplate, replicas int32) *appsv1.Deployment {
 	labels := map[string]string{
 		LabelApp:  LabelAppWorker,
 		LabelPool: pool.Name,

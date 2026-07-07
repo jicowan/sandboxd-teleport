@@ -1,0 +1,20 @@
+apiVersion: core.sandboxd.io/v1alpha1
+kind: SandboxTemplate
+metadata: { name: aio, namespace: default }
+spec:
+  image: ghcr.io/agent-infra/sandbox:latest
+  ports: [{ container: 8080, host: 8080 }]
+  health: { probe: http, probePort: 8080, probePath: /v1/health }
+  idle: { timeoutSeconds: 600, action: suspend }
+  resources:
+    requests: { cpu: "500m", memory: "1Gi" }
+  scheduling:
+    nodeSelector: { sandbox: gvisor }
+    tolerations: [{ key: sandbox, operator: Equal, value: gvisor, effect: NoSchedule }]
+    topologySpreadConstraints:
+      - { maxSkew: 1, minDomains: 2, topologyKey: kubernetes.io/hostname, whenUnsatisfiable: DoNotSchedule, labelSelector: { matchLabels: { sandboxd.io/app: worker, sandboxd.io/pool: aio-pool } } }
+---
+apiVersion: core.sandboxd.io/v1alpha1
+kind: WarmPool
+metadata: { name: aio-pool, namespace: default }
+spec: { templateRef: { name: aio }, replicas: 4, minIdle: 2 }

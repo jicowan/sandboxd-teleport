@@ -28,6 +28,7 @@ What's DIFFERENT (the backend half — no claim):
   - Routing headers are X-Session-ID + X-Session-Pool (not X-Sandbox-*).
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -217,6 +218,23 @@ def _rewrite_init_version(payload: bytes) -> bytes:
         return payload
 
 
+async def _warm(sid: str) -> None:
+    """Background warm-on-initialize (O8): ask the router's generic /_warm
+    primitive to ensure the session is Running before the first tool call. This
+    is protocol-agnostic — the router just resumes the session and returns 204
+    (no MCP payload fabricated, no workload round trip). Fire-and-forget:
+    best-effort, all errors swallowed (a failed warm just means the first real
+    call pays the cold start, as before)."""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0)) as client:
+            await client.post(
+                f"{ROUTER_URL}/_warm",
+                headers={"X-Session-ID": sid, "X-Session-Pool": POOL},
+            )
+    except Exception:
+        pass
+
+
 async def _forward(body: bytes, sid: str, content_type: str, accept: str):
     """Forward the MCP request to the sandboxd router. The router resolves
     X-Session-ID -> worker (cold start / restore-on-connect via the control
@@ -279,8 +297,12 @@ async def mcp(
 
     mcp_sess = mcp_session_id or uuid.uuid4().hex
 
-    # Answer lifecycle locally (no backend round trip) — instant handshake.
+    # Answer lifecycle locally (no backend round trip) — instant handshake — AND
+    # kick off a background warm of the session so it's Running before the first
+    # tool call (hides AIO's ~45s cold start; avoids the miss-path 503 herd, O8).
     if method == "initialize":
+        sid = _sid_for(auth.principal, mcp_sess)
+        asyncio.create_task(_warm(sid))
         resp = Response(content=json.dumps(_synthetic_initialize(_msg_id(body))).encode(),
                         media_type="application/json")
         resp.headers[SESSION_HEADER] = mcp_sess

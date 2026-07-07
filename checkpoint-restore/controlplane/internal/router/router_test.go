@@ -225,3 +225,36 @@ func TestStreamingFlushes(t *testing.T) {
 	}
 	close(release)
 }
+
+func TestWarmEndpoint(t *testing.T) {
+	// /_warm ensures a session is Running via resume and returns 204 — no proxy.
+	kv := newFakeKV()
+	res := &fakeResumer{ip: "10.0.0.9"}
+	rt := New(kv, res, NewHeaderResolver(), http.DefaultTransport, Options{WorkerPort: 8090})
+
+	r := httptest.NewRequest(http.MethodPost, "/_warm", nil)
+	r.Header.Set("X-Session-ID", "s1")
+	r.Header.Set("X-Session-Pool", "aio-pool")
+	rr := httptest.NewRecorder()
+	rt.ServeHTTP(rr, r)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("want 204, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	if res.calls != 1 {
+		t.Fatalf("warm should trigger exactly one resume, got %d", res.calls)
+	}
+}
+
+func TestWarmNoCapacity(t *testing.T) {
+	kv := newFakeKV()
+	res := &fakeResumer{err: ErrNoCapacity}
+	rt := New(kv, res, NewHeaderResolver(), http.DefaultTransport, Options{})
+	r := httptest.NewRequest(http.MethodPost, "/_warm", nil)
+	r.Header.Set("X-Session-ID", "s1")
+	rr := httptest.NewRecorder()
+	rt.ServeHTTP(rr, r)
+	if rr.Code != http.StatusServiceUnavailable || rr.Header().Get("Retry-After") == "" {
+		t.Fatalf("want 503+Retry-After, got %d", rr.Code)
+	}
+}

@@ -104,6 +104,15 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Warm primitive (protocol-agnostic): "ensure this session is Running" without
+	// proxying anything to the workload. Lets a front door pre-warm on connect
+	// (e.g. MCP initialize) without the router knowing anything about the payload
+	// protocol. Returns 204 on success, 503 Retry-After on no capacity.
+	if r.URL.Path == "/_warm" {
+		rt.handleWarm(w, r, id)
+		return
+	}
+
 	// Fast path: session already Running on a live worker.
 	if e, err := rt.kv.GetSession(r.Context(), id.SID); err == nil &&
 		e.State == resumeapi.StateRunning && e.WorkerPodIP != "" {
@@ -113,12 +122,7 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Miss: resume via the operator, coalescing concurrent misses for this sid.
-	ctx, cancel := context.WithTimeout(r.Context(), rt.opts.ResumeDeadline)
-	defer cancel()
-	v, err, _ := rt.single.Do(id.SID, func() (any, error) {
-		return rt.resumer.Resume(ctx, id.SID, id.Subject, id.PoolHint)
-	})
+	ip, port, err := rt.ensureRunning(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, ErrNoCapacity) {
 			w.Header().Set("Retry-After", "5")
@@ -128,20 +132,51 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "resume failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	ip, _ := v.(string)
-	if ip == "" {
-		http.Error(w, "resume returned no worker", http.StatusBadGateway)
-		return
-	}
-	// Re-read the (now Running) entry to learn the exposed host port to target.
-	port := rt.opts.WorkerPort
-	if e, gerr := rt.kv.GetSession(r.Context(), id.SID); gerr == nil {
-		port = hostPort(e)
-	}
 	rt.stamp(id.SID)
 	defer rt.stamp(id.SID)
 	rt.proxyTo(w, r, ip, port)
 }
+
+// ensureRunning resolves the session to a Running worker, resuming via the
+// operator on a miss (singleflight-coalesced). Returns the worker IP + the host
+// port to target.
+func (rt *Router) ensureRunning(reqCtx context.Context, id Identity) (string, int, error) {
+	ctx, cancel := context.WithTimeout(reqCtx, rt.opts.ResumeDeadline)
+	defer cancel()
+	v, err, _ := rt.single.Do(id.SID, func() (any, error) {
+		return rt.resumer.Resume(ctx, id.SID, id.Subject, id.PoolHint)
+	})
+	if err != nil {
+		return "", 0, err
+	}
+	ip, _ := v.(string)
+	if ip == "" {
+		return "", 0, errNoWorker
+	}
+	port := rt.opts.WorkerPort
+	if e, gerr := rt.kv.GetSession(reqCtx, id.SID); gerr == nil {
+		port = hostPort(e)
+	}
+	return ip, port, nil
+}
+
+// handleWarm ensures the session is Running and returns 204 — no proxy. Generic
+// (no workload-protocol awareness).
+func (rt *Router) handleWarm(w http.ResponseWriter, r *http.Request, id Identity) {
+	if _, _, err := rt.ensureRunning(r.Context(), id); err != nil {
+		if errors.Is(err, ErrNoCapacity) {
+			w.Header().Set("Retry-After", "5")
+			http.Error(w, "no capacity, retry", http.StatusServiceUnavailable)
+			return
+		}
+		http.Error(w, "warm failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	rt.stamp(id.SID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+var errNoWorker = errors.New("router: resume returned no worker")
 
 // hostPort returns the worker-pod host port to proxy to: the session's first
 // exposed port (host, or container if host==0). Falls back to 0 (caller uses its
