@@ -196,6 +196,13 @@ func (s *CheckpointSweeper) Start(ctx context.Context) error {
 	if iv == 0 {
 		iv = 15 * time.Second
 	}
+	// Stagger against the suspend sweeper (same interval) so the two indexed reads
+	// don't fire in lockstep — spreads Valkey load across the period.
+	select {
+	case <-ctx.Done():
+		return nil
+	case <-time.After(iv / 2):
+	}
 	t := time.NewTicker(iv)
 	defer t.Stop()
 	log := logf.FromContext(ctx).WithName("checkpoint-sweeper")

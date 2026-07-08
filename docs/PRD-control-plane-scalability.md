@@ -91,12 +91,12 @@ The checkpoint sweeper full‑scans every 15s even though `checkpointIntervalSec
 is opt‑in and 0 by default. Skip the sweep entirely when no template enables it (or
 only start the loop if some pool has it set). Removes one full N‑scan / 15s outright.
 
-### 5.2 Raise + stagger sweeper intervals (trivial, config)
+### 5.2 Raise + stagger sweeper intervals (trivial, config) — DONE (operator v21)
 
-15s full scans are aggressive for idle detection. Make the intervals configurable
-(they're already flag‑plumbed) and default higher (e.g. 30–60s), and stagger the two
-session sweepers so they don't scan in lockstep. Pure config; buys headroom while the
-indexed approach (5.3) is built.
+**Implemented:** `--sweep-interval-seconds` (env `SANDBOXD_SWEEP_INTERVAL_SECONDS`,
+default 30s, was hardcoded 15s) drives both session sweepers; the checkpoint sweeper
+starts a half‑interval offset so the two indexed reads don't fire in lockstep. Now
+that the sweeps are O(due) this is a granularity knob, not a scan‑cost one.
 
 ### 5.3 Index suspend candidates instead of scanning (the real fix)
 

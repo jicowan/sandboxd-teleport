@@ -132,6 +132,9 @@ func main() {
 	var resumeDeadlineSec int
 	flag.IntVar(&resumeDeadlineSec, "resume-deadline-seconds", envInt("SANDBOXD_RESUME_DEADLINE_SECONDS", 90),
 		"Max time for a resume (cold start/restore) to reach ready. Large images (AIO) need >default.")
+	var sweepIntervalSec int
+	flag.IntVar(&sweepIntervalSec, "sweep-interval-seconds", envInt("SANDBOXD_SWEEP_INTERVAL_SECONDS", 30),
+		"Idle-suspend / periodic-checkpoint sweep period. Sweeps are O(due) (indexed), so this is a granularity knob, not a scan-cost one.")
 	var enableGC bool
 	var gcIntervalSec int
 	flag.BoolVar(&enableGC, "enable-checkpoint-gc", envOr("SANDBOXD_ENABLE_GC", "") == "1",
@@ -325,8 +328,9 @@ func main() {
 	// Idle-suspend sweeper (P2): periodically checkpoint idle Running sessions to
 	// S3 and free their workers. The teleport completes when a later request hits
 	// the router and the resume path restores from the recorded snapshot (P3).
+	sweepInterval := time.Duration(sweepIntervalSec) * time.Second
 	suspender := controller.BuildSuspender(mgr.GetClient(), kv, resumeNamespace, nil).WithNotifier(poolNotifier)
-	if err := controller.AddSuspendSweeper(mgr, suspender, 0); err != nil {
+	if err := controller.AddSuspendSweeper(mgr, suspender, sweepInterval); err != nil {
 		setupLog.Error(err, "Failed to add suspend sweeper")
 		os.Exit(1)
 	}
@@ -341,7 +345,7 @@ func main() {
 	// long-lived Running sessions in place so a worker crash loses at most the
 	// interval, not everything since the last idle-suspend.
 	checkpointer := controller.BuildCheckpointer(mgr.GetClient(), kv, resumeNamespace, nil)
-	if err := controller.AddCheckpointSweeper(mgr, checkpointer, 0); err != nil {
+	if err := controller.AddCheckpointSweeper(mgr, checkpointer, sweepInterval); err != nil {
 		setupLog.Error(err, "Failed to add checkpoint sweeper")
 		os.Exit(1)
 	}
