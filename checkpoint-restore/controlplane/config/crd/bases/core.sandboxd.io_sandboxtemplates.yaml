@@ -86,6 +86,19 @@ spec:
                     - restore
                     type: string
                 type: object
+              iam:
+                description: |-
+                  iam optionally lets sandboxes in this pool assume an AWS IAM role (temporary
+                  credentials vended per session by the worker). Off unless set. A Session may
+                  override this per session.
+                properties:
+                  roleArn:
+                    description: |-
+                      roleArn is the ARN of the IAM role the sandbox may assume. Authorization for
+                      which sessions may use which role is enforced at the front door / control
+                      plane, not here.
+                    type: string
+                type: object
               idle:
                 description: idle controls how long a sandbox may be idle before checkpoint
                   + reclaim.

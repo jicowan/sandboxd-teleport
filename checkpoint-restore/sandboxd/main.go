@@ -27,6 +27,9 @@ type server struct {
 	podIP    string // worker pod's routable IP (for nftables DNAT target)
 	netns    bool   // whether the checkpointable veth/interior-netns path is active
 	compress bool   // default: compress checkpoint pages (SANDBOXD_COMPRESS)
+	region   string // AWS region (for injected AWS_REGION)
+	cred     *credVendor // per-session AWS credential vendor (nil if disabled)
+	credPort int         // interior-gateway port the vendor listens on
 	mu      sync.Mutex
 	sb      map[string]*sandbox    // sandboxId -> metadata
 	hs      map[string]*healthState // sandboxId -> runtime health (not persisted)
@@ -43,6 +46,7 @@ type sandbox struct {
 	Ports     []portMap `json:"ports"`    // podIP:host -> interior:container
 	Health    health    `json:"health"`   // restart policy + readiness probe + idle
 	RunscVer  string    `json:"runscVersion"`
+	IAMRoleARN string   `json:"iamRoleArn,omitempty"` // session's assumable role (cred vendor)
 	CreatedAt string    `json:"createdAt"`
 }
 
@@ -64,6 +68,8 @@ func main() {
 		bucket: bucket,
 		podIP:    os.Getenv("SANDBOXD_POD_IP"), // set via downward API
 		compress: os.Getenv("SANDBOXD_COMPRESS") != "0", // default ON (A/B: ~4x smaller, ~2x faster suspend); opt out with =0
+		region:   os.Getenv("AWS_REGION"),
+		credPort: int(envInt64("SANDBOXD_CRED_PORT", 8091)),
 		sb:       map[string]*sandbox{},
 		hs:       map[string]*healthState{},
 	}
@@ -73,6 +79,19 @@ func main() {
 			log.Printf("WARN: s3 init failed (checkpoint/restore to S3 disabled): %v", err)
 		} else {
 			s.s3 = st
+		}
+	}
+	// Per-session AWS credential vendor (opt-in): enabled when a fleet token key is
+	// configured. Serves temporary role credentials to the sandbox on the interior
+	// gateway so the workload can assume its session's IAM role. See
+	// docs/PRD-sandbox-iam-credentials.md.
+	if key := os.Getenv("SANDBOXD_CRED_TOKEN_KEY"); key != "" {
+		assume, err := stsAssumeFunc(context.Background())
+		if err != nil {
+			log.Printf("WARN: STS init failed (per-session IAM credentials disabled): %v", err)
+		} else {
+			s.cred = newCredVendor(assume, []byte(key))
+			log.Printf("credential vendor enabled (interior %s:%d)", actorVethGateway, s.credPort)
 		}
 	}
 	// Networking: only the "sandbox" (netstack) mode supports the checkpointable
@@ -117,6 +136,24 @@ func main() {
 
 	srv := &http.Server{Addr: addr, Handler: withRequestLog(mux)}
 
+	// Credential vendor listens ONLY on the interior gateway (reachable from this
+	// worker's sandbox netns, never the pod network or outside). Separate listener
+	// from the control API on :8090.
+	if s.cred != nil && s.netns {
+		credSrv := &http.Server{
+			Addr:    fmt.Sprintf("%s:%d", actorVethGateway, s.credPort),
+			Handler: s.cred,
+		}
+		go func() {
+			if err := credSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("WARN: credential vendor stopped: %v", err)
+			}
+		}()
+	} else if s.cred != nil {
+		log.Printf("WARN: credential vendor configured but sandbox networking is off; disabled")
+		s.cred = nil
+	}
+
 	// Graceful shutdown: on SIGTERM/SIGINT, DRAIN-WAIT so the control plane can
 	// checkpoint-on-terminate. We do NOT checkpoint here ourselves (the operator is
 	// the sole KV writer and owns the session state machine); instead we keep the
@@ -159,12 +196,13 @@ func main() {
 // POST /run {image, cmd?, env?, sandboxId?}
 func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Image     string    `json:"image"`
-		Cmd       []string  `json:"cmd"`
-		Env       []string  `json:"env"`
-		SandboxID string    `json:"sandboxId"`
-		Ports     []portMap `json:"ports"`
-		Health    health    `json:"health"`
+		Image      string    `json:"image"`
+		Cmd        []string  `json:"cmd"`
+		Env        []string  `json:"env"`
+		SandboxID  string    `json:"sandboxId"`
+		Ports      []portMap `json:"ports"`
+		Health     health    `json:"health"`
+		IAMRoleARN string    `json:"iamRoleArn"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -182,6 +220,9 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "sandbox already exists: "+id)
 		return
 	}
+	// Per-session AWS credentials: register the role and inject the container-
+	// credentials env so the sandbox's AWS SDK fetches from the interior vendor.
+	req.Env = s.withCredEnv(id, req.IAMRoleARN, req.Env)
 	lg := reqLogger(r, "run", id)
 	bundle := filepath.Join(s.work, "bundles", id)
 	rootfs := filepath.Join(bundle, "rootfs")
@@ -223,6 +264,7 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 	if err := writeOCISpec(bundle, ic, req.Cmd, req.Env, netnsPath); err != nil {
 		teardownSandboxNet()
 		s.cleanupArtifacts(id)
+		s.dropCred(id)
 		writeErr(w, 500, "spec: "+err.Error())
 		return
 	}
@@ -232,6 +274,7 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 		s.runsc.delete(id) // clear any partial runsc state
 		teardownSandboxNet()
 		s.cleanupArtifacts(id)
+		s.dropCred(id)
 		writeErr(w, 500, "runsc: "+err.Error())
 		return
 	}
@@ -239,7 +282,8 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 	lg("started, status=%s", st)
 	s.put(&sandbox{ID: id, Image: req.Image, Digest: ic.Digest, Bundle: bundle,
 		Ports: req.Ports, Health: req.Health, RunscVer: s.runsc.version(),
-		CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+		IAMRoleARN: req.IAMRoleARN,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339)})
 	writeJSON(w, 200, map[string]any{"sandboxId": id, "status": st, "image": req.Image, "ports": req.Ports})
 }
 
@@ -321,6 +365,7 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		RunscVersion string    `json:"runscVersion"`
 		Ports        []portMap `json:"ports"`
 		Health       health    `json:"health"`
+		IAMRoleARN   string    `json:"iamRoleArn"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -414,12 +459,21 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Re-register the session's IAM role with THIS worker's credential vendor before
+	// the sandbox resumes. The AWS env is already baked into the restored config.json
+	// (it travels in the checkpoint) and the per-session token is deterministic
+	// (HMAC of the sid), so the same URI+token keep working — we only need to make
+	// the new worker's vendor able to assume the role again. No env re-injection.
+	if s.cred != nil && req.IAMRoleARN != "" {
+		s.cred.register(id, req.IAMRoleARN)
+	}
 	tr := time.Now()
 	if err := s.runsc.restore(id, bundle, imgDir); err != nil {
 		lg("runsc restore FAILED: %v", err)
 		s.runsc.delete(id)
 		teardownSandboxNet()
 		s.cleanupArtifacts(id)
+		s.dropCred(id)
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -428,7 +482,8 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	lg("DONE in %s, status=%s", time.Since(tr), st)
 	s.put(&sandbox{ID: id, Image: req.Image, Digest: ic.Digest, Bundle: bundle,
 		Snapshot: req.Snapshot, Ports: req.Ports, Health: req.Health, RunscVer: s.runsc.version(),
-		CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+		IAMRoleARN: req.IAMRoleARN,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339)})
 	writeJSON(w, 200, map[string]any{"sandboxId": id, "status": st, "restoredFrom": req.Snapshot, "ports": req.Ports})
 }
 
@@ -497,6 +552,7 @@ func (s *server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 	}
 	s.cleanupArtifacts(req.SandboxID)
 	s.forget(req.SandboxID)
+	s.dropCred(req.SandboxID)
 	metrics.inc("suspends")
 	lg("SUSPENDED: snapshot=%s, worker freed", prefix)
 	writeJSON(w, 200, map[string]any{"sandboxId": req.SandboxID, "snapshot": prefix,
@@ -522,6 +578,7 @@ func (s *server) handleReset(w http.ResponseWriter, r *http.Request) {
 	}
 	s.cleanupArtifacts(req.SandboxID)
 	s.forget(req.SandboxID)
+	s.dropCred(req.SandboxID)
 	metrics.inc("resets")
 	writeJSON(w, 200, map[string]any{"sandboxId": req.SandboxID, "reset": true})
 }
@@ -555,6 +612,7 @@ func (s *server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	s.cleanupArtifacts(id)
 	s.forget(id)
+	s.dropCred(id)
 	writeJSON(w, 200, map[string]string{"sandboxId": id, "deleted": "true"})
 }
 
@@ -596,6 +654,26 @@ func dirSize(dir string) int64 {
 		}
 	}
 	return n
+}
+
+// withCredEnv registers a session's assumable IAM role with the credential vendor
+// (if enabled and a role is requested) and appends the AWS container-credentials
+// env so the sandbox's SDK fetches temporary creds from the interior vendor. A
+// no-op (returns env unchanged) when no vendor or no role. Used by /run and
+// /restore so the credential path re-establishes identically after teleport.
+func (s *server) withCredEnv(id, roleARN string, env []string) []string {
+	if s.cred == nil || roleARN == "" {
+		return env
+	}
+	s.cred.register(id, roleARN)
+	return append(env, s.cred.awsEnvForSession(id, actorVethGateway, s.credPort, s.region)...)
+}
+
+// dropCred deregisters a session from the credential vendor (on teardown).
+func (s *server) dropCred(id string) {
+	if s.cred != nil {
+		s.cred.deregister(id)
+	}
 }
 
 func envOr(k, d string) string {

@@ -80,6 +80,12 @@ type SandboxTemplateSpec struct {
 	// +optional
 	StreamConsole bool `json:"streamConsole,omitempty"`
 
+	// iam optionally lets sandboxes in this pool assume an AWS IAM role (temporary
+	// credentials vended per session by the worker). Off unless set. A Session may
+	// override this per session.
+	// +optional
+	IAM *IAMSpec `json:"iam,omitempty"`
+
 	// resources is a worker sizing hint informing the WarmPool pod resources.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`

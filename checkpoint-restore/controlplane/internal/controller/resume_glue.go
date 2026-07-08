@@ -85,6 +85,11 @@ func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, h
 			Env:   s.Spec.Env,
 			Ports: portsFromCRD(s.Spec.Ports),
 		}
+		// Session-level IAM role overrides the template's (resolved in the resume
+		// workflow when TemplateName is set).
+		if s.Spec.IAM != nil {
+			plan.IAMRoleARN = s.Spec.IAM.RoleARN
+		}
 		switch {
 		case s.Spec.Image != "": // arbitrary-image mode (O6)
 			plan.Image = s.Spec.Image
@@ -263,6 +268,9 @@ func templateSpecFromCRD(t *corev1alpha1.SandboxTemplate) *resume.TemplateSpec {
 		Cmd:   t.Spec.Cmd,
 		Env:   t.Spec.Env,
 		Ports: portsFromCRD(t.Spec.Ports),
+	}
+	if t.Spec.IAM != nil {
+		ts.IAMRoleARN = t.Spec.IAM.RoleARN
 	}
 	if t.Spec.Health != nil {
 		ts.Health = &sbxapi.Health{

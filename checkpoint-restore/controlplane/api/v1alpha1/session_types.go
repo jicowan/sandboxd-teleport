@@ -53,6 +53,12 @@ type SessionSpec struct {
 	// +optional
 	Subject string `json:"subject,omitempty"`
 
+	// iam optionally lets this session's sandbox assume an AWS IAM role, overriding
+	// the pool template's iam. Authorization is enforced at the front door / control
+	// plane before the Session is created.
+	// +optional
+	IAM *IAMSpec `json:"iam,omitempty"`
+
 	// lifecycle overrides template idle/TTL for this session.
 	// +optional
 	Lifecycle SessionLifecycle `json:"lifecycle,omitempty"`

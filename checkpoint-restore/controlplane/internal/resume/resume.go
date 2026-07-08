@@ -41,11 +41,12 @@ import (
 // to start a sandbox. Supplying it via an interface keeps this package free of
 // the CRD/k8s types (TDD §2.4 split-readiness).
 type TemplateSpec struct {
-	Image  string
-	Cmd    []string
-	Env    []string
-	Ports  []sbxapi.PortMap
-	Health *sbxapi.Health
+	Image      string
+	Cmd        []string
+	Env        []string
+	Ports      []sbxapi.PortMap
+	Health     *sbxapi.Health
+	IAMRoleARN string
 }
 
 // SessionPlan is what to run for a session: either a template reference (resolved
@@ -58,6 +59,7 @@ type SessionPlan struct {
 	Env          []string
 	Ports        []sbxapi.PortMap
 	Health       *sbxapi.Health
+	IAMRoleARN   string // session's assumable AWS role (from template or session)
 }
 
 // TemplateLookup resolves a template name (in a pool's namespace) to its spec.
@@ -225,6 +227,7 @@ func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint string) (
 	}
 	img := plan.Image
 	cmd, env, ports, health := plan.Cmd, plan.Env, plan.Ports, plan.Health
+	roleARN := plan.IAMRoleARN
 	if plan.TemplateName != "" {
 		tmpl, terr := wf.lookup(ctx, plan.TemplateName)
 		if terr != nil {
@@ -243,6 +246,9 @@ func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint string) (
 		if health == nil {
 			health = tmpl.Health
 		}
+		if roleARN == "" {
+			roleARN = tmpl.IAMRoleARN // session override else template default
+		}
 	}
 	if img == "" {
 		return "", metrics.KindColdStart, false, errors.New("no image to run (empty template and no inline image)")
@@ -253,7 +259,7 @@ func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint string) (
 		return "", metrics.KindColdStart, false, err // ErrNoCapacity -> 503 at the handler
 	}
 	wf.notify.PoolChanged(w.Pool) // idle->busy: refresh pool status
-	ip, err := wf.startAndBind(ctx, sid, w, false, img, cmd, env, ports, health, "")
+	ip, err := wf.startAndBind(ctx, sid, w, false, img, cmd, env, ports, health, "", roleARN)
 	if err != nil {
 		_ = wf.kv.ReleaseWorker(ctx, w.Pod, w.Pool)
 		wf.notify.PoolChanged(w.Pool) // busy->idle (rolled back)
@@ -274,7 +280,7 @@ func (wf *Workflow) resumeFromSnapshot(ctx context.Context, cur *resumeapi.Sessi
 		return "", err
 	}
 	wf.notify.PoolChanged(w.Pool) // idle->busy: refresh pool status
-	ip, err := wf.startAndBind(ctx, cur.SID, w, true, cur.Image, nil, nil, cur.Ports, cur.Health, cur.SnapshotURI)
+	ip, err := wf.startAndBind(ctx, cur.SID, w, true, cur.Image, nil, nil, cur.Ports, cur.Health, cur.SnapshotURI, cur.IAMRoleARN)
 	if err != nil {
 		_ = wf.kv.ReleaseWorker(ctx, w.Pod, w.Pool)
 		wf.notify.PoolChanged(w.Pool)
@@ -288,7 +294,7 @@ func (wf *Workflow) resumeFromSnapshot(ctx context.Context, cur *resumeapi.Sessi
 // worker (one per worker).
 func (wf *Workflow) startAndBind(ctx context.Context, sid string, w *resumeapi.WorkerEntry,
 	restore bool, img string, cmd, env []string, ports []sbxapi.PortMap, health *sbxapi.Health,
-	snapshot string) (string, error) {
+	snapshot, roleARN string) (string, error) {
 
 	// Record Resuming (CAS from whatever we last read; create if absent).
 	if err := wf.casSession(ctx, sid, func(e *resumeapi.SessionEntry) {
@@ -301,6 +307,9 @@ func (wf *Workflow) startAndBind(ctx context.Context, sid string, w *resumeapi.W
 		if health != nil {
 			e.Health = health // record so restore-on-connect can replay the probe
 		}
+		if roleARN != "" {
+			e.IAMRoleARN = roleARN // record so teleport re-establishes cred vending
+		}
 	}); err != nil {
 		return "", fmt.Errorf("mark resuming: %w", err)
 	}
@@ -308,13 +317,13 @@ func (wf *Workflow) startAndBind(ctx context.Context, sid string, w *resumeapi.W
 	cl := wf.clientFor(w.PodIP)
 	if restore {
 		if _, err := cl.Restore(ctx, sbxapi.RestoreRequest{
-			SandboxID: sid, Image: img, Snapshot: snapshot, Ports: ports, Health: health,
+			SandboxID: sid, Image: img, Snapshot: snapshot, Ports: ports, Health: health, IAMRoleARN: roleARN,
 		}); err != nil {
 			return "", fmt.Errorf("worker /restore: %w", err)
 		}
 	} else {
 		if _, err := cl.Run(ctx, sbxapi.RunRequest{
-			SandboxID: sid, Image: img, Cmd: cmd, Env: env, Ports: ports, Health: health,
+			SandboxID: sid, Image: img, Cmd: cmd, Env: env, Ports: ports, Health: health, IAMRoleARN: roleARN,
 		}); err != nil {
 			return "", fmt.Errorf("worker /run: %w", err)
 		}

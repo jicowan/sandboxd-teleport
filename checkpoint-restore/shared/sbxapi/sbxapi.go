@@ -29,6 +29,10 @@ type RunRequest struct {
 	SandboxID string    `json:"sandboxId,omitempty"`
 	Ports     []PortMap `json:"ports,omitempty"`
 	Health    *Health   `json:"health,omitempty"`
+	// IAMRoleARN, when set, makes the worker vend temporary AWS credentials for this
+	// role to the sandbox via a container-credentials endpoint on the interior
+	// gateway (the sandbox's AWS SDK auto-refreshes them). Empty = no AWS identity.
+	IAMRoleARN string `json:"iamRoleArn,omitempty"`
 }
 
 // RunResponse is the body of a successful POST /run.
@@ -64,6 +68,9 @@ type RestoreRequest struct {
 	RunscVersion string    `json:"runscVersion,omitempty"`
 	Ports        []PortMap `json:"ports,omitempty"`
 	Health       *Health   `json:"health,omitempty"`
+	// IAMRoleARN re-establishes the session's AWS credential vending after teleport
+	// (same role the session ran with). Travels with the session. See RunRequest.
+	IAMRoleARN string `json:"iamRoleArn,omitempty"`
 }
 
 // RestoreResponse is the body of a successful POST /restore.

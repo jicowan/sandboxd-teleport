@@ -58,6 +58,19 @@ spec:
                 items:
                   type: string
                 type: array
+              iam:
+                description: |-
+                  iam optionally lets this session's sandbox assume an AWS IAM role, overriding
+                  the pool template's iam. Authorization is enforced at the front door / control
+                  plane before the Session is created.
+                properties:
+                  roleArn:
+                    description: |-
+                      roleArn is the ARN of the IAM role the sandbox may assume. Authorization for
+                      which sessions may use which role is enforced at the front door / control
+                      plane, not here.
+                    type: string
+                type: object
               image:
                 description: |-
                   image is a caller-supplied arbitrary image (arbitrary-image mode, O6):

@@ -81,6 +81,20 @@ type LocalRef struct {
 	Name string `json:"name"`
 }
 
+// IAMSpec configures the AWS IAM role a sandbox may assume. When set, the worker
+// vends temporary credentials for this role to the sandbox via a container-
+// credentials endpoint on the interior gateway (the AWS SDK auto-refreshes them);
+// the credentials are per-session, never the worker's own identity, and survive
+// teleport. Empty/unset = the sandbox has no AWS identity. See
+// docs/PRD-sandbox-iam-credentials.md.
+type IAMSpec struct {
+	// roleArn is the ARN of the IAM role the sandbox may assume. Authorization for
+	// which sessions may use which role is enforced at the front door / control
+	// plane, not here.
+	// +optional
+	RoleARN string `json:"roleArn,omitempty"`
+}
+
 // SchedulingSpec controls how the pool's worker pods are placed. It is a
 // pass-through of the standard Kubernetes scheduling primitives — the operator
 // injects NO defaults. Whatever you set here is applied verbatim to the worker

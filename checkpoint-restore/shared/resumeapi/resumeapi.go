@@ -33,6 +33,7 @@ type SessionEntry struct {
 	SnapshotURI  string           `json:"snapshotURI,omitempty"`  // current checkpoint (one lineage)
 	Ports        []sbxapi.PortMap `json:"ports,omitempty"`
 	Health       *sbxapi.Health   `json:"health,omitempty"`       // replayed on restore (probe config)
+	IAMRoleARN   string           `json:"iamRoleArn,omitempty"`   // session's assumable AWS role; replayed on restore
 	Version          int64 `json:"version"`
 	LastActiveAt     int64 `json:"lastActiveAt,omitempty"`     // unix ms; stamped by router (O3)
 	LastCheckpointAt int64 `json:"lastCheckpointAt,omitempty"` // unix ms; periodic checkpoint (P5)

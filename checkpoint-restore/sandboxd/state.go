@@ -117,6 +117,12 @@ func (s *server) reconcile() {
 			s.mu.Lock()
 			s.sb[sb.ID] = &sb
 			s.mu.Unlock()
+			// Re-register the credential-vending role for a live sandbox that survived
+			// a sandboxd process restart (the vendor's in-memory map is empty on boot;
+			// the sandbox's baked-in AWS env still points at the vendor).
+			if sb.IAMRoleARN != "" && s.cred != nil {
+				s.cred.register(sb.ID, sb.IAMRoleARN)
+			}
 			loaded++
 		} else if sb.Snapshot != "" {
 			s.mu.Lock()
