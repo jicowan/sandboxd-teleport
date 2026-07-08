@@ -126,6 +126,12 @@ func (r *WorkerDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			if err := r.KV.UpsertWorker(ctx, existing); err != nil {
 				return ctrl.Result{}, err
 			}
+		} else {
+			// No entry change, but ensure pool membership is recorded (idempotent) —
+			// self-heals busy workers that predate the pool all-set index.
+			if err := r.KV.EnsurePoolMember(ctx, pod.Name, pool); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 		return ctrl.Result{}, nil
 	}

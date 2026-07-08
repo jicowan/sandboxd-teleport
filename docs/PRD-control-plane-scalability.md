@@ -128,13 +128,23 @@ needed once Running was dropped. Verified live.
 - Net: keeps the durability guarantee (Suspended is what needs it) while removing
   most of the new etcd write pressure.
 
-### 5.5 EndpointSlice‑based worker discovery (removes the per‑pool worker scan)
+### 5.5 Remove the per‑pool worker scan — DONE (operator v20)
 
-Already noted as a future item in the TDD. Watch a per‑pool headless Service's
-EndpointSlices instead of scanning `worker:*` per pool for status: readiness is
-precomputed, membership is a watch event, and `CountWorkers` becomes a cache read
-rather than a full scan per reconcile. Removes 2.2's per‑pool cost and the
-churn‑driven rescan.
+**Implemented (cheaply, without the EndpointSlice rewrite):** added a per‑pool
+`pool:<pool>:all` Redis SET, maintained atomically in the worker upsert/remove
+scripts alongside the existing idle‑set. `CountWorkers` is now two O(1) `SCARD`s
+(idle + all) instead of a `worker:*` scan; `PoolWorkers` (used by the deletion‑cost
+sync on every claim/release) iterates the pool's all‑set instead of scanning.
+Migration self‑heals: the discovery reconciler re‑records membership on its normal
+sweep (busy workers via `EnsurePoolMember`, an idempotent SADD). Verified live:
+all‑set/idle‑set counts match reality across pools. The full EndpointSlice approach
+(readiness precomputed, membership as a watch event) remains a future option if the
+worker informer itself becomes a limit, but the scan cost — the actual §2.2 issue —
+is gone.
+
+The prune loop's `ListWorkerPods` (`worker:*` scan every 30s) is intentionally left:
+it's a low‑frequency reconciliation sweep that must enumerate all KV worker entries
+to find orphans, and it's off the hot path.
 
 ### 5.6 (Later) horizontal sharding
 

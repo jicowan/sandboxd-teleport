@@ -194,3 +194,46 @@ func sids(es []*resumeapi.SessionEntry) []string {
 	}
 	return out
 }
+
+func TestCountWorkersUsesSets(t *testing.T) {
+	ctx := context.Background()
+	c := newTestClient(t)
+	// two idle + one busy in pool p; one worker in pool q.
+	must(t, c.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w1", Pool: "p", State: resumeapi.WorkerIdle}))
+	must(t, c.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w2", Pool: "p", State: resumeapi.WorkerIdle}))
+	must(t, c.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w3", Pool: "p", State: resumeapi.WorkerBusy}))
+	must(t, c.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "q1", Pool: "q", State: resumeapi.WorkerIdle}))
+
+	idle, total, err := c.CountWorkers(ctx, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idle != 2 || total != 3 {
+		t.Fatalf("pool p: want idle=2 total=3, got idle=%d total=%d", idle, total)
+	}
+
+	// A claim keeps the worker in the pool (total unchanged), moves it out of idle.
+	if _, err := c.ClaimIdleWorker(ctx, "p", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	idle, total, _ = c.CountWorkers(ctx, "p")
+	if idle != 1 || total != 3 {
+		t.Fatalf("after claim: want idle=1 total=3, got idle=%d total=%d", idle, total)
+	}
+
+	// Remove drops it from the pool entirely.
+	must(t, c.RemoveWorker(ctx, "w3", "p"))
+	_, total, _ = c.CountWorkers(ctx, "p")
+	if total != 2 {
+		t.Fatalf("after remove: want total=2, got %d", total)
+	}
+
+	// PoolWorkers returns only pool p's workers.
+	pw, err := c.PoolWorkers(ctx, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pw) != 2 {
+		t.Fatalf("PoolWorkers(p): want 2, got %d", len(pw))
+	}
+}

@@ -51,6 +51,7 @@ var ErrNoCapacity = errors.New("assign: no idle worker in pool")
 func sessionKey(sid string) string   { return "session:" + sid }
 func workerKey(pod string) string    { return "worker:" + pod }
 func poolIdleKey(pool string) string { return "pool:" + pool + ":idle" }
+func poolAllKey(pool string) string  { return "pool:" + pool + ":all" }
 
 // Secondary indexes (ZSETs) so the sweepers read only sessions that are DUE,
 // turning the O(N)-per-15s scans into O(due) lookups (PRD-control-plane-scalability).
@@ -291,13 +292,15 @@ func (c *Client) GetWorker(ctx context.Context, pod string) (*resumeapi.WorkerEn
 	return &w, nil
 }
 
-// upsertWorkerScript writes worker:<pod> and adds/removes it from the pool idle
-// set atomically based on state, so the idle index never disagrees with the
-// worker record.
+// upsertWorkerScript writes worker:<pod>, keeps the pool idle-set in sync with the
+// worker's state, and records pool membership in the pool "all" set so per-pool
+// counts are O(1) (SCARD) instead of a worker:* scan.
 //
-// KEYS[1]=workerKey KEYS[2]=poolIdleKey  ARGV[1]=valueJSON ARGV[2]=pod ARGV[3]=state
+// KEYS[1]=workerKey KEYS[2]=poolIdleKey KEYS[3]=poolAllKey
+// ARGV[1]=valueJSON ARGV[2]=pod ARGV[3]=state
 var upsertWorkerScript = redis.NewScript(`
 redis.call('SET', KEYS[1], ARGV[1])
+redis.call('SADD', KEYS[3], ARGV[2])
 if ARGV[3] == 'idle' then
   redis.call('SADD', KEYS[2], ARGV[2])
 else
@@ -306,8 +309,8 @@ end
 return 1
 `)
 
-// UpsertWorker writes/updates a worker entry and keeps the pool idle-set in sync.
-// The operator bumps Version on each write.
+// UpsertWorker writes/updates a worker entry and keeps the pool idle-set + all-set
+// in sync. The operator bumps Version on each write.
 func (c *Client) UpsertWorker(ctx context.Context, w *resumeapi.WorkerEntry) error {
 	w.Version++
 	payload, err := json.Marshal(w)
@@ -315,26 +318,36 @@ func (c *Client) UpsertWorker(ctx context.Context, w *resumeapi.WorkerEntry) err
 		return err
 	}
 	return upsertWorkerScript.Run(ctx, c.rdb,
-		[]string{workerKey(w.Pod), poolIdleKey(w.Pool)},
+		[]string{workerKey(w.Pod), poolIdleKey(w.Pool), poolAllKey(w.Pool)},
 		string(payload), w.Pod, w.State).Err()
 }
 
-// removeWorkerScript deletes worker:<pod> and removes it from the idle set.
+// removeWorkerScript deletes worker:<pod> and removes it from both the idle set and
+// the pool all-set.
+// KEYS[1]=workerKey KEYS[2]=poolIdleKey KEYS[3]=poolAllKey  ARGV[1]=pod
 var removeWorkerScript = redis.NewScript(`
 redis.call('DEL', KEYS[1])
 redis.call('SREM', KEYS[2], ARGV[1])
+redis.call('SREM', KEYS[3], ARGV[1])
 return 1
 `)
 
 // RemoveWorker deletes a worker entry (pod deleted/NotReady).
 func (c *Client) RemoveWorker(ctx context.Context, pod, pool string) error {
 	return removeWorkerScript.Run(ctx, c.rdb,
-		[]string{workerKey(pod), poolIdleKey(pool)}, pod).Err()
+		[]string{workerKey(pod), poolIdleKey(pool), poolAllKey(pool)}, pod).Err()
 }
 
 // IdleWorkers returns the pod names currently idle in a pool.
 func (c *Client) IdleWorkers(ctx context.Context, pool string) ([]string, error) {
 	return c.rdb.SMembers(ctx, poolIdleKey(pool)).Result()
+}
+
+// EnsurePoolMember records pod in the pool all-set without rewriting the worker
+// entry — an idempotent SADD used to self-heal membership for workers that predate
+// the all-set index (no version churn).
+func (c *Client) EnsurePoolMember(ctx context.Context, pod, pool string) error {
+	return c.rdb.SAdd(ctx, poolAllKey(pool), pod).Err()
 }
 
 // claimWorkerScript atomically pops an idle worker from the pool idle set, marks
@@ -428,23 +441,23 @@ func (c *Client) ListWorkerPods(ctx context.Context) ([]string, error) {
 // PoolWorkers returns every WorkerEntry belonging to a pool by scanning the
 // worker:* keys. Used to set per-pod scale-in deletion cost (idle vs busy).
 // O(N) but N is small (pool size).
+// PoolWorkers returns every WorkerEntry in a pool by reading the pool's all-set
+// (O(pool size) GETs) instead of scanning the whole worker:* keyspace
+// (PRD-control-plane-scalability §5.5). Stale members (entry gone) are pruned.
 func (c *Client) PoolWorkers(ctx context.Context, pool string) ([]*resumeapi.WorkerEntry, error) {
-	var out []*resumeapi.WorkerEntry
-	var cursor uint64
-	for {
-		keys, cur, err := c.rdb.Scan(ctx, cursor, "worker:*", 100).Result()
-		if err != nil {
-			return nil, err
+	pods, err := c.rdb.SMembers(ctx, poolAllKey(pool)).Result()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*resumeapi.WorkerEntry, 0, len(pods))
+	for _, pod := range pods {
+		w, gerr := c.GetWorker(ctx, pod)
+		if errors.Is(gerr, ErrNotFound) {
+			c.rdb.SRem(ctx, poolAllKey(pool), pod) // stale membership: prune
+			continue
 		}
-		for _, k := range keys {
-			w, gerr := c.GetWorker(ctx, k[len("worker:"):])
-			if gerr == nil && w.Pool == pool {
-				out = append(out, w)
-			}
-		}
-		cursor = cur
-		if cursor == 0 {
-			break
+		if gerr == nil {
+			out = append(out, w)
 		}
 	}
 	return out, nil
@@ -452,30 +465,18 @@ func (c *Client) PoolWorkers(ctx context.Context, pool string) ([]*resumeapi.Wor
 
 // CountWorkers returns (idle, total) worker counts for a pool by scanning the
 // worker:* keys. Used for WarmPool status; O(N) but N is small (pool size).
+// CountWorkers returns (idle, total) for a pool. Both are O(1) SCARDs on the pool's
+// idle-set and all-set — no worker:* scan (PRD-control-plane-scalability §5.5).
 func (c *Client) CountWorkers(ctx context.Context, pool string) (idle, total int, err error) {
-	idleMembers, err := c.IdleWorkers(ctx, pool)
+	i, err := c.rdb.SCard(ctx, poolIdleKey(pool)).Result()
 	if err != nil {
 		return 0, 0, err
 	}
-	idle = len(idleMembers)
-	var cursor uint64
-	for {
-		keys, cur, serr := c.rdb.Scan(ctx, cursor, "worker:*", 100).Result()
-		if serr != nil {
-			return 0, 0, serr
-		}
-		for _, k := range keys {
-			w, gerr := c.GetWorker(ctx, k[len("worker:"):])
-			if gerr == nil && w.Pool == pool {
-				total++
-			}
-		}
-		cursor = cur
-		if cursor == 0 {
-			break
-		}
+	t, err := c.rdb.SCard(ctx, poolAllKey(pool)).Result()
+	if err != nil {
+		return 0, 0, err
 	}
-	return idle, total, nil
+	return int(i), int(t), nil
 }
 
 // fmtAddr is a tiny helper so callers can build host:port without importing net.
