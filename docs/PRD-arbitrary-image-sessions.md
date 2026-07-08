@@ -134,18 +134,33 @@ front door may additionally pre‑check for a better UX.
 
 The interesting product work. Two candidate mechanisms — pick during design:
 
-- **(a) MCP‑native.** Extend the broker with a protocol path that lets an entitled
-  caller declare their image for the session (e.g. a dedicated MCP tool/parameter
-  or a distinct endpoint). The broker, after checking the entitlement, creates the
-  `Session` with `spec.image` (+ `cmd`/`env`/`ports`) targeting the arbitrary‑image
-  pool, then proceeds as normal. Keeps the single OAuth front door.
+- **(a) Broker‑mediated (MCP connect‑time).** The broker learns the caller's image
+  intent **at connect time** and creates the `Session` with `spec.image`
+  (+ `cmd`/`env`/`ports`) targeting the arbitrary‑image pool, then proceeds as
+  normal. Concretely the broker reads the intent from an `initialize` parameter or
+  request header (the same seam it already uses to fire `/_warm` on `initialize`),
+  or exposes a small dedicated broker endpoint the client hits *before* the MCP
+  session. Keeps the single OAuth front door.
+
+  > **Not a hub‑published MCP tool.** A tempting framing is "add a `create_session`
+  > tool to the broker," but that is circular: MCP tools are published by the
+  > sandbox *inside* an already‑running session, so you'd need a session before you
+  > could call the tool that creates one. The image must therefore be declared
+  > **before/at session establishment** — an `initialize` parameter/header the
+  > broker intercepts, or a pre‑session broker endpoint — not a tool exposed on the
+  > in‑session MCP surface. (A hub tool could only ever *re‑image* or spawn a
+  > *second* session from within a first one — a possible future nicety, not the
+  > primary create path.)
+
 - **(b) A thin self‑service API/CLI.** A small authenticated endpoint ("create a
   BYOC session with image X") that creates the Session, separate from the MCP data
-  path. The user then connects their MCP client to the resulting session id.
+  path entirely. The user then connects their MCP client to the resulting session
+  id.
 
-Either way, the caller does **not** touch Kubernetes. The output is a durable
-session id they connect to like any other. Recommendation: start with (a) if the
-primary consumers are MCP clients; (b) if BYOC is more of an ops/CLI workflow.
+Either way, the caller does **not** touch Kubernetes, and neither relies on an
+in‑session MCP tool to bootstrap the session. The output is a durable session id
+they connect to like any other. Recommendation: start with (a) if the primary
+consumers are MCP clients; (b) if BYOC is more of an ops/CLI workflow.
 
 ### 5.5 Control‑plane admission (defense in depth)
 
@@ -231,7 +246,7 @@ records the session's image and replays it on `/restore`.
 | # | Question | Leaning |
 |---|----------|---------|
 | Q1 | Entitlement as a new group (`sandbox-byoc`) or fold into `sandbox-power`? | New group — decouples "run exec tools" from "bring any image." |
-| Q2 | Self‑service path: MCP‑native (a) or separate API/CLI (b)? | (a) MCP‑native if consumers are MCP clients; revisit if ops‑driven. |
+| Q2 | Self‑service path: broker‑mediated at connect time (a) or separate API/CLI (b)? Note: not an in‑session MCP tool (circular — see 5.4). | (a) broker‑mediated (`initialize` param/header or pre‑session endpoint) if consumers are MCP clients; (b) if ops‑driven. |
 | Q3 | Signature verification in MVP or fast‑follow? | Allow‑list in MVP; signatures configurable, on for strict envs. |
 | Q4 | Enforce policy in a validating webhook vs. operator admission code? | Webhook if we want it declarative and reusable; operator code is faster to ship. |
 | Q5 | Require digests (no floating tags)? | Recommended for reproducible restore; make it a policy toggle. |

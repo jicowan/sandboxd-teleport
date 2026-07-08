@@ -38,22 +38,22 @@ already reserved room when it placed each worker (one sandbox per worker).
 ```
                     ┌────────────────────────── namespace: sandboxd-controlplane-system ─────────┐
    broker           │                                                                            │
-   (X-Session-ID,   │   ┌──────────┐   resume    ┌───────────┐        ┌─────────┐               │
-    X-Session-Pool) │   │  router  │────────────►│  operator │◄──────►│ Valkey  │  assignment    │
-   ────────────────►│──►│  (proxy) │  (POST      │(controller)│  KV    │ (KV)    │  table         │
-        HTTP /mcp   │   └────┬─────┘   /resume)  └─────┬─────┘        └─────────┘               │
+   (X-Session-ID,   │   ┌──────────┐   resume    ┌────────────┐        ┌─────────┐               │
+    X-Session-Pool) │   │  router  │────────────►│  operator  │◄──────►│ Valkey  │  assignment   │
+   ────────────────►│──►│  (proxy) │  (POST      │(controller)│  KV    │ (KV)    │  table        │
+        HTTP /mcp   │   └────┬─────┘   /resume)  └─────┬──────┘        └─────────┘               │
                     │        │ proxy to                │ manages Deployments,                    │
                     └────────┼─────────────────────────┼─────────────────────────────────────────┘
-                             │ worker podIP:port        │ writes worker/session KV
-                             ▼                          ▼
+                             │ worker podIP:port       │ writes worker/session KV
+                             ▼                         ▼
                     ┌──────────────────────── namespace: default (pools/sessions/workers) ───────┐
-                    │   sandboxd worker pod (privileged, gVisor node)                             │
+                    │   sandboxd worker pod (privileged, gVisor node)                            │
                     │   ┌──────────────┐   runsc run/checkpoint/restore   ┌────────────────────┐ │
                     │   │  sandboxd    │─────────────────────────────────►│ nested gVisor      │ │
-                    │   │  agent :8090 │                                   │ sandbox (workload) │ │
-                    │   └──────┬───────┘                                   └────────────────────┘ │
-                    │          │ checkpoint / restore                                             │
-                    └──────────┼───────────────────────────────────────────────────────────────┘
+                    │   │  agent :8090 │                                  │ sandbox (workload) │ │
+                    │   └──────┬───────┘                                  └────────────────────┘ │
+                    │          │ checkpoint / restore                                            │
+                    └──────────┼─────────────────────────────────────────────────────────────────┘
                                ▼
                               S3   sandboxes/<sid>/<snap>/{checkpoint.img,pages.img,pages_meta.img,config.json}
 ```

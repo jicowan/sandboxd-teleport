@@ -28,7 +28,7 @@ describes the live reference cluster it says so explicitly.
 
 | Document | Status | What it covers |
 |----------|--------|----------------|
-| [PRD-arbitrary-image-sessions.md](PRD-arbitrary-image-sessions.md) | Proposed | "Bring your own container" — let an authorized user run an arbitrary image as a teleporting sandbox (authz, registry policy, dedicated pool, self‑service path). Implement if demand arises. |
+| [PRD-arbitrary-image-sessions.md](../PRD-arbitrary-image-sessions.md) | Proposed | "Bring your own container" — let an authorized user run an arbitrary image as a teleporting sandbox (authz, registry policy, dedicated pool, self‑service path). Implement if demand arises. |
 
 ## The whole picture in one diagram
 
