@@ -36,10 +36,10 @@ func TestCheckpointerRunsWhenIntervalElapsed(t *testing.T) {
 	ctx := context.Background()
 	kv := testKV(t)
 	now := int64(1_000_000_000_000)
-	// Running session, last checkpointed 100s ago.
+	// Running session, last checkpointed 100s ago; opted into 30s interval.
 	kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{
 		SID: "s1", State: resumeapi.StateRunning, Pool: "p", WorkerPod: "w1", WorkerPodIP: "10.0.0.1",
-		LastCheckpointAt: now - 100_000,
+		LastCheckpointAt: now - 100_000, CheckpointIntervalSeconds: 30,
 	})
 	var got bool
 	srv := stubCheckpointWorker(t, "sandboxes/s1/snap-new", &got)
@@ -67,7 +67,7 @@ func TestCheckpointerSkipsWhenNotElapsedOrDisabled(t *testing.T) {
 	now := int64(1_000_000_000_000)
 	kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{
 		SID: "s1", State: resumeapi.StateRunning, Pool: "p", WorkerPod: "w1", WorkerPodIP: "10.0.0.1",
-		LastCheckpointAt: now - 5_000, // 5s ago
+		LastCheckpointAt: now - 5_000, CheckpointIntervalSeconds: 30, // deadline (now-5s)+30s -> future, not due
 	})
 	var got bool
 	srv := stubCheckpointWorker(t, "x", &got)

@@ -274,6 +274,10 @@ func templateSpecFromCRD(t *corev1alpha1.SandboxTemplate) *resume.TemplateSpec {
 	if t.Spec.IAM != nil {
 		ts.IAMRoleARN = t.Spec.IAM.RoleARN
 	}
+	// Record the resolved idle/checkpoint policy so the KV due-indexes are
+	// maintained without a hot-path lookup (PRD-control-plane-scalability).
+	ts.IdleTimeoutSeconds = t.Spec.Idle.TimeoutSeconds
+	ts.CheckpointIntervalSeconds = t.Spec.CheckpointIntervalSeconds
 	if t.Spec.Health != nil {
 		ts.Health = &sbxapi.Health{
 			RestartPolicy: t.Spec.Health.RestartPolicy,

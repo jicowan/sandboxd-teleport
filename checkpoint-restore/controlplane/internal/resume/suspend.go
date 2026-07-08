@@ -95,27 +95,23 @@ func (s *Suspender) WithMirror(m SessionMirror) *Suspender {
 // SweepOnce scans all sessions and suspends (or resets) those that have been idle
 // past their policy timeout. Returns the number of sessions acted on.
 func (s *Suspender) SweepOnce(ctx context.Context) (int, error) {
-	sessions, err := s.kv.ListSessions(ctx)
+	nowMS := s.now().UnixMilli()
+	// Read only sessions whose suspend deadline has passed (O(due), not O(N)) —
+	// the deadline (lastActiveAt+idleTimeout) is maintained in the suspend:due index
+	// by the router's StampActive and the operator's transition writes.
+	sessions, err := s.kv.SuspendDue(ctx, nowMS)
 	if err != nil {
 		return 0, err
 	}
-	nowMS := s.now().UnixMilli()
 	acted := 0
 	for _, e := range sessions {
 		if e.State != resumeapi.StateRunning || e.WorkerPodIP == "" {
-			continue // only Running sessions can be idle-suspended
+			continue // index may lag a just-changed session; re-check under truth
 		}
+		// The index says it's due; resolve the action (suspend vs reset vs none).
+		// The timeout is already reflected in the index score, so no idle recompute.
 		pol, perr := s.policyFor(ctx, e.SID)
-		if perr != nil || pol.TimeoutSeconds <= 0 || pol.Action == "none" || pol.Action == "" {
-			continue
-		}
-		// lastActiveAt==0 (never stamped) is treated as "active now" to avoid
-		// suspending a session that just started before its first request lands.
-		if e.LastActiveAt == 0 {
-			continue
-		}
-		idleMS := nowMS - e.LastActiveAt
-		if idleMS < int64(pol.TimeoutSeconds)*1000 {
+		if perr != nil || pol.Action == "none" || pol.Action == "" {
 			continue
 		}
 		if err := s.suspendOne(ctx, e, pol.Action); err != nil {

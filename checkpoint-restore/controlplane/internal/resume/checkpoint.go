@@ -64,28 +64,18 @@ func NewCheckpointer(kv *assign.Client, clientFor WorkerClientFactory, policyFor
 // SweepOnce checkpoints Running sessions whose opt-in interval has elapsed since
 // their last (periodic) checkpoint. Returns the number checkpointed.
 func (c *Checkpointer) SweepOnce(ctx context.Context) (int, error) {
-	sessions, err := c.kv.ListSessions(ctx)
+	nowMS := c.now().UnixMilli()
+	// Read only sessions whose next periodic-checkpoint deadline has passed. The
+	// index is empty unless a session opted in (checkpointIntervalSeconds>0), so
+	// this is a no-op when the feature is off — no full-table scan.
+	sessions, err := c.kv.CheckpointDue(ctx, nowMS)
 	if err != nil {
 		return 0, err
 	}
-	nowMS := c.now().UnixMilli()
 	done := 0
 	for _, e := range sessions {
 		if e.State != resumeapi.StateRunning || e.WorkerPodIP == "" {
-			continue // only a live Running session can be checkpointed in place
-		}
-		pol, perr := c.policyFor(ctx, e.SID)
-		if perr != nil || pol.IntervalSeconds <= 0 {
-			continue // not opted in
-		}
-		// Time the interval from the last checkpoint (periodic or suspend); if never
-		// checkpointed, from when it went active so we don't checkpoint immediately.
-		last := e.LastCheckpointAt
-		if last == 0 {
-			last = e.LastActiveAt
-		}
-		if last == 0 || nowMS-last < int64(pol.IntervalSeconds)*1000 {
-			continue
+			continue // index may lag a just-changed session; re-check under truth
 		}
 		if err := c.checkpointOne(ctx, e); err != nil {
 			metrics.CheckpointsTotal.WithLabelValues(metrics.OutcomeError).Inc()

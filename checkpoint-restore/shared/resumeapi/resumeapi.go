@@ -34,6 +34,15 @@ type SessionEntry struct {
 	Ports        []sbxapi.PortMap `json:"ports,omitempty"`
 	Health       *sbxapi.Health   `json:"health,omitempty"`       // replayed on restore (probe config)
 	IAMRoleARN   string           `json:"iamRoleArn,omitempty"`   // session's assumable AWS role; replayed on restore
+	// IdleTimeoutSeconds is the session's resolved idle-suspend timeout (from the
+	// template/session policy), recorded by the operator on resume so the router's
+	// StampActive can compute the suspend deadline (lastActiveAt + timeout) and
+	// maintain the suspend:due index WITHOUT a policy lookup on the hot path. 0 =
+	// never auto-suspend (not indexed).
+	IdleTimeoutSeconds int    `json:"idleTimeoutSeconds,omitempty"`
+	// CheckpointIntervalSeconds is the resolved periodic-checkpoint interval (0 =
+	// off), recorded so the checkpoint index can be maintained without a lookup.
+	CheckpointIntervalSeconds int `json:"checkpointIntervalSeconds,omitempty"`
 	Version          int64 `json:"version"`
 	LastActiveAt     int64 `json:"lastActiveAt,omitempty"`     // unix ms; stamped by router (O3)
 	LastCheckpointAt int64 `json:"lastCheckpointAt,omitempty"` // unix ms; periodic checkpoint (P5)

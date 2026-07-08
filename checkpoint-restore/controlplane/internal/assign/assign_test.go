@@ -105,3 +105,92 @@ func TestWorkerUpsertIdleSet(t *testing.T) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 }
+
+func TestSuspendDueIndex(t *testing.T) {
+	ctx := context.Background()
+	c := newTestClient(t)
+	now := int64(1_000_000_000_000)
+
+	// Running + idle past timeout -> due at (lastActiveAt+timeout) < now.
+	must(t, c.PutSessionCAS(ctx, &resumeapi.SessionEntry{
+		SID: "due", State: resumeapi.StateRunning, LastActiveAt: now - 100_000, IdleTimeoutSeconds: 30,
+	}))
+	// Running but active recently -> deadline in the future, NOT due.
+	must(t, c.PutSessionCAS(ctx, &resumeapi.SessionEntry{
+		SID: "fresh", State: resumeapi.StateRunning, LastActiveAt: now - 5_000, IdleTimeoutSeconds: 30,
+	}))
+	// Running but no timeout -> never indexed.
+	must(t, c.PutSessionCAS(ctx, &resumeapi.SessionEntry{
+		SID: "notimeout", State: resumeapi.StateRunning, LastActiveAt: now - 100_000,
+	}))
+
+	due, err := c.SuspendDue(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 1 || due[0].SID != "due" {
+		t.Fatalf("want only [due], got %v", sids(due))
+	}
+
+	// A non-Running transition removes it from the index.
+	e, _ := c.GetSession(ctx, "due")
+	e.State = resumeapi.StateSuspended
+	must(t, c.PutSessionCAS(ctx, e))
+	due, _ = c.SuspendDue(ctx, now)
+	if len(due) != 0 {
+		t.Fatalf("suspended session must leave the index, got %v", sids(due))
+	}
+}
+
+func TestStampActiveSlidesDeadline(t *testing.T) {
+	ctx := context.Background()
+	c := newTestClient(t)
+	now := int64(1_000_000_000_000)
+	must(t, c.PutSessionCAS(ctx, &resumeapi.SessionEntry{
+		SID: "s", State: resumeapi.StateRunning, LastActiveAt: now - 100_000, IdleTimeoutSeconds: 30,
+	}))
+	// Due now...
+	if due, _ := c.SuspendDue(ctx, now); len(due) != 1 {
+		t.Fatalf("expected due before stamp")
+	}
+	// ...stamp fresh activity -> deadline slides to now+30s, no longer due.
+	must(t, c.StampActive(ctx, "s", now))
+	if due, _ := c.SuspendDue(ctx, now); len(due) != 0 {
+		t.Fatalf("stamp should slide deadline forward; still due: %v", sids(due))
+	}
+}
+
+func TestCheckpointDueIndex(t *testing.T) {
+	ctx := context.Background()
+	c := newTestClient(t)
+	now := int64(1_000_000_000_000)
+	// opted-in + interval elapsed since last checkpoint -> due.
+	must(t, c.PutSessionCAS(ctx, &resumeapi.SessionEntry{
+		SID: "ck", State: resumeapi.StateRunning, LastCheckpointAt: now - 100_000, CheckpointIntervalSeconds: 30,
+	}))
+	// not opted in -> not indexed.
+	must(t, c.PutSessionCAS(ctx, &resumeapi.SessionEntry{
+		SID: "off", State: resumeapi.StateRunning, LastActiveAt: now - 100_000,
+	}))
+	due, err := c.CheckpointDue(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 1 || due[0].SID != "ck" {
+		t.Fatalf("want only [ck], got %v", sids(due))
+	}
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+func sids(es []*resumeapi.SessionEntry) []string {
+	out := make([]string, len(es))
+	for i, e := range es {
+		out[i] = e.SID
+	}
+	return out
+}

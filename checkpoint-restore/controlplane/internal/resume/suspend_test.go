@@ -45,6 +45,7 @@ func TestSweepSuspendsIdleSession(t *testing.T) {
 		SID: "s1", State: resumeapi.StateRunning, Pool: "p",
 		WorkerPod: "w1", WorkerPodIP: "10.0.0.1", Image: "redis:7-alpine",
 		Ports: []sbxapi.PortMap{{Container: 6379, Host: 6379}}, LastActiveAt: now - 100_000,
+		IdleTimeoutSeconds: 30, // deadline = (now-100s)+30s -> due before now
 	})
 	kv.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w1", Pool: "p", PodIP: "10.0.0.1", State: resumeapi.WorkerBusy, SID: "s1"})
 
@@ -77,10 +78,10 @@ func TestSweepSkipsActiveSession(t *testing.T) {
 	ctx := context.Background()
 	kv := testKV(t)
 	now := int64(1_000_000_000_000)
-	// active 5s ago, timeout 30s -> NOT idle
+	// active 5s ago, timeout 30s -> deadline in the future -> NOT due in the index
 	kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{
 		SID: "s1", State: resumeapi.StateRunning, Pool: "p", WorkerPod: "w1", WorkerPodIP: "10.0.0.1",
-		LastActiveAt: now - 5_000,
+		LastActiveAt: now - 5_000, IdleTimeoutSeconds: 30,
 	})
 	var gotSuspend bool
 	srv := stubSuspendWorker(t, "x", &gotSuspend)
@@ -161,13 +162,15 @@ func TestSweepSkipsWhenPolicyNone(t *testing.T) {
 	ctx := context.Background()
 	kv := testKV(t)
 	now := int64(1_000_000_000_000)
+	// Due in the index (idle past timeout), but the policy says "none" -> the
+	// sweeper's action re-check must skip it.
 	kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{
 		SID: "s1", State: resumeapi.StateRunning, Pool: "p", WorkerPod: "w1", WorkerPodIP: "10.0.0.1",
-		LastActiveAt: now - 100_000,
+		LastActiveAt: now - 100_000, IdleTimeoutSeconds: 30,
 	})
 	srv := stubSuspendWorker(t, "x", new(bool))
 	policy := func(context.Context, string) (IdlePolicy, error) {
-		return IdlePolicy{TimeoutSeconds: 0, Action: "none"}, nil
+		return IdlePolicy{TimeoutSeconds: 30, Action: "none"}, nil
 	}
 	s := NewSuspender(kv, clientForStub(srv), policy, SuspendOptions{Now: fixedNow(now)})
 	n, _ := s.SweepOnce(ctx)

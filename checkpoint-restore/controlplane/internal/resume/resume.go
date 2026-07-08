@@ -47,6 +47,11 @@ type TemplateSpec struct {
 	Ports      []sbxapi.PortMap
 	Health     *sbxapi.Health
 	IAMRoleARN string
+	// IdleTimeoutSeconds / CheckpointIntervalSeconds are recorded on the session
+	// entry at resume so the KV due-indexes (suspend/checkpoint) can be maintained
+	// without a policy lookup on the router hot path or the sweep.
+	IdleTimeoutSeconds        int
+	CheckpointIntervalSeconds int
 }
 
 // SessionPlan is what to run for a session: either a template reference (resolved
@@ -256,6 +261,7 @@ func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint string) (
 	img := plan.Image
 	cmd, env, ports, health := plan.Cmd, plan.Env, plan.Ports, plan.Health
 	roleARN := plan.IAMRoleARN
+	idleTimeout, ckptInterval := 0, 0
 	if plan.TemplateName != "" {
 		tmpl, terr := wf.lookup(ctx, plan.TemplateName)
 		if terr != nil {
@@ -277,6 +283,8 @@ func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint string) (
 		if roleARN == "" {
 			roleARN = tmpl.IAMRoleARN // session override else template default
 		}
+		idleTimeout = tmpl.IdleTimeoutSeconds
+		ckptInterval = tmpl.CheckpointIntervalSeconds
 	}
 	if img == "" {
 		return "", metrics.KindColdStart, false, errors.New("no image to run (empty template and no inline image)")
@@ -287,7 +295,10 @@ func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint string) (
 		return "", metrics.KindColdStart, false, err // ErrNoCapacity -> 503 at the handler
 	}
 	wf.notify.PoolChanged(w.Pool) // idle->busy: refresh pool status
-	ip, err := wf.startAndBind(ctx, sid, w, false, img, cmd, env, ports, health, "", roleARN)
+	ip, err := wf.startAndBind(ctx, sid, w, bindSpec{
+		img: img, cmd: cmd, env: env, ports: ports, health: health, roleARN: roleARN,
+		idleTimeoutSeconds: idleTimeout, checkpointIntervalSeconds: ckptInterval,
+	})
 	if err != nil {
 		_ = wf.kv.ReleaseWorker(ctx, w.Pod, w.Pool)
 		wf.notify.PoolChanged(w.Pool) // busy->idle (rolled back)
@@ -308,7 +319,11 @@ func (wf *Workflow) resumeFromSnapshot(ctx context.Context, cur *resumeapi.Sessi
 		return "", err
 	}
 	wf.notify.PoolChanged(w.Pool) // idle->busy: refresh pool status
-	ip, err := wf.startAndBind(ctx, cur.SID, w, true, cur.Image, nil, nil, cur.Ports, cur.Health, cur.SnapshotURI, cur.IAMRoleARN)
+	ip, err := wf.startAndBind(ctx, cur.SID, w, bindSpec{
+		restore: true, img: cur.Image, ports: cur.Ports, health: cur.Health,
+		snapshot: cur.SnapshotURI, roleARN: cur.IAMRoleARN,
+		idleTimeoutSeconds: cur.IdleTimeoutSeconds, checkpointIntervalSeconds: cur.CheckpointIntervalSeconds,
+	})
 	if err != nil {
 		_ = wf.kv.ReleaseWorker(ctx, w.Pod, w.Pool)
 		wf.notify.PoolChanged(w.Pool)
@@ -317,41 +332,56 @@ func (wf *Workflow) resumeFromSnapshot(ctx context.Context, cur *resumeapi.Sessi
 	return ip, nil
 }
 
+// bindSpec is what to bind onto the claimed worker (grouped to keep startAndBind's
+// signature manageable). Cold start fills all fields from the plan/template; resume
+// fills them from the recorded session entry.
+type bindSpec struct {
+	restore                   bool
+	img                       string
+	cmd, env                  []string
+	ports                     []sbxapi.PortMap
+	health                    *sbxapi.Health
+	snapshot, roleARN         string
+	idleTimeoutSeconds        int
+	checkpointIntervalSeconds int
+}
+
 // startAndBind records Resuming, drives sandboxd /run (cold) or /restore (from a
 // snapshot), waits for ready, then records Running. sid is the sandbox id on the
 // worker (one per worker).
-func (wf *Workflow) startAndBind(ctx context.Context, sid string, w *resumeapi.WorkerEntry,
-	restore bool, img string, cmd, env []string, ports []sbxapi.PortMap, health *sbxapi.Health,
-	snapshot, roleARN string) (string, error) {
-
+func (wf *Workflow) startAndBind(ctx context.Context, sid string, w *resumeapi.WorkerEntry, b bindSpec) (string, error) {
 	// Record Resuming (CAS from whatever we last read; create if absent).
 	if err := wf.casSession(ctx, sid, func(e *resumeapi.SessionEntry) {
 		e.State = resumeapi.StateResuming
 		e.Pool = w.Pool
 		e.WorkerPod = w.Pod
 		e.WorkerPodIP = w.PodIP
-		e.Image = img
-		e.Ports = ports
-		if health != nil {
-			e.Health = health // record so restore-on-connect can replay the probe
+		e.Image = b.img
+		e.Ports = b.ports
+		if b.health != nil {
+			e.Health = b.health // record so restore-on-connect can replay the probe
 		}
-		if roleARN != "" {
-			e.IAMRoleARN = roleARN // record so teleport re-establishes cred vending
+		if b.roleARN != "" {
+			e.IAMRoleARN = b.roleARN // record so teleport re-establishes cred vending
 		}
+		// Record the resolved policy so the KV due-indexes (suspend/checkpoint) are
+		// maintained without a policy lookup on the hot path.
+		e.IdleTimeoutSeconds = b.idleTimeoutSeconds
+		e.CheckpointIntervalSeconds = b.checkpointIntervalSeconds
 	}); err != nil {
 		return "", fmt.Errorf("mark resuming: %w", err)
 	}
 
 	cl := wf.clientFor(w.PodIP)
-	if restore {
+	if b.restore {
 		if _, err := cl.Restore(ctx, sbxapi.RestoreRequest{
-			SandboxID: sid, Image: img, Snapshot: snapshot, Ports: ports, Health: health, IAMRoleARN: roleARN,
+			SandboxID: sid, Image: b.img, Snapshot: b.snapshot, Ports: b.ports, Health: b.health, IAMRoleARN: b.roleARN,
 		}); err != nil {
 			return "", fmt.Errorf("worker /restore: %w", err)
 		}
 	} else {
 		if _, err := cl.Run(ctx, sbxapi.RunRequest{
-			SandboxID: sid, Image: img, Cmd: cmd, Env: env, Ports: ports, Health: health, IAMRoleARN: roleARN,
+			SandboxID: sid, Image: b.img, Cmd: b.cmd, Env: b.env, Ports: b.ports, Health: b.health, IAMRoleARN: b.roleARN,
 		}); err != nil {
 			return "", fmt.Errorf("worker /run: %w", err)
 		}

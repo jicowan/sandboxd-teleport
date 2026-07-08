@@ -26,11 +26,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 
 	"github.com/jicowan/aio-sandbox/shared/resumeapi"
 )
+
+// nowMillis is the current unix time in ms as a string arg for Lua scripts.
+func nowMillis() string { return strconv.FormatInt(time.Now().UnixMilli(), 10) }
 
 // ErrVersionConflict is returned when a CAS write loses the version race; the
 // caller should reload and retry.
@@ -46,6 +51,17 @@ var ErrNoCapacity = errors.New("assign: no idle worker in pool")
 func sessionKey(sid string) string   { return "session:" + sid }
 func workerKey(pod string) string    { return "worker:" + pod }
 func poolIdleKey(pool string) string { return "pool:" + pool + ":idle" }
+
+// Secondary indexes (ZSETs) so the sweepers read only sessions that are DUE,
+// turning the O(N)-per-15s scans into O(due) lookups (PRD-control-plane-scalability).
+//   suspendDueKey:    member=sid, score=suspend deadline ms (lastActiveAt + idleTimeout)
+//   checkpointDueKey: member=sid, score=next periodic-checkpoint deadline ms
+// Maintained atomically inside the session write/stamp Lua scripts; a session is
+// removed from both when it leaves Running (suspend/reset/delete).
+const (
+	suspendDueKey    = "idx:suspend:due"
+	checkpointDueKey = "idx:checkpoint:due"
+)
 
 // Client is a thin wrapper over a Valkey/Redis connection with the assignment
 // operations. Safe for concurrent use.
@@ -90,7 +106,12 @@ func (c *Client) GetSession(ctx context.Context, sid string) (*resumeapi.Session
 // the new value with Version incremented and returns the new version. On mismatch
 // it returns -1.
 //
-// KEYS[1]=sessionKey  ARGV[1]=expectVersion  ARGV[2]=newValueJSON(with version placeholder)
+// KEYS[1]=sessionKey KEYS[2]=suspendDueKey KEYS[3]=checkpointDueKey
+// ARGV[1]=expectVersion ARGV[2]=newValueJSON ARGV[3]=nowMillis
+// On success it also maintains the due-indexes: a Running session with a positive
+// idleTimeoutSeconds is scored in suspendDueKey at lastActiveAt+timeout; one with a
+// positive checkpointIntervalSeconds is scored in checkpointDueKey at
+// last(checkpoint|active)+interval. A non-Running session is removed from both.
 var casSessionScript = redis.NewScript(`
 local cur = redis.call('GET', KEYS[1])
 local expect = tonumber(ARGV[1])
@@ -105,6 +126,29 @@ end
 local newobj = cjson.decode(ARGV[2])
 newobj.version = expect + 1
 redis.call('SET', KEYS[1], cjson.encode(newobj))
+local sid = newobj.sid
+local now = tonumber(ARGV[3])
+if newobj.state == 'Running' then
+  local la = tonumber(newobj.lastActiveAt) or 0
+  local ito = tonumber(newobj.idleTimeoutSeconds) or 0
+  if la > 0 and ito > 0 then
+    redis.call('ZADD', KEYS[2], la + ito*1000, sid)
+  else
+    redis.call('ZREM', KEYS[2], sid)
+  end
+  local ci = tonumber(newobj.checkpointIntervalSeconds) or 0
+  if ci > 0 then
+    local base = tonumber(newobj.lastCheckpointAt) or 0
+    if base == 0 then base = la end
+    if base == 0 then base = now end
+    redis.call('ZADD', KEYS[3], base + ci*1000, sid)
+  else
+    redis.call('ZREM', KEYS[3], sid)
+  end
+else
+  redis.call('ZREM', KEYS[2], sid)
+  redis.call('ZREM', KEYS[3], sid)
+end
 return newobj.version
 `)
 
@@ -117,7 +161,8 @@ func (c *Client) PutSessionCAS(ctx context.Context, e *resumeapi.SessionEntry) e
 		return err
 	}
 	res, err := casSessionScript.Run(ctx, c.rdb,
-		[]string{sessionKey(e.SID)}, e.Version, string(payload)).Int64()
+		[]string{sessionKey(e.SID), suspendDueKey, checkpointDueKey},
+		e.Version, string(payload), nowMillis()).Int64()
 	if err != nil {
 		return err
 	}
@@ -128,33 +173,85 @@ func (c *Client) PutSessionCAS(ctx context.Context, e *resumeapi.SessionEntry) e
 	return nil
 }
 
-// DeleteSession removes a session entry (used on reset/GC).
+// DeleteSession removes a session entry and its index membership (reset/GC).
 func (c *Client) DeleteSession(ctx context.Context, sid string) error {
-	return c.rdb.Del(ctx, sessionKey(sid)).Err()
+	if err := c.rdb.Del(ctx, sessionKey(sid)).Err(); err != nil {
+		return err
+	}
+	c.rdb.ZRem(ctx, suspendDueKey, sid)
+	c.rdb.ZRem(ctx, checkpointDueKey, sid)
+	return nil
 }
 
 // stampActiveScript sets only the lastActiveAt field on an existing session entry
 // WITHOUT touching version — activity stamping (O3) is advisory metadata, not a
 // state transition, so it must not contend with the operator's CAS writes. No-op
-// if the session key is absent. KEYS[1]=sessionKey ARGV[1]=unixMillis
+// if the session key is absent. It also slides the session's suspend-due score
+// forward (lastActiveAt+idleTimeout) so the indexed sweeper sees the fresh
+// deadline — O(log N), still hot-path cheap.
+// KEYS[1]=sessionKey KEYS[2]=suspendDueKey  ARGV[1]=unixMillis
 var stampActiveScript = redis.NewScript(`
 local cur = redis.call('GET', KEYS[1])
 if not cur then return 0 end
 local obj = cjson.decode(cur)
-obj.lastActiveAt = tonumber(ARGV[1])
+local now = tonumber(ARGV[1])
+obj.lastActiveAt = now
 redis.call('SET', KEYS[1], cjson.encode(obj))
+local ito = tonumber(obj.idleTimeoutSeconds) or 0
+if obj.state == 'Running' and ito > 0 then
+  redis.call('ZADD', KEYS[2], now + ito*1000, obj.sid)
+end
 return 1
 `)
 
 // StampActive updates a session's lastActiveAt (router-observed request activity,
-// O3). Advisory: does not bump version, so it never conflicts with resume CAS.
+// O3). Advisory: does not bump version, so it never conflicts with resume CAS. It
+// also slides the suspend-due index forward so idle detection stays accurate
+// without a full-table scan.
 func (c *Client) StampActive(ctx context.Context, sid string, unixMillis int64) error {
-	return stampActiveScript.Run(ctx, c.rdb, []string{sessionKey(sid)}, unixMillis).Err()
+	return stampActiveScript.Run(ctx, c.rdb, []string{sessionKey(sid), suspendDueKey}, unixMillis).Err()
+}
+
+// SuspendDue returns the sessions whose suspend deadline is at/before nowMillis —
+// i.e. those idle past their timeout — via the suspend:due index. O(due) instead
+// of O(N): the sweeper reads only sessions that are actually due, not the whole
+// table (PRD-control-plane-scalability §5.3).
+func (c *Client) SuspendDue(ctx context.Context, nowMillis int64) ([]*resumeapi.SessionEntry, error) {
+	return c.dueEntries(ctx, suspendDueKey, nowMillis)
+}
+
+// CheckpointDue returns the sessions whose next periodic-checkpoint deadline is
+// at/before nowMillis, via the checkpoint:due index. Empty when no session opts in.
+func (c *Client) CheckpointDue(ctx context.Context, nowMillis int64) ([]*resumeapi.SessionEntry, error) {
+	return c.dueEntries(ctx, checkpointDueKey, nowMillis)
+}
+
+// dueEntries reads sids scored <= nowMillis from a due-index ZSET and loads their
+// entries. Stale index members (entry gone) are pruned opportunistically.
+func (c *Client) dueEntries(ctx context.Context, zkey string, nowMillis int64) ([]*resumeapi.SessionEntry, error) {
+	sids, err := c.rdb.ZRangeByScore(ctx, zkey, &redis.ZRangeBy{
+		Min: "-inf", Max: strconv.FormatInt(nowMillis, 10),
+	}).Result()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*resumeapi.SessionEntry, 0, len(sids))
+	for _, sid := range sids {
+		e, gerr := c.GetSession(ctx, sid)
+		if errors.Is(gerr, ErrNotFound) {
+			c.rdb.ZRem(ctx, zkey, sid) // stale index member: prune
+			continue
+		}
+		if gerr == nil {
+			out = append(out, e)
+		}
+	}
+	return out, nil
 }
 
 // ListSessions scans and returns all session entries. O(N) over sessions; used by
-// the idle-suspend sweep (session counts are modest). For very large fleets this
-// would move to a secondary index, but that's a later concern.
+// the operator's startup rebuild + GC, NOT the hot sweep path (which uses the
+// due-indexes above).
 func (c *Client) ListSessions(ctx context.Context) ([]*resumeapi.SessionEntry, error) {
 	var out []*resumeapi.SessionEntry
 	var cursor uint64
