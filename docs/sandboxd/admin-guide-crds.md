@@ -164,15 +164,30 @@ Printer columns: `Phase` (`.status.phase`), `Worker` (`.status.workerPodIP`).
 | `idleTimeoutSeconds` | int | No | Overrides the template idle timeout. |
 | `ttlAfterSuspendSeconds` | int | No | How long the S3 checkpoint is retained after suspend before GC. |
 
-### `.status` (mirrors the authoritative KV assignment entry)
+### `.status` (durable mirror of the KV assignment entry)
+
+The operator mirrors this to etcd so the Valkey cache can be rebuilt after a
+restart. **It mirrors only durability‑critical transitions** — `Suspended`
+(idle‑suspend + checkpoint‑on‑terminate) and periodic‑checkpoint advances — not
+`Resuming`/`Running`/`Suspending`. So `kubectl get sess` shows the last *durable*
+state (e.g. `Suspended`), not necessarily live `Running`: a running session that's
+never been suspended may show an empty phase. This is intentional — mirroring
+Running buys no recovery (a wiped Running session falls back to its last snapshot
+anyway) and would only add etcd write pressure. The fields below are a lossless
+mirror so a rebuild needs no template re‑resolution.
 
 | Field | Type | Validation | Meaning |
 |-------|------|-----------|---------|
-| `phase` | string | Enum: `Absent`, `Running`, `Suspending`, `Suspended`, `Resuming` | Current session state (projected from KV). |
+| `phase` | string | Enum: `Absent`, `Running`, `Suspending`, `Suspended`, `Resuming` | Durable session state (last mirrored). |
+| `pool` | string | — | Pool the worker is claimed from (for rebuild). |
+| `workerPod` | string | — | Bound worker pod name (fencing key); empty when suspended. |
 | `workerPodIP` | string | — | Set while Running/Resuming. |
 | `snapshotURI` | string | — | Current checkpoint location (once one exists). |
 | `image` | string | — | Resolved image (recorded for restore identity). |
-| `lastActiveAt` | metav1.Time | — | Last request time stamped by the router. |
+| `ports` | []PortMap | — | Exposed ports (replayed on restore). |
+| `health` | Health | — | Readiness/restart config (replayed on restore). |
+| `iamRoleArn` | string | — | Session's assumable AWS role (replayed on restore). |
+| `lastActiveAt` | metav1.Time | — | Last request time (mirrored coarsely, on transitions — not every request). |
 | `conditions` | []metav1.Condition | — | Standard condition list. |
 
 ```sh

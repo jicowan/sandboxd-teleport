@@ -227,10 +227,11 @@ kubectl get pods -n sandboxd-controlplane-system
 | `--cred-token-secret` | `SANDBOXD_CRED_TOKEN_SECRET` | `""` | Secret name (key `token`) with the fleet HMAC key for per‑session IAM credentials; empty disables the vendor. See Step 6b. |
 | `--max-concurrent-resumes` | `SANDBOXD_MAX_CONCURRENT_RESUMES` | `0` (unlimited) | Backpressure semaphore on concurrent resumes. |
 | `--resume-deadline-seconds` | `SANDBOXD_RESUME_DEADLINE_SECONDS` | `90` | Resume/warm‑up deadline. Must exceed your image's cold start. |
+| `--sweep-interval-seconds` | `SANDBOXD_SWEEP_INTERVAL_SECONDS` | `30` | Idle‑suspend / periodic‑checkpoint sweep period. Sweeps are O(due) (indexed), so this is a granularity knob, not a scan‑cost one; the checkpoint sweep runs a half‑interval offset to avoid lockstep. |
 | `--enable-checkpoint-gc` | `SANDBOXD_ENABLE_GC` (`=1`) | `false` | Enable snapshot GC (requires `--worker-bucket`). |
 | `--checkpoint-gc-interval-seconds` | `SANDBOXD_GC_INTERVAL_SECONDS` | `300` | GC period. |
 | `--leader-elect` | — | `false` | Leader election (enable for HA). |
-| `--metrics-bind-address` | — | `0` (off) | Prometheus metrics addr. |
+| `--metrics-bind-address` | — | `0` (off) | Prometheus metrics addr. Enable to export `sandboxd_*` metrics (resumes, suspends, pool workers, sweep duration/due). |
 
 ### Router flags reference
 

@@ -101,7 +101,10 @@ Responsibilities:
   already exists it is preferred over restoring.
 - **Idle suspend + checkpoints.** A sweeper suspends idle sessions (checkpoint →
   S3, free the worker). Optional periodic background checkpoints (per‑template
-  `checkpointIntervalSeconds`) bound crash loss.
+  `checkpointIntervalSeconds`) bound crash loss. Both sweeps are **O(due), not
+  O(N)**: they read Redis ZSET due‑indexes (`idx:suspend:due`, `idx:checkpoint:due`)
+  scored by each session's deadline, so a pass touches only sessions actually due,
+  not the whole table (`--sweep-interval-seconds`, default 30s, staggered).
 - **GC.** Optional TTL/orphan snapshot reaper, running under a *separate,
   least‑privilege* S3 identity (list + delete on `sandboxes/*` only).
 - **Lazy Session creation.** On a resume for an unknown session id, the operator
@@ -121,9 +124,11 @@ or orphan S3 checkpoints. Keys:
 
 | Key | Value | Writer |
 |-----|-------|--------|
-| `session:<sid>` | JSON `SessionEntry` (state, pool, workerPod, workerPodIP, snapshotURI, ports, health, version, lastActiveAt) | operator (CAS); router does advisory `StampActive` |
+| `session:<sid>` | JSON `SessionEntry` (state, pool, workerPod, workerPodIP, snapshotURI, ports, health, version, lastActiveAt, idleTimeoutSeconds, checkpointIntervalSeconds) | operator (CAS); router does advisory `StampActive` |
 | `worker:<pod>` | JSON `WorkerEntry` (pod, pool, podIP, state idle/busy, sid, version) | operator only |
-| `pool:<pool>:idle` | Redis SET of idle worker pod names | operator only |
+| `pool:<pool>:idle` | Redis SET of idle worker pod names (idle count = `SCARD`) | operator only |
+| `pool:<pool>:all` | Redis SET of all worker pod names in the pool (total count = `SCARD`, no scan) | operator only |
+| `idx:suspend:due` / `idx:checkpoint:due` | Redis ZSETs, member=sid, score=deadline ms — the sweep due‑indexes (O(due) reads) | operator + router (`StampActive` slides the suspend deadline) |
 
 Keys are namespace‑agnostic today (bare pod/pool/session names) — the control
 plane assumes a single worker namespace (see "Boundaries" below).
@@ -304,6 +309,25 @@ it self‑corrects on the next transition). See
     then teleport‑resumes on its next request with no lost state. Best‑effort: if the
     checkpoint can't finish within the grace window (huge session, SIGKILL, node
     loss) it degrades to resuming from the last snapshot — never a wedge.
+
+### Scale characteristics
+
+Designed so per‑session/churn cost doesn't grow with fleet size:
+- **Router** is O(1) per request (two KV reads + one activity stamp) and stateless —
+  scale replicas freely.
+- **Sweeps are O(due), not O(N)** — idle‑suspend and periodic‑checkpoint read Redis
+  ZSET due‑indexes, touching only sessions actually due.
+- **Per‑pool counts are O(1)** — idle/total are `SCARD`s on the pool's idle/all sets,
+  no `worker:*` scan.
+- **Resume does zero etcd writes** — the durability mirror fires only on
+  durability‑critical transitions (Suspended + checkpoint advances), not the hot path.
+- **The single leader operator** serializes KV writes; horizontal sharding
+  (per‑namespace operators) is the escape hatch if that ceiling is ever reached.
+
+Watch `sandboxd_sweep_duration_seconds` / `sandboxd_sweep_due` (enable
+`--metrics-bind-address`): rising duration or due≈total signals the indexing is no
+longer keeping up. Full analysis + remaining options:
+[PRD-control-plane-scalability.md](../PRD-control-plane-scalability.md).
 
 ## Trust boundaries and what's next
 
