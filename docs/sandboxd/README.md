@@ -33,6 +33,7 @@ describes the live reference cluster it says so explicitly.
 | [PRD-checkpoint-on-terminate.md](../PRD-checkpoint-on-terminate.md) | **Implemented** | Checkpoint a running session to S3 when its worker pod terminates (scale‑in, drain, rollout, eviction) so it teleport‑resumes losslessly. Companion to graceful scale‑in. |
 | [PRD-sandbox-iam-credentials.md](../PRD-sandbox-iam-credentials.md) | **Implemented** | Let a sandboxed workload assume an AWS IAM role via a container‑credentials endpoint — per‑session, auto‑refreshed, teleport‑safe, never the worker's identity. |
 | [PRD-delegated-agent-access.md](../PRD-delegated-agent-access.md) | Proposed | Propagate the caller's identity past the broker into the sandbox so an agent/MCP server acts **on behalf of the user** against app APIs / other MCP servers (RFC 8693 token exchange, per‑request; app‑layer, not AWS). Phase 2: offline delegation. |
+| [PRD-durable-assignment-state.md](../PRD-durable-assignment-state.md) | Proposed | Make Kubernetes (`Session.status` in etcd) the durable source of truth and Valkey a rebuildable cache, so a Valkey restart doesn't orphan S3 checkpoints / lose the session index. |
 
 ## The whole picture in one diagram
 
