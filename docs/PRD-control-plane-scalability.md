@@ -192,3 +192,43 @@ status freshness.
 | Q3 | Suspend index: ZSET in Valkey, or derive from the (future) durable store? | ZSET in Valkey — it's the hot path; keep it where the sweeper already reads. |
 | Q4 | Target scale to design for (N sessions, churn/s, pools)? | Set from §6 once we can measure; don't guess a number into the design. |
 | Q5 | EndpointSlice discovery now or later? | Later — larger change; the scans aren't the first limit (etcd + O(N) sweeps are). |
+
+## 10. Status & follow-ups (2026-07-08)
+
+**Done + live** (operator v21 / router v8): §5.1 (checkpoint sweep no-ops when the
+feature is off), §5.2 (`--sweep-interval-seconds`, staggered), §5.3 (O(due) ZSET
+due-indexes for suspend + checkpoint), §5.4 (etcd mirror only on durability-critical
+transitions → resume does zero etcd writes), §5.5 (O(1) per-pool counts via
+`pool:<pool>:all` SCARD; `PoolWorkers` reads the set), and §6 sweep metrics
+(`sandboxd_sweep_duration_seconds`, `sandboxd_sweep_due`). The three hot-path costs
+(O(N) sweeps, etcd write amplification, per-pool scan) are eliminated.
+
+**Follow-ups (deferred; do only when metrics/scale warrant):**
+
+1. **Scale/load test to set the real targets (§4 Q4).** We designed for
+   proportionality, not a number. Run a synthetic busy-cluster load (many sessions,
+   high churn, many pools) and record: sweep duration + due-vs-total, Valkey op
+   rate, and **etcd/apiserver write QPS attributable to the mirror** (confirm §5.4's
+   reduction under real churn). Everything below gates on these.
+2. **Add the remaining §6 metrics:** Valkey op rate and etcd/apiserver write QPS for
+   the mirror. Sweep metrics exist; these two don't yet.
+3. **Enable the operator metrics endpoint in the reference deploy** —
+   `--metrics-bind-address` is off by default, so the new `sandboxd_*` metrics aren't
+   scraped today. Wire it (+ a ServiceMonitor/scrape) so the signals are actually
+   visible.
+4. **`ListWorkerPods` prune scan (§2.2 residual).** The 30s prune loop still scans
+   all `worker:*`. Off the hot path and low-freq, so left as-is; if worker count
+   grows large, drive prune from the per-pool `all`-sets (union across pools) or an
+   EndpointSlice watch instead of a keyspace scan.
+5. **EndpointSlice-based worker discovery (§5.5 full version).** The scan cost is
+   already gone via the pool sets; this only matters if the worker *informer* itself
+   (cluster-wide pod watch, label-filtered) becomes a limit. Larger change; deferred.
+6. **Horizontal sharding (§5.6).** Single leader operator serializes KV writes. If
+   that ceiling is hit, shard sessions across per-namespace operators — this is the
+   tabled multi-namespace work; the escape hatch, not yet needed.
+7. **Migration cleanup:** the `pool:<pool>:all` sets self-heal via the discovery
+   reconciler, but pre-existing pre-v20 sessions that never transition/get traffic
+   won't be in `idx:suspend:due` until they do. Benign in the test env; note it if
+   ever running a long-lived fleet across the upgrade boundary.
+
+See [[sandboxd-pending-work]] (memory) for the live cross-session tracker.
