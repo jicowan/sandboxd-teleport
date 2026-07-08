@@ -1,9 +1,39 @@
 # PRD — per‑session IAM credentials for sandboxes
 
-Status: **Proposed** (not scheduled). Decision‑ready spec; grounded in the shipped
-code on the `checkpoint-restore` branch. Related:
-[architecture-sandboxd.md](sandboxd/architecture-sandboxd.md),
+Status: **Implemented + verified live** (2026‑07‑08, operator `v16`, worker `v51`).
+Related: [architecture-sandboxd.md](sandboxd/architecture-sandboxd.md),
 [PRD-arbitrary-image-sessions.md](PRD-arbitrary-image-sessions.md) (same authz class).
+
+> **As built (differences from the design, all found via live testing):**
+> - **Vendor address = `169.254.170.2`, not the interior gateway `169.254.17.1`.**
+>   AWS SDKs allow‑list which host `AWS_CONTAINER_CREDENTIALS_FULL_URI` may point at
+>   (only loopback / `169.254.170.2` / `169.254.170.23`); a link‑local like
+>   `169.254.17.1` is rejected by botocore. We use **`169.254.170.2`** (the ECS
+>   task‑role address) — **not** `169.254.170.23`, because that's the EKS Pod
+>   Identity agent address the *worker's own* SDK uses to load its identity;
+>   pinning `.23` locally hijacked the worker's credential source (observed:
+>   `AssumeRole` → `dial 169.254.170.23:80: connection refused`).
+> - **Reachability:** `169.254.170.2/32` is added to the **host veth `sbx0`** in
+>   `setupSandboxNet` (and pinned on `lo` at boot as a bind anchor), so a packet the
+>   sandbox sends to it via its default gateway is delivered on‑link — cross‑
+>   interface delivery to a `lo`‑only address failed (read timeout).
+> - **Vendor's own identity:** with EKS Pod Identity the worker pod has ONE
+>   identity (the checkpoint SA), so the vendor's `sts:AssumeRole` runs as that
+>   identity — **the worker checkpoint role carries the `sts:AssumeRole`
+>   permission** on the session role (a separate "vendor" Pod Identity isn't
+>   achievable — one association per SA). The target role's trust policy names the
+>   worker role as principal; scoped by `sts` session tag `sandbox-session=<sid>`.
+> - **Token:** `AWS_CONTAINER_AUTHORIZATION_TOKEN` (plain env), value =
+>   `HMAC(fleet-key, sid)`; fleet key injected from Secret `sandboxd-cred-token`
+>   via operator flag `--cred-token-secret`. Enabled per pool by
+>   `SandboxTemplate.spec.iam.roleArn`.
+> - **Verified live:** boto3 in the sandbox → `assumed-role/sandbox-session-demo/<sid>`
+>   (session role, not the worker/node identity); role permission usable (listed
+>   S3 buckets); node IMDS blocked (401); **survived teleport** to a different
+>   worker (identity re-established automatically).
+> - **Rename NOT yet done:** the `ckpt-spike` → `sandboxd-worker` rename (§5.4a)
+>   remains outstanding; the checkpoint SA is still `ckpt-spike` / role
+>   `aio-checkpoint-spike-role` live.
 
 ## 1. Summary
 

@@ -13,6 +13,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"runtime"
@@ -35,14 +36,25 @@ const (
 	actorVethGateway  = "169.254.17.1"
 	interiorIP        = "169.254.17.2"     // the sandbox's stable interior IP
 	nftTableName      = "sbx_net"
+	// credVendorIP is where the per-session AWS credential vendor listens. It MUST
+	// be an address the AWS SDK's container-credentials provider allow-lists for a
+	// FULL_URI (only loopback or 169.254.170.2 / 169.254.170.23), and the sandbox's
+	// loopback is its own (not the worker's). We use 169.254.170.2 (the ECS
+	// task-role address) — NOT 169.254.170.23, which is the EKS Pod Identity agent
+	// address the WORKER's own SDK uses to load its identity; pinning .23 locally
+	// would hijack the worker's own credential source. .2 is otherwise unused here.
+	// It's added to the host veth (sbx0) so the sandbox reaches it on-link via its
+	// default gateway. The vendor binds it (pinned on lo at boot as a bind anchor).
+	credVendorIP = "169.254.170.2"
 )
 
 // interiorNetNSPath is where the named netns is bind-mounted; runsc joins it via
 // the OCI spec network-namespace path.
 const interiorNetNSPath = "/run/netns/" + interiorNetNSName
 
-// ensureInteriorNetNS creates the persistent interior netns if absent and enables
-// IPv4 forwarding in the pod netns. Idempotent.
+// ensureInteriorNetNS creates the persistent interior netns if absent, enables
+// IPv4 forwarding, and pins the interior gateway address on `lo` in the pod netns.
+// Idempotent.
 func ensureInteriorNetNS() error {
 	if _, err := os.Stat(interiorNetNSPath); err == nil {
 		enableIPForward()
@@ -62,6 +74,41 @@ func ensureInteriorNetNS() error {
 	h.Close()
 	enableIPForward()
 	return nil
+}
+
+// ensureCredVendorAddr pins the credential-vendor IP (credVendorIP =
+// 169.254.170.23, the AWS-allow-listed container-creds address) as a /32 on `lo`
+// in the POD netns, so the vendor can bind it at worker boot — independent of the
+// per-session veth. The sandbox reaches it via its default route (-> host veth ->
+// forwarded to this local lo address; ip_forward is enabled). This /32 survives
+// session teardown. Idempotent (AddrReplace). Best-effort: a failure only
+// disables the credential vendor, not the worker.
+//
+// MUST be called from the POD netns (not from within ensureInteriorNetNS, which
+// switches the thread into the interior netns). It locks the OS thread so the
+// goroutine can't migrate to a thread in a different netns mid-call.
+func ensureCredVendorAddr() {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	lo, err := netlink.LinkByName("lo")
+	if err != nil {
+		log.Printf("WARN: cred vendor addr: lookup lo: %v", err)
+		return
+	}
+	addr, err := netlink.ParseAddr(credVendorIP + "/32")
+	if err != nil {
+		log.Printf("WARN: cred vendor addr: parse addr: %v", err)
+		return
+	}
+	if err := netlink.AddrReplace(lo, addr); err != nil {
+		log.Printf("WARN: cred vendor addr: add %s to lo: %v", credVendorIP, err)
+		return
+	}
+	if err := netlink.LinkSetUp(lo); err != nil {
+		log.Printf("WARN: cred vendor addr: set lo up: %v", err)
+		return
+	}
+	log.Printf("cred vendor addr: %s pinned on lo", credVendorIP)
 }
 
 func enableIPForward() {
@@ -97,6 +144,15 @@ func setupSandboxNet(podIP string, ports []portMap) error {
 	hostAddr, _ := netlink.ParseAddr(hostVethCIDR)
 	if err := netlink.AddrReplace(hostLink, hostAddr); err != nil {
 		return fmt.Errorf("host veth addr: %w", err)
+	}
+	// Also put the credential-vendor IP on the host veth so a packet the sandbox
+	// sends to credVendorIP (via its default gateway) is delivered locally on the
+	// arrival interface — cross-interface delivery to a lo-only address fails.
+	// The vendor listens on credVendorIP; this makes it reachable from the sandbox.
+	if credAddr, perr := netlink.ParseAddr(credVendorIP + "/32"); perr == nil {
+		if err := netlink.AddrReplace(hostLink, credAddr); err != nil {
+			log.Printf("WARN: add cred vendor IP to host veth: %v", err)
+		}
 	}
 	if err := netlink.LinkSetUp(hostLink); err != nil {
 		return fmt.Errorf("host veth up: %w", err)

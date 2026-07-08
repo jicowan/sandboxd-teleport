@@ -171,6 +171,38 @@ latency, which is why base images are kept node‑local and pools are pre‑warm
   DNS‑visible. Routing to a sandbox is entirely via the assignment table
   (`sid → workerPod, workerPodIP`), not DNS.
 
+## Per‑session AWS IAM credentials (optional)
+
+A sandbox can assume an AWS IAM role scoped to its session, using the standard AWS
+SDK container‑credentials provider — no workload code change. Off unless a pool's
+template sets `iam.roleArn`.
+
+- **How:** the worker runs a small **credential vendor** HTTP server on
+  `169.254.170.2:8091`. This address is chosen because AWS SDKs only allow
+  `AWS_CONTAINER_CREDENTIALS_FULL_URI` to point at loopback / `169.254.170.2` /
+  `169.254.170.23`; `.2` (the ECS task‑role address) is used because `.23` is the
+  EKS Pod Identity agent address the *worker's own* SDK needs. The vendor address
+  is added to the host veth so the sandbox reaches it on‑link via its default
+  gateway. On `/run` the operator passes the session's role ARN; the worker
+  registers it, injects `AWS_CONTAINER_CREDENTIALS_FULL_URI` +
+  `AWS_CONTAINER_AUTHORIZATION_TOKEN` into the sandbox, and on request calls
+  `sts:AssumeRole` (tagged `sandbox-session=<sid>`), caching + refreshing before
+  expiry.
+- **Identity boundary:** the sandbox gets *only* its session role — never the
+  worker's checkpoint identity, never the node role (IMDS is unreachable from the
+  sandbox netns). The vendor's own `AssumeRole` runs as the worker's Pod Identity,
+  which must be granted `sts:AssumeRole` on the allow‑listed session roles; the
+  target role's trust policy names the worker role and can require the session tag.
+- **Auth:** the per‑session token is `HMAC(fleet‑key, sid)` — deterministic, so the
+  same value is computed on any worker. That's what makes it **teleport‑safe**:
+  after a session restores on a different worker, the vendor re‑registers the role
+  and the injected env (baked into the checkpoint) still matches, so AWS access
+  resumes with no client involvement. Credentials themselves are never
+  checkpointed — only the *ability to fetch* teleports.
+- Enabled by the operator flag `--cred-token-secret` (fleet HMAC key from a Secret)
+  + per‑pool `SandboxTemplate.spec.iam.roleArn` (a `Session.spec.iam.roleArn`
+  overrides it). See [PRD-sandbox-iam-credentials.md](../PRD-sandbox-iam-credentials.md).
+
 ## Session lifecycle (state machine)
 
 ```

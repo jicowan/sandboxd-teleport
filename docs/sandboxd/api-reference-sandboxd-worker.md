@@ -86,9 +86,15 @@ gVisor sandbox.
   "env": ["KEY=VALUE"],                              // optional; appended to image env
   "sandboxId": "sess-…",                             // optional; generated if empty
   "ports": [{ "container": 8080, "host": 8080 }],    // optional
-  "health": { "probe": "http", "probePort": 8080, "probePath": "/v1/health" }
+  "health": { "probe": "http", "probePort": 8080, "probePath": "/v1/health" },
+  "iamRoleArn": "arn:aws:iam::…:role/…"              // optional; vend per-session AWS creds for this role
 }
 ```
+
+`iamRoleArn` (optional): when set and the credential vendor is enabled
+(`SANDBOXD_CRED_TOKEN_KEY`), the worker registers the role and injects
+`AWS_CONTAINER_CREDENTIALS_FULL_URI` + `AWS_CONTAINER_AUTHORIZATION_TOKEN` into the
+sandbox so its AWS SDK gets per-session temporary credentials for the role.
 
 **Response `200`**
 
@@ -151,9 +157,14 @@ and restores in one step — there is no separate `create`.
   "snapshot": "sandboxes/sess-…/snap-…", // required (S3 prefix)
   "runscVersion": "release-20260622.0",  // optional; 409 on mismatch
   "ports": [{ "container": 8080, "host": 8080 }],
-  "health": { "probe": "http", "probePort": 8080, "probePath": "/v1/health" }
+  "health": { "probe": "http", "probePort": 8080, "probePath": "/v1/health" },
+  "iamRoleArn": "arn:aws:iam::…:role/…"  // optional; re-establish per-session AWS creds after teleport
 }
 ```
+
+`iamRoleArn` re-registers the session's role with the new worker's credential
+vendor on teleport (the AWS env already travels baked into the checkpoint; the
+per-session token is deterministic so it keeps matching).
 
 **Response `200`**
 
@@ -337,6 +348,8 @@ usually by the operator from the `SandboxTemplate`/global flags):
 | `SANDBOXD_SUPERVISE_INTERVAL` | `10s` | Supervisor loop period (readiness/restart/idle). |
 | `SANDBOXD_GC_INTERVAL` | `5m` | Background on‑disk artifact GC period. |
 | `SANDBOXD_DRAIN_DEADLINE` | `100s` | On SIGTERM, how long the worker keeps serving (drain‑waits) so the operator can checkpoint‑on‑terminate before exit. Keep it under the pod's `terminationGracePeriodSeconds` (120s). |
+| `SANDBOXD_CRED_TOKEN_KEY` | `""` | Fleet‑wide HMAC key for the per‑session AWS credential vendor. Set (non‑empty) enables the vendor; the sandbox's `AWS_CONTAINER_AUTHORIZATION_TOKEN` = `HMAC(this, sid)`. Injected by the operator from the `--cred-token-secret` Secret. Empty = vendor disabled. |
+| `SANDBOXD_CRED_PORT` | `8091` | Port the credential vendor listens on (bound to `169.254.170.2`, reachable only from the worker's sandbox netns). |
 | `AWS_REGION` | (SDK default) | Region for S3 (via the AWS default credential/config chain → EKS Pod Identity). |
 
 S3 credentials come from the AWS default chain (EKS Pod Identity via the worker's

@@ -34,6 +34,7 @@ Has a `status` subresource; no printer columns.
 | `checkpointIntervalSeconds` | int | No | `0` (disabled); min 0 | Periodic background checkpoints while Running (checkpoint to S3, leave running) every N seconds, bounding crash loss to ~N seconds. Opt‑in (adds S3 churn + brief pauses). |
 | `workerImage` | string | No | empty ⇒ operator global default | Overrides the sandboxd **worker** image for this pool (NOT the workload image). The worker image carries the pinned `runsc` that checkpoint/restore depends on, so it's normally one global value (operator `--worker-image`); override only to canary a new worker build on one pool. Sessions can't teleport across workers with incompatible `runsc`. |
 | `streamConsole` | bool | No | `false` | Surfaces the nested workload's stdout/stderr to the worker's stdout (→ `kubectl logs`) by setting `SANDBOXD_STREAM_CONSOLE=1` on this pool's workers. The console is attacker‑controlled and multi‑tenant over a worker's lifetime, so it's opt‑in per pool. The session‑scoped `/logs` API stays the production path. |
+| `iam` | IAMSpec | No | — | Lets sandboxes in this pool assume an AWS IAM role (`iam.roleArn`); the worker vends per‑session temporary credentials. Off unless set. A `Session` may override per session. Requires the operator's `--cred-token-secret`. |
 | `resources` | corev1.ResourceRequirements | No | — | Worker sizing hint → the worker pod's resource requests/limits. |
 | `scheduling` | SchedulingSpec | No | — | Worker‑pod placement (nodeSelector/tolerations/affinity/spread). Applied verbatim; the operator injects no defaults. |
 
@@ -153,6 +154,7 @@ Printer columns: `Phase` (`.status.phase`), `Worker` (`.status.workerPodIP`).
 | `env` | []string | No | Env (arbitrary‑image mode). |
 | `ports` | []PortMap | No | Ports (arbitrary‑image mode). |
 | `subject` | string | No | Opaque identity the router matches the JWT‑derived subject against. |
+| `iam` | IAMSpec | No | Assume an AWS IAM role for this session's sandbox (`iam.roleArn`), overriding the pool template's `iam`. |
 | `lifecycle` | SessionLifecycle | No | Overrides template idle/TTL for this session. |
 
 #### SessionLifecycle
@@ -214,6 +216,12 @@ operator can hand them straight to `/run` and `/restore`.
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
 | `name` | string | **Yes** | Name of the referenced object. |
+
+### IAMSpec — AWS IAM role the sandbox may assume
+
+| Field | Type | Required | Meaning |
+|-------|------|----------|---------|
+| `roleArn` | string | No | ARN of the IAM role the sandbox assumes (per‑session temporary credentials vended by the worker). Authorization for which sessions may use which role is a front‑door / control‑plane decision. Requires the operator's `--cred-token-secret` and the worker's role to be permitted to `sts:AssumeRole` it. |
 
 ### SchedulingSpec — worker‑pod placement (pass‑through)
 

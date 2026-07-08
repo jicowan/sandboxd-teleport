@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -166,6 +167,7 @@ func (v *credVendor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	cs, err := v.credsFor(r.Context(), sid)
 	if err != nil {
+		log.Printf("cred vendor: assume failed for %s: %v", sid, err)
 		http.Error(w, "credentials unavailable: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -179,11 +181,12 @@ func (v *credVendor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // awsEnvForSession returns the env vars to inject into the sandbox so its AWS SDK
-// fetches from the vendor. gateway is the interior gateway IP the sandbox routes
-// to (actorVethGateway); port is where the vendor listens.
-func (v *credVendor) awsEnvForSession(sid, gateway string, port int, region string) []string {
+// fetches from the vendor. host is the vendor address the sandbox routes to
+// (credVendorIP = 169.254.170.23, an AWS-allow-listed container-creds host);
+// port is where the vendor listens.
+func (v *credVendor) awsEnvForSession(sid, host string, port int, region string) []string {
 	env := []string{
-		fmt.Sprintf("AWS_CONTAINER_CREDENTIALS_FULL_URI=http://%s:%d/creds/%s", gateway, port, sid),
+		fmt.Sprintf("AWS_CONTAINER_CREDENTIALS_FULL_URI=http://%s:%d/creds/%s", host, port, sid),
 		"AWS_CONTAINER_AUTHORIZATION_TOKEN=" + v.sessionToken(sid),
 	}
 	if region != "" {

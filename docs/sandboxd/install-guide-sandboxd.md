@@ -220,6 +220,7 @@ kubectl get pods -n sandboxd-controlplane-system
 | `--worker-bucket` | `SANDBOXD_BUCKET` | `""` | S3 checkpoint bucket. |
 | `--worker-region` | `AWS_REGION` | `""` | Region for worker S3. |
 | `--worker-image` | `SANDBOXD_WORKER_IMAGE` | built‑in | Global worker image (per‑pool override via `SandboxTemplate.workerImage`). |
+| `--cred-token-secret` | `SANDBOXD_CRED_TOKEN_SECRET` | `""` | Secret name (key `token`) with the fleet HMAC key for per‑session IAM credentials; empty disables the vendor. See Step 6b. |
 | `--max-concurrent-resumes` | `SANDBOXD_MAX_CONCURRENT_RESUMES` | `0` (unlimited) | Backpressure semaphore on concurrent resumes. |
 | `--resume-deadline-seconds` | `SANDBOXD_RESUME_DEADLINE_SECONDS` | `90` | Resume/warm‑up deadline. Must exceed your image's cold start. |
 | `--enable-checkpoint-gc` | `SANDBOXD_ENABLE_GC` (`=1`) | `false` | Enable snapshot GC (requires `--worker-bucket`). |
@@ -281,6 +282,67 @@ combination never coexists.
    `--worker-bucket`), optionally tune `--checkpoint-gc-interval-seconds`.
 
 GC is **off by default**.
+
+## Step 6b — (Optional) Per‑session IAM credentials for sandboxes
+
+Let sandboxes assume an AWS IAM role scoped to their session (standard AWS SDK,
+no workload code change), teleport‑safe and never the worker's own identity. Off
+unless configured. See [PRD-sandbox-iam-credentials.md](../PRD-sandbox-iam-credentials.md).
+
+1. **Fleet HMAC key Secret** (worker namespace) — the per‑session auth token is
+   `HMAC(key, sid)`:
+
+   ```sh
+   kubectl create secret generic sandboxd-cred-token -n default \
+     --from-literal=token="$(openssl rand -hex 24)"
+   ```
+
+2. **Enable the vendor on the operator** — add `--cred-token-secret=sandboxd-cred-token`
+   to the operator args (injects `SANDBOXD_CRED_TOKEN_KEY` into workers from the
+   Secret). Roll the operator.
+
+3. **Grant the worker's identity `sts:AssumeRole`** on the target session role(s).
+   With EKS Pod Identity the worker pod has one identity (the checkpoint role,
+   currently `aio-checkpoint-spike-role`); the vendor's AssumeRole runs as it:
+
+   ```sh
+   aws iam put-role-policy --role-name aio-checkpoint-spike-role \
+     --policy-name assume-session-roles --policy-document '{"Version":"2012-10-17",
+       "Statement":[{"Effect":"Allow","Action":["sts:AssumeRole","sts:TagSession"],
+       "Resource":"arn:aws:iam::<acct>:role/<session-role>"}]}'
+   ```
+
+4. **Create the session role** with a trust policy naming the worker role as
+   principal (and, recommended, requiring the `sandbox-session` tag):
+
+   ```sh
+   aws iam create-role --role-name <session-role> --assume-role-policy-document '{
+     "Version":"2012-10-17","Statement":[{"Effect":"Allow",
+       "Principal":{"AWS":"arn:aws:iam::<acct>:role/aio-checkpoint-spike-role"},
+       "Action":["sts:AssumeRole","sts:TagSession"]}]}'
+   # attach whatever permissions the sandbox workload needs
+   ```
+
+5. **Enable it on a pool** — set `iam.roleArn` on the `SandboxTemplate` (or per
+   `Session`):
+
+   ```sh
+   kubectl patch sandboxtemplate <tmpl> -n default --type=merge \
+     -p '{"spec":{"iam":{"roleArn":"arn:aws:iam::<acct>:role/<session-role>"}}}'
+   kubectl annotate warmpool <pool> -n default sandboxd.io/nudge="$(date +%s)" --overwrite
+   ```
+
+Verify from inside a session (the workload's SDK reports the **session role**, not
+the worker/node identity):
+
+```
+python3 -c 'import boto3; print(boto3.client("sts").get_caller_identity()["Arn"])'
+# arn:aws:sts::<acct>:assumed-role/<session-role>/<sid>
+```
+
+> The vendor listens on `169.254.170.2:8091`, reachable only from the worker's
+> sandbox netns. Do not use `169.254.170.23` — that's the EKS Pod Identity agent
+> address the worker's own SDK needs.
 
 ## Step 7 — Smoke test
 

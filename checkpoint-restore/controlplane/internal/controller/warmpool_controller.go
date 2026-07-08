@@ -82,6 +82,11 @@ type WorkerConfig struct {
 	ServiceAccount string // Pod Identity SA for S3 (checkpoint/restore)
 	Bucket         string // SANDBOXD_BUCKET
 	Region         string // AWS_REGION
+	// CredTokenSecret, if set, is the name of a Secret (in the worker namespace)
+	// holding key "token" — the fleet-wide HMAC key for the per-session credential
+	// vendor. Injected into workers as SANDBOXD_CRED_TOKEN_KEY, which enables
+	// per-session IAM credentials. Empty = credential vendor disabled.
+	CredTokenSecret string
 }
 
 // WarmPoolReconciler reconciles a WarmPool object into a Deployment of sandboxd
@@ -344,6 +349,15 @@ func (r *WarmPoolReconciler) workerEnv(tmpl *corev1alpha1.SandboxTemplate) []cor
 	}
 	if r.Worker.Region != "" {
 		env = append(env, corev1.EnvVar{Name: "AWS_REGION", Value: r.Worker.Region})
+	}
+	// Per-session IAM credential vendor: inject the fleet HMAC key from a Secret so
+	// workers can serve per-session AWS creds. Optional (unset = vendor disabled).
+	if r.Worker.CredTokenSecret != "" {
+		env = append(env, corev1.EnvVar{Name: "SANDBOXD_CRED_TOKEN_KEY", ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: r.Worker.CredTokenSecret},
+				Key:                  "token",
+			}}})
 	}
 	return env
 }

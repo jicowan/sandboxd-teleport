@@ -91,7 +91,7 @@ func main() {
 			log.Printf("WARN: STS init failed (per-session IAM credentials disabled): %v", err)
 		} else {
 			s.cred = newCredVendor(assume, []byte(key))
-			log.Printf("credential vendor enabled (interior %s:%d)", actorVethGateway, s.credPort)
+			log.Printf("credential vendor enabled (%s:%d)", credVendorIP, s.credPort)
 		}
 	}
 	// Networking: only the "sandbox" (netstack) mode supports the checkpointable
@@ -102,6 +102,9 @@ func main() {
 		} else {
 			s.netns = true
 			log.Printf("networking: interior netns ready (podIP=%s, interiorIP=%s)", s.podIP, interiorIP)
+			// Pin the credential-vendor IP on lo (pod netns) so the vendor can bind it
+			// at boot, independent of the per-session veth.
+			ensureCredVendorAddr()
 		}
 	} else {
 		log.Printf("networking: sandbox data path disabled (network=%s podIP=%q)", s.runsc.network, s.podIP)
@@ -141,7 +144,7 @@ func main() {
 	// from the control API on :8090.
 	if s.cred != nil && s.netns {
 		credSrv := &http.Server{
-			Addr:    fmt.Sprintf("%s:%d", actorVethGateway, s.credPort),
+			Addr:    fmt.Sprintf("%s:%d", credVendorIP, s.credPort),
 			Handler: s.cred,
 		}
 		go func() {
@@ -666,7 +669,7 @@ func (s *server) withCredEnv(id, roleARN string, env []string) []string {
 		return env
 	}
 	s.cred.register(id, roleARN)
-	return append(env, s.cred.awsEnvForSession(id, actorVethGateway, s.credPort, s.region)...)
+	return append(env, s.cred.awsEnvForSession(id, credVendorIP, s.credPort, s.region)...)
 }
 
 // dropCred deregisters a session from the credential vendor (on teardown).

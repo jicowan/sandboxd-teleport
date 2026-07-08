@@ -115,7 +115,7 @@ func main() {
 		"Address for the internal /resume endpoint the router calls.")
 	flag.StringVar(&resumeNamespace, "resume-namespace", envOr("SANDBOXD_NAMESPACE", "sandboxd-controlplane-system"),
 		"Namespace where SandboxTemplate/WarmPool/Session objects live.")
-	var workerSA, workerBucket, workerRegion, workerImage string
+	var workerSA, workerBucket, workerRegion, workerImage, credTokenSecret string
 	flag.StringVar(&workerSA, "worker-sa", envOr("SANDBOXD_WORKER_SA", ""),
 		"ServiceAccount for provisioned worker pods (S3 Pod Identity).")
 	flag.StringVar(&workerBucket, "worker-bucket", envOr("SANDBOXD_BUCKET", ""),
@@ -124,6 +124,8 @@ func main() {
 		"AWS region for worker pods.")
 	flag.StringVar(&workerImage, "worker-image", envOr("SANDBOXD_WORKER_IMAGE", ""),
 		"sandboxd worker image (overrides the built-in default).")
+	flag.StringVar(&credTokenSecret, "cred-token-secret", envOr("SANDBOXD_CRED_TOKEN_SECRET", ""),
+		"Secret name (key 'token') holding the fleet HMAC key for the per-session IAM credential vendor; empty disables it.")
 	var maxConcurrentResumes int
 	flag.IntVar(&maxConcurrentResumes, "max-concurrent-resumes", envInt("SANDBOXD_MAX_CONCURRENT_RESUMES", 0),
 		"Cap on in-flight resumes (backpressure); 0 = unlimited (default).")
@@ -271,9 +273,10 @@ func main() {
 		Scheme: mgr.GetScheme(),
 		KV:     kv,
 		Worker: controller.WorkerConfig{
-			ServiceAccount: workerSA,
-			Bucket:         workerBucket,
-			Region:         workerRegion,
+			ServiceAccount:  workerSA,
+			Bucket:          workerBucket,
+			Region:          workerRegion,
+			CredTokenSecret: credTokenSecret,
 		},
 		PoolEvents: poolNotifier.Events(),
 	}).SetupWithManager(mgr); err != nil {
