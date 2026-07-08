@@ -31,6 +31,7 @@ describes the live reference cluster it says so explicitly.
 | [PRD-arbitrary-image-sessions.md](../PRD-arbitrary-image-sessions.md) | Proposed | "Bring your own container" — let an authorized user run an arbitrary image as a teleporting sandbox (authz, registry policy, dedicated pool, self‑service path). Implement if demand arises. |
 | [PRD-graceful-scale-in.md](../PRD-graceful-scale-in.md) | **Implemented** | Operator sets `controller.kubernetes.io/pod-deletion-cost` on worker pods (idle low, busy high) so WarmPool scale‑in deletes idle workers before busy ones. |
 | [PRD-checkpoint-on-terminate.md](../PRD-checkpoint-on-terminate.md) | **Implemented** | Checkpoint a running session to S3 when its worker pod terminates (scale‑in, drain, rollout, eviction) so it teleport‑resumes losslessly. Companion to graceful scale‑in. |
+| [PRD-sandbox-iam-credentials.md](../PRD-sandbox-iam-credentials.md) | Proposed | Let a sandboxed workload assume an AWS IAM role via a container‑credentials endpoint on the interior gateway — per‑session, auto‑refreshed, teleport‑safe, never the worker's identity. |
 
 ## The whole picture in one diagram
 
