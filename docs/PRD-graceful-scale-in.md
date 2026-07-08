@@ -173,9 +173,10 @@ Acceptance: with idle workers present, a scale‑in never deletes a busy worker.
 - **Best‑effort, not a guarantee.** If a scale‑in removes more pods than there are
   idle workers, some busy workers *will* be deleted (there's no idle pod to prefer).
   `pod-deletion-cost` can't prevent that — it only orders the choice.
-- **The real safety net is checkpoint‑on‑terminate.** A future item: a preStop hook
-  / SIGTERM handler on the worker that checkpoints the running session to S3 before
-  the pod dies, so even an unavoidable busy‑worker deletion loses nothing and
+- **The real safety net is checkpoint‑on‑terminate** — specced in
+  [PRD-checkpoint-on-terminate.md](PRD-checkpoint-on-terminate.md): a preStop hook /
+  operator‑driven suspend that checkpoints the running session to S3 before the pod
+  dies, so even an unavoidable busy‑worker deletion loses nothing and
   teleport‑resumes cleanly. `pod-deletion-cost` + checkpoint‑on‑terminate together
   give graceful scale‑in; this PRD is the first (cheap, high‑value) half.
 - **PodDisruptionBudget** could additionally protect against voluntary disruptions
