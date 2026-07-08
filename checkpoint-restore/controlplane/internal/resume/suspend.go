@@ -95,6 +95,8 @@ func (s *Suspender) WithMirror(m SessionMirror) *Suspender {
 // SweepOnce scans all sessions and suspends (or resets) those that have been idle
 // past their policy timeout. Returns the number of sessions acted on.
 func (s *Suspender) SweepOnce(ctx context.Context) (int, error) {
+	t0 := time.Now()
+	defer func() { metrics.SweepDuration.WithLabelValues("suspend").Observe(time.Since(t0).Seconds()) }()
 	nowMS := s.now().UnixMilli()
 	// Read only sessions whose suspend deadline has passed (O(due), not O(N)) —
 	// the deadline (lastActiveAt+idleTimeout) is maintained in the suspend:due index
@@ -103,6 +105,7 @@ func (s *Suspender) SweepOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	metrics.SweepDue.WithLabelValues("suspend").Set(float64(len(sessions)))
 	acted := 0
 	for _, e := range sessions {
 		if e.State != resumeapi.StateRunning || e.WorkerPodIP == "" {

@@ -152,13 +152,19 @@ If a single leader operator's write‑serialization becomes the ceiling after 5.
 the escape hatch is sharding sessions across namespaces/operators (the tabled
 multi‑namespace work). Called out for completeness; not this PRD.
 
-## 6. Observability first (prerequisite for gating)
+## 6. Observability (partly DONE)
 
-Before building 5.3–5.5, add the metrics that tell us *when* to: sweeper pass
-duration + sessions‑scanned‑vs‑acted, Valkey op rate, operator reconcile rate +
-`CountWorkers` cost, and etcd/apiserver write QPS attributable to the mirror. Gate
-each fix on its metric crossing a threshold under real load. (Some gauges exist —
-pool workers; the rest are new.)
+**Added (operator v21+):** `sandboxd_sweep_duration_seconds{sweep}` (histogram) and
+`sandboxd_sweep_due{sweep}` (gauge) — sweep pass latency + sessions‑found‑due, the
+signals that show whether the O(due) indexing is holding as the fleet grows (a rise
+in duration, or due≈total, means it isn't). Alongside the existing
+`sandboxd_pool_workers`, `sandboxd_resumes_total` + duration, `sandboxd_suspends_total`,
+`sandboxd_periodic_checkpoints_total`. Note: enable the operator metrics endpoint
+(`--metrics-bind-address`, default off) to export them.
+
+**Still worth adding when scale testing:** Valkey op rate, and etcd/apiserver write
+QPS attributable to the mirror (to confirm §5.4's reduction under real churn). Gate
+any further work on these crossing a threshold under load.
 
 ## 7. Effort / sequencing
 

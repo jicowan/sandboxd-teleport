@@ -75,6 +75,8 @@ func (c *Checkpointer) WithMirror(m SessionMirror) *Checkpointer {
 // SweepOnce checkpoints Running sessions whose opt-in interval has elapsed since
 // their last (periodic) checkpoint. Returns the number checkpointed.
 func (c *Checkpointer) SweepOnce(ctx context.Context) (int, error) {
+	t0 := time.Now()
+	defer func() { metrics.SweepDuration.WithLabelValues("checkpoint").Observe(time.Since(t0).Seconds()) }()
 	nowMS := c.now().UnixMilli()
 	// Read only sessions whose next periodic-checkpoint deadline has passed. The
 	// index is empty unless a session opted in (checkpointIntervalSeconds>0), so
@@ -83,6 +85,7 @@ func (c *Checkpointer) SweepOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	metrics.SweepDue.WithLabelValues("checkpoint").Set(float64(len(sessions)))
 	done := 0
 	for _, e := range sessions {
 		if e.State != resumeapi.StateRunning || e.WorkerPodIP == "" {

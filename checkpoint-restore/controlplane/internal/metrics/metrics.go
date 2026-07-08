@@ -71,12 +71,30 @@ var (
 		Name: "sandboxd_periodic_checkpoints_total",
 		Help: "Total periodic background checkpoints by outcome.",
 	}, []string{"outcome"})
+
+	// SweepDuration is how long one sweep pass takes, by sweep (suspend|checkpoint).
+	// With the O(due) indexes this should stay flat as the fleet grows; a rise is the
+	// signal that the indexing is no longer keeping up (PRD-control-plane-scalability §6).
+	SweepDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "sandboxd_sweep_duration_seconds",
+		Help:    "Duration of one idle-suspend/checkpoint sweep pass, by sweep.",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2},
+	}, []string{"sweep"})
+
+	// SweepDue is the number of sessions a sweep found DUE (read from the index) on
+	// its last pass, by sweep. Watching due-count vs. total session count tells us
+	// whether the indexed path is doing O(due) work as intended.
+	SweepDue = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "sandboxd_sweep_due",
+		Help: "Sessions found due on the last sweep pass, by sweep (suspend|checkpoint).",
+	}, []string{"sweep"})
 )
 
 // register wires everything into the controller-runtime registry exactly once.
 func init() {
 	ctrlmetrics.Registry.MustRegister(
 		PoolWorkers, ResumesTotal, ResumeDuration, SuspendsTotal, CheckpointsTotal,
+		SweepDuration, SweepDue,
 	)
 }
 
