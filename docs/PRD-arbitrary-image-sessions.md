@@ -113,9 +113,44 @@ Configurable policy, enforced **before** `/run`:
 - Policy violations are rejected with a clear, user‑visible error ("image
   `X` not permitted: registry not allow‑listed") and audited.
 
-Where enforced: the **control plane** (operator admission/validation of the
-Session), so it holds regardless of which front door created the Session. The
-front door may additionally pre‑check for a better UX.
+#### Where enforced — layered, controller‑authoritative
+
+The image to run is **`Session.spec.image`, a string field on the Session CRD** —
+the workload never appears in a Kubernetes pod spec (it's handed to the worker's
+`/run` and executed inside gVisor via runsc). That shapes the enforcement options:
+
+- **Controller gate (mandatory, fail‑closed) — the authoritative control.** The
+  operator must resolve the image before `/run`, so it is the unavoidable
+  chokepoint. The registry allow‑list, require‑digest, and entitlement checks live
+  here so they **cannot be bypassed** by a disabled/absent admission policy, and
+  this is the natural home for **signature/provenance verification** (a cosign
+  verification step in the controller), because that machinery is tied to *image
+  content*, not to a CRD field. Always on.
+
+- **Native CEL admission (optional, declarative overlay).** Because the target is a
+  field on our own CRD, the checks that *are* declarative — registry allow‑list,
+  require‑digest, `arbitraryImage` pool match — can be expressed in **in‑tree CEL**,
+  with no third‑party policy engine to install or operate:
+  - **CRD validation rules** (`x-kubernetes-validations` on the Session schema) —
+    e.g. reject a `spec.image` that isn't digest‑pinned or whose registry prefix
+    isn't allow‑listed, enforced by the API server on write. Ships with the CRD.
+  - **`ValidatingAdmissionPolicy`** (GA in‑tree CEL admission) — when a rule needs
+    to be cluster‑configurable or reference the target pool, a VAP + binding
+    against `Session` writes keeps policy declarative and updatable without an
+    operator rebuild, still with no external controller.
+
+  CEL handles the *string‑shape* rules on `spec.image` (allow‑list / digest /
+  pool‑match). It **cannot** verify signatures — that's image‑content work with no
+  CEL primitive — so **signature verification stays in the controller**. This layer
+  *supplements*, never *replaces*, the controller gate.
+
+Recommendation: ship the controller gate as the source of truth (works with zero
+extra infrastructure and can't be turned off), and optionally add **native CEL**
+(CRD validation rules, escalating to a `ValidatingAdmissionPolicy` only if a rule
+must be cluster‑tunable) for early, declarative rejection. Deliberately **not** a
+third‑party policy engine (Gatekeeper/Kyverno): the checks are simple field
+predicates on our own CRD, so in‑tree CEL covers them without the extra dependency.
+Whichever front door created the Session, the controller gate still applies.
 
 ### 5.3 Pool model (O6c) — protect the curated pools
 
@@ -164,14 +199,30 @@ consumers are MCP clients; (b) if BYOC is more of an ops/CLI workflow.
 
 ### 5.5 Control‑plane admission (defense in depth)
 
-- A validating webhook (or operator admission) enforces, server‑side:
+Server‑side enforcement on Session admission, applying to **every** Session
+however created (broker, self‑service API, or hand‑written `kubectl`) — this
+closes the "admin bypass is the only path" gap that exists today. The rules:
+
   - **Exactly one** of `poolRef` / `image` is set (already a documented rule).
   - An `image` Session references an `arbitraryImage: true` pool for its worker.
-  - The image passes registry/signature policy (5.2).
+  - `spec.image` passes registry/require‑digest policy (§5.2).
   - The creator was entitled (e.g. Session carries an attestation the front door
     stamped, or creation is restricted by RBAC to the front‑door identity).
-- This makes hand‑created `kubectl` Sessions subject to the same policy, closing
-  the "admin bypass is the only path" gap that exists today.
+
+These can be enforced two (composable) ways, per the layering in §5.2:
+
+- **In the controller** (mandatory, fail‑closed) — the operator validates on
+  reconcile/admission and refuses to `/run` a non‑compliant Session. Works with no
+  extra infrastructure and can't be switched off. Signature verification lives here.
+- **Via native CEL** (optional) — CRD `x-kubernetes-validations` rules on the
+  Session schema (and, if a rule must be cluster‑tunable, a
+  `ValidatingAdmissionPolicy`) that reject non‑compliant `spec.image`/`poolRef`
+  combinations at API admission, before the CR persists. In‑tree, no third‑party
+  engine. Subject to the CRD‑field caveat in §5.2 (allow‑list / require‑digest /
+  pool‑match only; signature verification is not expressible in CEL).
+
+The controller gate is the source of truth; native CEL admission is
+defense‑in‑depth.
 
 ### 5.6 Quotas & lifecycle
 
@@ -227,7 +278,9 @@ records the session's image and replays it on `/restore`.
   design (confirm the image can't escape the sandbox to the privileged worker
   context) and stated explicitly in the threat model.
 - **Supply chain.** Registry allow‑list + optional signature verification is the
-  primary control against malicious/hijacked images.
+  primary control against malicious/hijacked images, enforced in the controller
+  (authoritative) and optionally mirrored by a native CEL admission rule on
+  `Session.spec.image` (§5.2/§5.5).
 - **Pairs with P1.5.** The planned mTLS + NetworkPolicy hardening (router↔worker,
   operator) and the "router trusts `X-Session-ID`" gap should be closed before/with
   BYOC, since BYOC widens who runs code on the fleet.
@@ -248,7 +301,7 @@ records the session's image and replays it on `/restore`.
 | Q1 | Entitlement as a new group (`sandbox-byoc`) or fold into `sandbox-power`? | New group — decouples "run exec tools" from "bring any image." |
 | Q2 | Self‑service path: broker‑mediated at connect time (a) or separate API/CLI (b)? Note: not an in‑session MCP tool (circular — see 5.4). | (a) broker‑mediated (`initialize` param/header or pre‑session endpoint) if consumers are MCP clients; (b) if ops‑driven. |
 | Q3 | Signature verification in MVP or fast‑follow? | Allow‑list in MVP; signatures configurable, on for strict envs. |
-| Q4 | Enforce policy in a validating webhook vs. operator admission code? | Webhook if we want it declarative and reusable; operator code is faster to ship. |
+| Q4 | Policy enforcement home: controller only, or also add native CEL admission? | Controller is mandatory + authoritative (fail‑closed, hosts signature verification). Optionally add **in‑tree CEL** — CRD `x-kubernetes-validations`, escalating to a `ValidatingAdmissionPolicy` only if a rule must be cluster‑tunable — for declarative allow‑list/digest/pool‑match. Deliberately **not** a third‑party policy engine (Gatekeeper/Kyverno): simple field predicates on our own CRD don't warrant the dependency. See §5.2/§5.5. |
 | Q5 | Require digests (no floating tags)? | Recommended for reproducible restore; make it a policy toggle. |
 | Q6 | How does the front door prove entitlement to the operator (stamp/attestation vs. RBAC‑restricted creation)? | RBAC‑restrict Session creation to the front‑door identity + carry subject; revisit. |
 
