@@ -246,7 +246,7 @@ func (s *Suspender) casSession(ctx context.Context, sid string, mutate func(*res
 		mutate(e)
 		err = s.kv.PutSessionCAS(ctx, e)
 		if err == nil {
-			s.mirror.Mirror(ctx, e) // durable mirror to Session.status (best-effort)
+			mirrorIfDurable(ctx, s.mirror, e) // etcd mirror only on durability-critical transitions
 			return nil
 		}
 		if !errors.Is(err, assign.ErrVersionConflict) {

@@ -179,7 +179,8 @@ func BuildCheckpointer(c client.Client, kv *assign.Client, namespace string, htt
 		}
 		return resume.CheckpointPolicy{IntervalSeconds: t.Spec.CheckpointIntervalSeconds}, nil
 	}
-	return resume.NewCheckpointer(kv, clientFor, policyFor, 0, nil)
+	return resume.NewCheckpointer(kv, clientFor, policyFor, 0, nil).
+		WithMirror(NewSessionMirror(c, namespace))
 }
 
 // CheckpointSweeper is a manager Runnable that periodically checkpoints opted-in

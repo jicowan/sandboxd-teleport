@@ -110,7 +110,14 @@ Replace the O(N) suspend scan with an O(due) lookup:
 - Turns the dominant O(N)/15s cost into O(due), which is what "busy cluster" should
   cost. Requires the router's `StampActive` to also update the ZSET (still O(1)).
 
-### 5.4 Coalesce / prioritize the etcd status mirror (bounds 2.4)
+### 5.4 Coalesce / prioritize the etcd status mirror (bounds 2.4) — DONE (operator v19)
+
+**Implemented:** the mirror now fires only on durability‑critical transitions —
+`Suspended` (idle‑suspend + checkpoint‑on‑terminate) and periodic‑checkpoint
+advances, plus delete‑on‑reset. Resuming/Running/Suspending are skipped, so
+**resume does zero etcd writes**. Recovery is provably equivalent (a wiped Running
+session falls back to its last snapshot regardless). Debounce/batch (below) was not
+needed once Running was dropped. Verified live.
 
 - **Only mirror durability‑critical transitions.** `Suspended` (+ its `snapshotURI`)
   is the one that *must* survive a Valkey wipe; the intermediate `Resuming`→`Running`

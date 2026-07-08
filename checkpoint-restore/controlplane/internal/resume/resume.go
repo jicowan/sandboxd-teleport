@@ -107,6 +107,22 @@ type SessionMirror interface {
 	Delete(ctx context.Context, sid string)
 }
 
+// mirrorIfDurable writes the etcd mirror ONLY for the Suspended transition — the
+// session's authoritative resting state carrying its newest snapshotURI. Every
+// other transition through the resume/suspend casSession (Resuming, Running,
+// Suspending) is skipped: on a Valkey wipe a Running session is unrecoverable to
+// its live RAM regardless (its worker binding is wiped too) and recovery falls back
+// to the last snapshot — so mirroring those buys no recovery, only etcd write
+// pressure. Resume then drops to ZERO etcd writes. (Periodic-checkpoint advances,
+// which DO move the durable snapshot while Running, are mirrored explicitly by the
+// Checkpointer, not here.) The reset/delete path calls Delete directly. This is the
+// bulk of the write reduction (PRD-control-plane-scalability §5.4).
+func mirrorIfDurable(ctx context.Context, m SessionMirror, e *resumeapi.SessionEntry) {
+	if e.State == resumeapi.StateSuspended {
+		m.Mirror(ctx, e)
+	}
+}
+
 // nopMirror is the default (no durable mirror wired).
 type nopMirror struct{}
 
@@ -413,7 +429,7 @@ func (wf *Workflow) casSession(ctx context.Context, sid string, mutate func(*res
 		mutate(e)
 		err = wf.kv.PutSessionCAS(ctx, e)
 		if err == nil {
-			wf.mirror.Mirror(ctx, e) // durable mirror to Session.status (best-effort)
+			mirrorIfDurable(ctx, wf.mirror, e) // etcd mirror only on durability-critical transitions
 			return nil
 		}
 		if !errors.Is(err, assign.ErrVersionConflict) {

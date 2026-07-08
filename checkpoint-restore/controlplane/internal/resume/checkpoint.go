@@ -45,6 +45,7 @@ type Checkpointer struct {
 	kv        *assign.Client
 	clientFor WorkerClientFactory
 	policyFor CheckpointPolicyLookup
+	mirror    SessionMirror
 	now       func() time.Time
 	deadline  time.Duration
 }
@@ -58,7 +59,17 @@ func NewCheckpointer(kv *assign.Client, clientFor WorkerClientFactory, policyFor
 	if now == nil {
 		now = time.Now
 	}
-	return &Checkpointer{kv: kv, clientFor: clientFor, policyFor: policyFor, now: now, deadline: deadline}
+	return &Checkpointer{kv: kv, clientFor: clientFor, policyFor: policyFor, mirror: nopMirror{}, now: now, deadline: deadline}
+}
+
+// WithMirror wires a durable SessionMirror so a periodic-checkpoint advance (which
+// moves the durable snapshot forward while the session stays Running) is recorded
+// in etcd — the one Running transition that affects recovery. Returns c.
+func (c *Checkpointer) WithMirror(m SessionMirror) *Checkpointer {
+	if m != nil {
+		c.mirror = m
+	}
+	return c
 }
 
 // SweepOnce checkpoints Running sessions whose opt-in interval has elapsed since
@@ -115,6 +126,10 @@ func (c *Checkpointer) checkpointOne(ctx context.Context, e *resumeapi.SessionEn
 		cur.LastCheckpointAt = c.now().UnixMilli()
 		err = c.kv.PutSessionCAS(ctx, cur)
 		if err == nil {
+			// Mirror the advanced snapshot to etcd: this Running transition DOES move
+			// the durable recovery point forward, so it's worth persisting (unlike
+			// resume's Running writes). Low frequency (once per opt-in interval).
+			c.mirror.Mirror(ctx, cur)
 			return nil
 		}
 		if !errors.Is(err, assign.ErrVersionConflict) {

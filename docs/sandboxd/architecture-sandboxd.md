@@ -248,11 +248,17 @@ each transition — it is the durable copy the cache is rebuilt from (see
 Valkey has no persistence, so it must not be the only copy of session state. The
 operator therefore:
 
-- **Mirrors** each authoritative session transition into `Session.status` (etcd) —
-  a `SessionMirror` fired at the KV write choke points. `Session.status` is a
-  lossless mirror (phase, pool, workerPod, workerPodIP, snapshotURI, image, ports,
-  health, iamRoleArn; `lastActiveAt` mirrored coarsely on transitions, not per
-  router stamp, to avoid write amplification). etcd is already durable + backed up.
+- **Mirrors** the durability‑critical session transitions into `Session.status`
+  (etcd) — a `SessionMirror` fired at the KV write choke points, but **only when the
+  transition changes what a recovery would restore**: `Suspended` (idle‑suspend +
+  checkpoint‑on‑terminate) and periodic‑checkpoint advances, plus delete‑on‑reset.
+  Resuming/Running/Suspending are **not** mirrored — a wiped Running session is
+  unrecoverable to its live RAM anyway (its worker binding is wiped too) and recovery
+  falls back to the last snapshot, so mirroring them bought no recovery, only etcd
+  write pressure. Net: **resume does zero etcd writes**; `kubectl get sessions` shows
+  the last durable state, not live Running. `Session.status` is a lossless mirror of
+  the recorded fields (phase, pool, workerPod, workerPodIP, snapshotURI, image,
+  ports, health, iamRoleArn). etcd is already durable + backed up.
 - **Rebuilds** the Valkey session cache from the `Session` CRs on startup
   (`SessionRebuilder`, leader‑only Runnable): any `session:<sid>` missing from a
   wiped cache is repopulated from its durable status; entries already present are

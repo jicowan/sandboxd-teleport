@@ -178,3 +178,68 @@ func TestSweepSkipsWhenPolicyNone(t *testing.T) {
 		t.Fatalf("policy none should not suspend: n=%d", n)
 	}
 }
+
+// countingMirror records Mirror/Delete calls by resulting state.
+type countingMirror struct {
+	states  []string // e.State at each Mirror call
+	deletes int
+}
+
+func (m *countingMirror) Mirror(_ context.Context, e *resumeapi.SessionEntry) {
+	m.states = append(m.states, e.State)
+}
+func (m *countingMirror) Delete(_ context.Context, _ string) { m.deletes++ }
+
+func TestMirrorFiresOnlyOnSuspended(t *testing.T) {
+	ctx := context.Background()
+	kv := testKV(t)
+	now := int64(1_000_000_000_000)
+	kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{
+		SID: "s1", State: resumeapi.StateRunning, Pool: "p",
+		WorkerPod: "w1", WorkerPodIP: "10.0.0.1", Image: "redis:7-alpine",
+		LastActiveAt: now - 100_000, IdleTimeoutSeconds: 30,
+	})
+	kv.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w1", Pool: "p", PodIP: "10.0.0.1", State: resumeapi.WorkerBusy, SID: "s1"})
+
+	m := &countingMirror{}
+	srv := stubSuspendWorker(t, "sandboxes/s1/snap-1", new(bool))
+	s := NewSuspender(kv, clientForStub(srv), func(context.Context, string) (IdlePolicy, error) {
+		return IdlePolicy{TimeoutSeconds: 30, Action: "suspend"}, nil
+	}, SuspendOptions{Now: fixedNow(now)}).WithMirror(m)
+
+	if _, err := s.SweepOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// suspendOne does two casSessions: Suspending then Suspended. Only Suspended
+	// must mirror.
+	if len(m.states) != 1 || m.states[0] != resumeapi.StateSuspended {
+		t.Fatalf("mirror should fire once, on Suspended; got %v", m.states)
+	}
+}
+
+func TestMirrorDeleteOnReset(t *testing.T) {
+	ctx := context.Background()
+	kv := testKV(t)
+	now := int64(1_000_000_000_000)
+	kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{
+		SID: "s1", State: resumeapi.StateRunning, Pool: "p",
+		WorkerPod: "w1", WorkerPodIP: "10.0.0.1", LastActiveAt: now - 100_000, IdleTimeoutSeconds: 30,
+	})
+	kv.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w1", Pool: "p", PodIP: "10.0.0.1", State: resumeapi.WorkerBusy, SID: "s1"})
+	m := &countingMirror{}
+	// reset drives /reset on the worker, not /suspend — serve 200 for it.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+	s := NewSuspender(kv, clientForStub(srv), func(context.Context, string) (IdlePolicy, error) {
+		return IdlePolicy{TimeoutSeconds: 30, Action: "reset"}, nil
+	}, SuspendOptions{Now: fixedNow(now)}).WithMirror(m)
+	if _, err := s.SweepOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if m.deletes != 1 {
+		t.Fatalf("reset should Delete the durable record once; got %d", m.deletes)
+	}
+}

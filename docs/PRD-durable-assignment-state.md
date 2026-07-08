@@ -3,6 +3,17 @@
 Status: **Implemented + verified live** (2026‑07‑08, operator `v17`). Related:
 [architecture-sandboxd.md](sandboxd/architecture-sandboxd.md).
 
+> **Update (2026‑07‑08, operator v19):** the mirror was narrowed to **durability‑
+> critical transitions only** to relieve etcd write pressure
+> (PRD-control-plane-scalability §5.4). It now fires on **Suspended** (idle‑suspend
+> + checkpoint‑on‑terminate) and **periodic‑checkpoint advances**, plus **Delete**
+> on reset — NOT on Resuming/Running/Suspending. Rationale: on a Valkey wipe a
+> Running session is unrecoverable to its live RAM regardless (its worker binding is
+> wiped too) and recovery falls back to the last snapshot, so mirroring Running
+> bought no recovery — only etcd writes. Resume now does **zero** etcd writes;
+> `kubectl get sessions` shows the last *durable* state (Suspended/Absent), not live
+> Running. Verified live. Original design below.
+
 > **As built:** the operator mirrors each authoritative session transition into
 > `Session.status` (via a `SessionMirror` fired at the `casSession` /
 > `PutSessionCAS` / `DeleteSession` choke points) and rebuilds the Valkey session
