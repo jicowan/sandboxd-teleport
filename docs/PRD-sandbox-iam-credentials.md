@@ -31,9 +31,16 @@ Related: [architecture-sandboxd.md](sandboxd/architecture-sandboxd.md),
 >   (session role, not the worker/node identity); role permission usable (listed
 >   S3 buckets); node IMDS blocked (401); **survived teleport** to a different
 >   worker (identity re-established automatically).
-> - **Rename NOT yet done:** the `ckpt-spike` → `sandboxd-worker` rename (§5.4a)
->   remains outstanding; the checkpoint SA is still `ckpt-spike` / role
->   `aio-checkpoint-spike-role` live.
+> - **Rename DONE (2026‑07‑08):** the checkpoint identity was migrated
+>   `ckpt-spike` → `sandboxd-worker` (SA) and `aio-checkpoint-spike-role` →
+>   `sandboxd-worker-checkpoint` (role) via the staged §5.4a procedure — new
+>   SA/role/association created, `--worker-sa` flipped, workers rolled, S3 +
+>   AssumeRole verified under the new identity, old SA/role/association deleted.
+>   The S3 **bucket** name is unchanged (cosmetic). Live workers now run as
+>   `sandboxd-worker`.
+> - **Still open:** a real subject→role **authorization gate** (front door / CEL) —
+>   today any session in a pool with `iam.roleArn` set gets that role; there is no
+>   per‑subject entitlement check yet.
 
 ## 1. Summary
 
@@ -161,7 +168,7 @@ identity — not by the sandbox asking for an arbitrary role:
 - The vendor assumes **only** the session's authorized role — the sandbox can't
   request a different one.
 
-### 5.4a Rename the worker's checkpoint identity (bundled cleanup)
+### 5.4a Rename the worker's checkpoint identity (bundled cleanup) — DONE 2026‑07‑08
 
 This work introduces a *second* worker identity (the credential vendor), so it's
 the right moment to fix the misleading name of the *first* one. The worker's S3

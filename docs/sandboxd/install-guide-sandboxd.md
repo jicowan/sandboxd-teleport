@@ -61,7 +61,7 @@ Checkpoints live in S3; the worker reads/writes them via EKS Pod Identity.
    aws s3 mb s3://aio-checkpoint-spike-820537372947-us-west-2 --region us-west-2
    ```
 
-2. **Create the worker IAM role** `aio-checkpoint-spike-role`:
+2. **Create the worker IAM role** `sandboxd-worker-checkpoint`:
    - Trust policy: principal `pods.eks.amazonaws.com`, actions `sts:AssumeRole` +
      `sts:TagSession`.
    - Inline policy `s3-checkpoints` (least privilege, scoped to the one bucket):
@@ -72,17 +72,21 @@ Checkpoints live in S3; the worker reads/writes them via EKS Pod Identity.
    > (delete is only used by the operator GC — see Step 6). You may drop
    > `s3:DeleteObject` from the worker role if you never call `/reset`‑style cleanup
    > that removes S3 objects.
+   >
+   > The S3 **bucket** name still carries the old `aio-checkpoint-spike-…` prefix
+   > (cosmetic; renaming a bucket means migrating snapshots). Only the SA/role were
+   > renamed to the `sandboxd-worker-*` family.
 
 3. **Create the ServiceAccount** the workers run as and **associate** the role.
-   The reference uses SA `ckpt-spike` in namespace `default`:
+   The reference uses SA `sandboxd-worker` in namespace `default`:
 
    ```sh
-   kubectl create serviceaccount ckpt-spike -n default
+   kubectl create serviceaccount sandboxd-worker -n default
 
    aws eks create-pod-identity-association \
      --cluster-name EKSClusterStack-cluster \
-     --namespace default --service-account ckpt-spike \
-     --role-arn arn:aws:iam::820537372947:role/aio-checkpoint-spike-role \
+     --namespace default --service-account sandboxd-worker \
+     --role-arn arn:aws:iam::820537372947:role/sandboxd-worker-checkpoint \
      --region us-west-2
    ```
 
@@ -180,7 +184,7 @@ your bucket/region/SA/namespace):
 --kv-addr=valkey:6379
 --resume-addr=:8082
 --resume-namespace=default
---worker-sa=ckpt-spike
+--worker-sa=sandboxd-worker
 --worker-bucket=aio-checkpoint-spike-820537372947-us-west-2
 --worker-region=us-west-2
 ```
@@ -303,10 +307,10 @@ unless configured. See [PRD-sandbox-iam-credentials.md](../PRD-sandbox-iam-crede
 
 3. **Grant the worker's identity `sts:AssumeRole`** on the target session role(s).
    With EKS Pod Identity the worker pod has one identity (the checkpoint role,
-   currently `aio-checkpoint-spike-role`); the vendor's AssumeRole runs as it:
+   currently `sandboxd-worker-checkpoint`); the vendor's AssumeRole runs as it:
 
    ```sh
-   aws iam put-role-policy --role-name aio-checkpoint-spike-role \
+   aws iam put-role-policy --role-name sandboxd-worker-checkpoint \
      --policy-name assume-session-roles --policy-document '{"Version":"2012-10-17",
        "Statement":[{"Effect":"Allow","Action":["sts:AssumeRole","sts:TagSession"],
        "Resource":"arn:aws:iam::<acct>:role/<session-role>"}]}'
@@ -318,7 +322,7 @@ unless configured. See [PRD-sandbox-iam-credentials.md](../PRD-sandbox-iam-crede
    ```sh
    aws iam create-role --role-name <session-role> --assume-role-policy-document '{
      "Version":"2012-10-17","Statement":[{"Effect":"Allow",
-       "Principal":{"AWS":"arn:aws:iam::<acct>:role/aio-checkpoint-spike-role"},
+       "Principal":{"AWS":"arn:aws:iam::<acct>:role/sandboxd-worker-checkpoint"},
        "Action":["sts:AssumeRole","sts:TagSession"]}]}'
    # attach whatever permissions the sandbox workload needs
    ```

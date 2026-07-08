@@ -36,8 +36,8 @@ kubectl config use-context arn:aws:eks:us-west-2:820537372947:cluster/EKSCluster
 - [ ] gVisor node group: nodes labeled `sandbox=gvisor` + taint
       `sandbox=gvisor:NoSchedule`, `runsc release-20260622.0` on‑node, ~100Gi root
       disk, single instance family (e.g. `c7a`) so CPU features match.
-- [ ] S3 bucket + worker Pod Identity (SA `default/ckpt-spike` → role
-      `aio-checkpoint-spike-role`, scoped to the bucket). See install guide Step 1.
+- [ ] S3 bucket + worker Pod Identity (SA `default/sandboxd-worker` → role
+      `sandboxd-worker-checkpoint`, scoped to the bucket). See install guide Step 1.
 - [ ] Registry access for `sandboxd`, `sandboxd-operator`, `sandboxd-router`.
 - [ ] Local tools: `go` 1.26+, `docker` (buildx linux/amd64), `ko`, `kubectl`,
       `aws`.
@@ -77,7 +77,7 @@ rm -f sandboxd runsc   # don't commit the ~130MB binaries
 ### A2. Deploy two workers (A and B)
 
 `checkpoint-restore/sandboxd/worker-deploy.yaml` is a 2‑replica Deployment
-(privileged, SA `ckpt-spike`, gVisor node selector/toleration, port `8090`, S3 env,
+(privileged, SA `sandboxd-worker`, gVisor node selector/toleration, port `8090`, S3 env,
 `SANDBOXD_POD_IP` from the downward API). Point it at your image tag and apply:
 
 ```sh

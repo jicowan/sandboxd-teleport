@@ -115,10 +115,10 @@ spec:
             - --health-probe-bind-address=:8081
             - --kv-addr=valkey:6379
             - --resume-addr=:8082
-            # WarmPool/Template/Session live in default (reuses ckpt-spike Pod
-            # Identity for S3, and the default-ns gvisor toleration/nodeselector).
+            # WarmPool/Template/Session live in default (reuses the sandboxd-worker
+            # Pod Identity for S3, and the default-ns gvisor toleration/nodeselector).
             - --resume-namespace=default
-            - --worker-sa=ckpt-spike
+            - --worker-sa=sandboxd-worker
             - --worker-bucket=aio-checkpoint-spike-820537372947-us-west-2
             - --worker-region=us-west-2
           ports:

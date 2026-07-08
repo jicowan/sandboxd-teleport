@@ -16,7 +16,7 @@ spec:
       annotations:
         karpenter.sh/do-not-disrupt: "true"
     spec:
-      serviceAccountName: ckpt-spike          # Pod Identity -> S3
+      serviceAccountName: sandboxd-worker     # Pod Identity -> S3 (role sandboxd-worker-checkpoint)
       # Give the control plane time to checkpoint-on-terminate (checkpoint + S3
       # upload) before kubelet SIGKILLs a busy worker. The worker's own drain
       # deadline (SANDBOXD_DRAIN_DEADLINE, default 100s) stays under this.
