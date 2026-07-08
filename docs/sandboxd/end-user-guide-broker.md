@@ -152,46 +152,7 @@ That produces this entry in `~/.claude.json` (you can also hand‑edit it):
 
 `aio-sandbox-client` is a **public PKCE client — no secret required**, so
 `--client-id` alone is enough. Restart Claude Code and authenticate; the browser
-login should now complete normally.
-
-> **The `CLAUDE_CODE_OAUTH_TRUSTED_HOSTS` environment variable does NOT fix this**
-> — it was tried and did not lift the restriction. Pinning the client id is the
-> supported fix.
-
-### Fallback: header‑helper auth (only if pinning the client id doesn't work)
-
-There is a known Claude Code bug where, on some setups, Dynamic Client Registration
-is attempted even with `oauth.clientId` set. It does **not** affect this server
-today (a pinned client id works here), but if you hit it, you can bypass Claude
-Code's OAuth entirely with a **`headersHelper`** script that mints the token itself
-and supplies the `Authorization: Bearer …` header directly. The front door
-validates the JWT regardless of how the client obtained it, so this is fully
-supported.
-
-Point the server at a helper in `~/.claude.json`:
-
-```json
-"aio-sandbox": {
-  "type": "http",
-  "url": "https://agentgateway.jicomusic.com/mcp",
-  "headersHelper": "/Users/<you>/.claude/sandbox-auth.sh"
-}
-```
-
-The helper (executable, `chmod +x`) manages the token lifecycle and prints the auth
-header on stdout: cache tokens in `~/.claude/.sandbox-token.json`; if the access
-token is still valid print the header immediately; if expired, exchange the
-**refresh token** at Keycloak's token endpoint
-(`https://keycloak.jicomusic.com/realms/sandbox/protocol/openid-connect/token`,
-client `aio-sandbox-client`); if there's no token, run a full authorization‑code +
-PKCE flow (open the browser to Keycloak, catch the redirect on a localhost
-callback, exchange the code, cache the tokens). The ~1‑hour access token refreshes
-silently; the browser only reopens when the refresh token is also gone.
-
-> Whichever path you use, the minted JWT must carry `aud=sandbox-router`,
-> `azp=aio-sandbox-client`, and your `groups` (`sandbox-users`, plus
-> `sandbox-power` for exec tools) — all satisfied by `aio-sandbox-client`. Ask your
-> administrator for a ready‑made `sandbox-auth.sh` rather than writing one.
+login completes normally.
 
 ## Using the tools
 
@@ -235,7 +196,7 @@ retry usually succeeds.
 | `403 Forbidden` right after login | Your account isn't in the required group (`sandbox-users`), or the token didn't come through the gateway. | Ask an admin to add you to `sandbox-users`. |
 | First call times out | Cold start / restore (~45s). | Retry once; later calls are fast. |
 | Login browser window never redirects back | OAuth callback blocked (corporate proxy, non‑loopback redirect). | Ensure your client can open a localhost callback; try Claude Code which uses a loopback redirect. |
-| `Policy 'Trusted Hosts' rejected request to client-registration service. Host not trusted` (Claude Code, first connect) | The server was added without `--client-id`, so Claude Code attempts Dynamic Client Registration and its Trusted Hosts guard blocks it (before login; unrelated to your account). The `CLAUDE_CODE_OAUTH_TRUSTED_HOSTS` env var does **not** fix it. | Re‑add with `--client-id aio-sandbox-client` (see "Trusted Hosts on first connect" above). Header‑helper is a fallback. |
+| `Policy 'Trusted Hosts' rejected request to client-registration service. Host not trusted` (Claude Code, first connect) | The server was added without `--client-id`, so Claude Code attempts Dynamic Client Registration and its Trusted Hosts guard blocks it (before login; unrelated to your account). | Re‑add with `--client-id aio-sandbox-client` (see "Trusted Hosts on first connect" above). |
 
 If problems persist, capture the exact error your client shows and share it with
 your administrator — they can correlate it against the gateway/broker logs.
