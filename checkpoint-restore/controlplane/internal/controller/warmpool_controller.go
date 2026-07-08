@@ -37,6 +37,7 @@ import (
 	corev1alpha1 "github.com/jicowan/aio-sandbox/controlplane/api/v1alpha1"
 	"github.com/jicowan/aio-sandbox/controlplane/internal/assign"
 	"github.com/jicowan/aio-sandbox/controlplane/internal/metrics"
+	"github.com/jicowan/aio-sandbox/shared/resumeapi"
 )
 
 // Labels the operator stamps on worker pods so the discovery informer (TDD §4.3)
@@ -45,6 +46,20 @@ const (
 	LabelApp       = "sandboxd.io/app"  // = "worker"
 	LabelPool      = "sandboxd.io/pool" // = <WarmPool name>
 	LabelAppWorker = "worker"
+)
+
+// podDeletionCostAnnotation and the idle/busy cost values drive graceful
+// scale-in: the built-in ReplicaSet controller deletes the LOWEST-cost pods
+// first when it scales a Deployment down. By stamping idle workers with a low
+// cost and busy workers (holding a live session) with a high cost, a scale-in
+// preferentially removes idle workers and spares busy ones. This is a
+// best-effort preference, not a guarantee — if a scale-in removes more pods than
+// there are idle workers, busy ones can still be deleted (that lossless case is
+// covered separately by checkpoint-on-terminate).
+const (
+	podDeletionCostAnnotation = "controller.kubernetes.io/pod-deletion-cost"
+	deletionCostIdle          = "0"   // delete idle workers first
+	deletionCostBusy          = "100" // keep busy workers
 )
 
 // WorkerImage is the sandboxd worker image the pool provisions. Workers are
@@ -85,7 +100,7 @@ type WarmPoolReconciler struct {
 // +kubebuilder:rbac:groups=core.sandboxd.io,resources=sessions,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.sandboxd.io,resources=sessions/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
 
 // Reconcile drives the worker Deployment toward the pool's desired replicas and
 // refreshes status counts.
@@ -161,7 +176,49 @@ func (r *WarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.updateStatus(ctx, &pool); err != nil {
 		log.Error(err, "update status")
 	}
+
+	// Graceful scale-in: stamp pod-deletion-cost so the ReplicaSet controller
+	// deletes idle workers before busy ones. This reconcile is nudged on every
+	// claim/release (PoolNotifier), so costs track busy/idle transitions in
+	// near-real-time. Best-effort: a failure here never blocks the pool.
+	if err := r.syncDeletionCosts(ctx, &pool); err != nil {
+		log.Error(err, "sync pod deletion costs")
+	}
 	return ctrl.Result{}, nil
+}
+
+// syncDeletionCosts sets the controller.kubernetes.io/pod-deletion-cost annotation
+// on each worker pod in the pool: a low cost for idle workers and a high cost for
+// busy ones, so a scale-in deletes idle workers first. It patches only pods whose
+// current cost differs (idempotent), using a merge patch of just the annotation so
+// it never clobbers other fields. KV is the source of truth for busy/idle.
+func (r *WarmPoolReconciler) syncDeletionCosts(ctx context.Context, pool *corev1alpha1.WarmPool) error {
+	if r.KV == nil {
+		return nil
+	}
+	workers, err := r.KV.PoolWorkers(ctx, pool.Name)
+	if err != nil {
+		return err
+	}
+	for _, w := range workers {
+		want := deletionCostIdle
+		if w.State == resumeapi.WorkerBusy {
+			want = deletionCostBusy
+		}
+		var pod corev1.Pod
+		if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: w.Pod}, &pod); err != nil {
+			continue // pod gone/not visible yet; discovery + prune reconcile it
+		}
+		if pod.Annotations[podDeletionCostAnnotation] == want {
+			continue // already correct — no patch
+		}
+		patch := client.RawPatch(types.MergePatchType,
+			[]byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, podDeletionCostAnnotation, want)))
+		if err := r.Patch(ctx, &pod, patch); err != nil {
+			return fmt.Errorf("patch deletion cost on %s: %w", w.Pod, err)
+		}
+	}
+	return nil
 }
 
 // desiredDeployment builds the worker Deployment for a pool, modeled on

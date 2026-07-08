@@ -219,6 +219,15 @@ The `Session` CRD's `.status.phase` mirrors this (`Absent`/`Running`/`Suspending
   expected concurrent new‑session rate so new users find a warm worker (important
   for slow‑booting images: a saturated pool makes the first user eat a cold start
   and can `503`).
+- **Graceful scale‑in:** the operator stamps each worker pod with
+  `controller.kubernetes.io/pod-deletion-cost` — a low cost on idle workers and a
+  high cost on busy ones — so when a pool scales down (minIdle contraction, an HPA,
+  or a lowered `replicas`) the ReplicaSet controller deletes **idle** workers before
+  **busy** ones. The cost tracks each worker's KV busy/idle state in near‑real‑time
+  (re‑synced on every claim/release nudge). This is best‑effort ordering, not a
+  guarantee: if a scale‑in removes more pods than there are idle workers, busy ones
+  can still be deleted — making that case lossless is the separate
+  checkpoint‑on‑terminate work.
 
 ## Trust boundaries and what's next
 

@@ -1,9 +1,19 @@
 # PRD — graceful WarmPool scale‑in (drain idle workers first)
 
-Status: **Proposed** (not scheduled). Decision‑ready spec; implement if/when
-autoscaling under load is exercised. Grounded in the shipped code on the
+Status: **Implemented** (2026‑07‑08, operator `v14`). The operator stamps
+`controller.kubernetes.io/pod-deletion-cost` on worker pods so scale‑in removes
+idle workers before busy ones. Grounded in the shipped code on the
 `checkpoint-restore` branch. Related: [architecture-sandboxd.md](sandboxd/architecture-sandboxd.md),
 [admin-guide-crds.md](sandboxd/admin-guide-crds.md).
+
+> **As built (differs from the original Q3 lean):** the sync lives in the
+> **WarmPool reconciler** (`syncDeletionCosts`), not `WorkerDiscoveryReconciler`.
+> Reason: busy/idle transitions are **KV writes** from the resume/suspend paths,
+> which don't change the pod object, so the pod‑event‑driven discovery reconciler
+> wouldn't fire on them. The WarmPool reconciler *is* nudged on every claim/release
+> (via `PoolNotifier`), already reads pool KV state, and can patch pods — so it's the
+> correct home. It patches only pods whose cost differs (idempotent), reads busy/idle
+> from `assign.PoolWorkers`, and required adding `patch` on pods to the ClusterRole.
 
 ## 1. Summary
 
@@ -194,5 +204,5 @@ change, no data‑path change, no new controller. Could ship in a single PR.
 |---|----------|---------|
 | Q1 | Exact cost values (idle `0` vs negative; busy `100`)? | Simple constants with strict idle<busy ordering; document them. Negative for idle is fine. |
 | Q2 | Rank busy workers by checkpoint recency (§5.1 refinement)? | Defer to a later iteration; v1 uses a single busy value. |
-| Q3 | Patch from `WorkerDiscoveryReconciler` or a dedicated small controller? | Reuse WorkerDiscovery — it already watches the exact pods and observes the transitions. |
+| Q3 | Patch from `WorkerDiscoveryReconciler` or a dedicated small controller? | **RESOLVED → WarmPool reconciler.** WorkerDiscovery is pod‑event‑driven and busy/idle transitions are KV writes (no pod change), so it wouldn't fire; the WarmPool reconciler is nudged on every claim/release and reads pool KV. |
 | Q4 | Ship checkpoint‑on‑terminate (§8) together or separately? | Separately — this PRD is the cheap half; checkpoint‑on‑terminate is its own PRD. |

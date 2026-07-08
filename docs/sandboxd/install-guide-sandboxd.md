@@ -134,8 +134,9 @@ make install                       # = kustomize build config/crd | kubectl appl
 # or explicitly:
 kubectl apply -f config/crd/bases/
 
-# Operator ClusterRole (manager-role): pods r/o; deployments r/w;
-# core.sandboxd.io templates r/o, sessions+warmpools r/w (+status/finalizers)
+# Operator ClusterRole (manager-role): pods get/list/watch/patch (patch = set
+# pod-deletion-cost for graceful scale-in); deployments r/w; core.sandboxd.io
+# templates r/o, sessions+warmpools r/w (+status/finalizers)
 kubectl apply -f config/rbac/role.yaml
 ```
 

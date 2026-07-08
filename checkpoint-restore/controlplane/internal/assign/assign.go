@@ -328,6 +328,31 @@ func (c *Client) ListWorkerPods(ctx context.Context) ([]string, error) {
 	return pods, nil
 }
 
+// PoolWorkers returns every WorkerEntry belonging to a pool by scanning the
+// worker:* keys. Used to set per-pod scale-in deletion cost (idle vs busy).
+// O(N) but N is small (pool size).
+func (c *Client) PoolWorkers(ctx context.Context, pool string) ([]*resumeapi.WorkerEntry, error) {
+	var out []*resumeapi.WorkerEntry
+	var cursor uint64
+	for {
+		keys, cur, err := c.rdb.Scan(ctx, cursor, "worker:*", 100).Result()
+		if err != nil {
+			return nil, err
+		}
+		for _, k := range keys {
+			w, gerr := c.GetWorker(ctx, k[len("worker:"):])
+			if gerr == nil && w.Pool == pool {
+				out = append(out, w)
+			}
+		}
+		cursor = cur
+		if cursor == 0 {
+			break
+		}
+	}
+	return out, nil
+}
+
 // CountWorkers returns (idle, total) worker counts for a pool by scanning the
 // worker:* keys. Used for WarmPool status; O(N) but N is small (pool size).
 func (c *Client) CountWorkers(ctx context.Context, pool string) (idle, total int, err error) {

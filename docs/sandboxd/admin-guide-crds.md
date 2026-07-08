@@ -124,6 +124,13 @@ kubectl get wp -n default
 > cached tool list. This matters most for slow‑booting images (a browser‑class
 > image cold‑starts ~40–45s).
 
+> **Scale‑in prefers idle workers.** When a pool scales down (minIdle contraction,
+> a lowered `replicas`, or an HPA), the operator sets
+> `controller.kubernetes.io/pod-deletion-cost` on worker pods (idle = low, busy =
+> high) so the ReplicaSet controller deletes idle workers before busy ones. It's
+> best‑effort ordering, not a guarantee — if the scale‑in removes more pods than
+> there are idle workers, a busy worker (live session) can still be deleted.
+
 ---
 
 ## Session (`sess`)
