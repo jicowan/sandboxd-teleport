@@ -24,6 +24,12 @@ describes the live reference cluster it says so explicitly.
 | 7 | [runbook-reproduce-test-env.md](runbook-reproduce-test-env.md) | Operators | End‑to‑end reproduction of the test environment + run a sample container. |
 | 8 | [api-reference-sandboxd-worker.md](api-reference-sandboxd-worker.md) | Operators / integrators | HTTP API surface of the sandboxd worker agent (`:8090`). |
 
+## Proposals (not yet scheduled)
+
+| Document | Status | What it covers |
+|----------|--------|----------------|
+| [PRD-arbitrary-image-sessions.md](PRD-arbitrary-image-sessions.md) | Proposed | "Bring your own container" — let an authorized user run an arbitrary image as a teleporting sandbox (authz, registry policy, dedicated pool, self‑service path). Implement if demand arises. |
+
 ## The whole picture in one diagram
 
 ```
