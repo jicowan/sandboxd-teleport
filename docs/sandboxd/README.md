@@ -29,6 +29,7 @@ describes the live reference cluster it says so explicitly.
 | Document | Status | What it covers |
 |----------|--------|----------------|
 | [PRD-arbitrary-image-sessions.md](../PRD-arbitrary-image-sessions.md) | Proposed | "Bring your own container" — let an authorized user run an arbitrary image as a teleporting sandbox (authz, registry policy, dedicated pool, self‑service path). Implement if demand arises. |
+| [PRD-graceful-scale-in.md](../PRD-graceful-scale-in.md) | Proposed | Set `controller.kubernetes.io/pod-deletion-cost` on worker pods (idle low, busy high) so WarmPool scale‑in deletes idle workers before busy ones. |
 
 ## The whole picture in one diagram
 
