@@ -48,6 +48,7 @@ type Suspender struct {
 	clientFor WorkerClientFactory
 	policyFor IdlePolicyLookup
 	notify    assign.PoolNotifier
+	mirror    SessionMirror
 	now       func() time.Time
 	opts      SuspendOptions
 }
@@ -70,7 +71,7 @@ func NewSuspender(kv *assign.Client, clientFor WorkerClientFactory, policyFor Id
 	if now == nil {
 		now = time.Now
 	}
-	return &Suspender{kv: kv, clientFor: clientFor, policyFor: policyFor, notify: assign.NopNotifier{}, now: now, opts: opts}
+	return &Suspender{kv: kv, clientFor: clientFor, policyFor: policyFor, notify: assign.NopNotifier{}, mirror: nopMirror{}, now: now, opts: opts}
 }
 
 // WithNotifier wires a PoolNotifier so a suspend/reset release nudges the
@@ -78,6 +79,15 @@ func NewSuspender(kv *assign.Client, clientFor WorkerClientFactory, policyFor Id
 func (s *Suspender) WithNotifier(n assign.PoolNotifier) *Suspender {
 	if n != nil {
 		s.notify = n
+	}
+	return s
+}
+
+// WithMirror wires a durable SessionMirror (Session.status in etcd). Returns s
+// for chaining.
+func (s *Suspender) WithMirror(m SessionMirror) *Suspender {
+	if m != nil {
+		s.mirror = m
 	}
 	return s
 }
@@ -141,7 +151,11 @@ func (s *Suspender) suspendOne(ctx context.Context, e *resumeapi.SessionEntry, a
 		// Discarded: delete the session entry entirely.
 		_ = s.kv.ReleaseWorker(ctx, e.WorkerPod, e.Pool)
 		s.notify.PoolChanged(e.Pool) // busy->idle: refresh pool status
-		return s.kv.DeleteSession(ctx, e.SID)
+		if derr := s.kv.DeleteSession(ctx, e.SID); derr != nil {
+			return derr
+		}
+		s.mirror.Delete(ctx, e.SID) // drop the durable record too (best-effort)
+		return nil
 	}
 
 	// action == suspend: checkpoint -> S3 -> worker freed by sandboxd.
@@ -236,6 +250,7 @@ func (s *Suspender) casSession(ctx context.Context, sid string, mutate func(*res
 		mutate(e)
 		err = s.kv.PutSessionCAS(ctx, e)
 		if err == nil {
+			s.mirror.Mirror(ctx, e) // durable mirror to Session.status (best-effort)
 			return nil
 		}
 		if !errors.Is(err, assign.ErrVersionConflict) {

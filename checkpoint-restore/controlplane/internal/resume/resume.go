@@ -90,6 +90,24 @@ type Options struct {
 // lazily create a Session CR on first contact when none exists yet.
 type PlanFunc func(ctx context.Context, sid, subject, poolHint string) (*SessionPlan, error)
 
+// SessionMirror durably mirrors a session's authoritative state to Kubernetes
+// (Session.status in etcd) after each KV write, so the Valkey cache can be rebuilt
+// after a restart (PRD-durable-assignment-state). The resume package holds no k8s
+// client — the operator supplies this. Best-effort: a mirror error must never fail
+// the resume/suspend that already succeeded in KV (it self-corrects on the next
+// transition or the periodic reconcile). Delete removes the durable record when a
+// session is discarded (reset).
+type SessionMirror interface {
+	Mirror(ctx context.Context, e *resumeapi.SessionEntry)
+	Delete(ctx context.Context, sid string)
+}
+
+// nopMirror is the default (no durable mirror wired).
+type nopMirror struct{}
+
+func (nopMirror) Mirror(context.Context, *resumeapi.SessionEntry) {}
+func (nopMirror) Delete(context.Context, string)                  {}
+
 // Workflow runs the Resume operation. Construct once, call Resume per request.
 type Workflow struct {
 	kv        *assign.Client
@@ -97,6 +115,7 @@ type Workflow struct {
 	clientFor WorkerClientFactory
 	planFor   PlanFunc
 	notify    assign.PoolNotifier
+	mirror    SessionMirror
 	sem       chan struct{} // resume concurrency limiter; nil = unlimited
 	opts      Options
 }
@@ -116,7 +135,7 @@ func New(kv *assign.Client, lookup TemplateLookup, clientFor WorkerClientFactory
 	if opts.MaxConcurrentResumes > 0 {
 		sem = make(chan struct{}, opts.MaxConcurrentResumes)
 	}
-	return &Workflow{kv: kv, lookup: lookup, clientFor: clientFor, planFor: planFor, notify: assign.NopNotifier{}, sem: sem, opts: opts}
+	return &Workflow{kv: kv, lookup: lookup, clientFor: clientFor, planFor: planFor, notify: assign.NopNotifier{}, mirror: nopMirror{}, sem: sem, opts: opts}
 }
 
 // WithNotifier wires a PoolNotifier so a claim/release nudges the WarmPool
@@ -124,6 +143,15 @@ func New(kv *assign.Client, lookup TemplateLookup, clientFor WorkerClientFactory
 func (wf *Workflow) WithNotifier(n assign.PoolNotifier) *Workflow {
 	if n != nil {
 		wf.notify = n
+	}
+	return wf
+}
+
+// WithMirror wires a durable SessionMirror (Session.status in etcd). Returns wf
+// for chaining.
+func (wf *Workflow) WithMirror(m SessionMirror) *Workflow {
+	if m != nil {
+		wf.mirror = m
 	}
 	return wf
 }
@@ -355,6 +383,7 @@ func (wf *Workflow) casSession(ctx context.Context, sid string, mutate func(*res
 		mutate(e)
 		err = wf.kv.PutSessionCAS(ctx, e)
 		if err == nil {
+			wf.mirror.Mirror(ctx, e) // durable mirror to Session.status (best-effort)
 			return nil
 		}
 		if !errors.Is(err, assign.ErrVersionConflict) {

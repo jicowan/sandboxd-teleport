@@ -1,8 +1,21 @@
 # PRD — durable assignment state (Kubernetes as truth, Valkey as cache)
 
-Status: **Proposed** (not scheduled). Decision‑ready spec; grounded in the shipped
-code on the `checkpoint-restore` branch. Related:
+Status: **Implemented + verified live** (2026‑07‑08, operator `v17`). Related:
 [architecture-sandboxd.md](sandboxd/architecture-sandboxd.md).
+
+> **As built:** the operator mirrors each authoritative session transition into
+> `Session.status` (via a `SessionMirror` fired at the `casSession` /
+> `PutSessionCAS` / `DeleteSession` choke points) and rebuilds the Valkey session
+> cache from the `Session` CRs on startup (`SessionRebuilder`, a manager Runnable,
+> leader‑only). `SessionStatus` gained the lossless‑mirror fields (`pool`,
+> `workerPod`, `ports`, `health`, `iamRoleArn`; `lastActiveAt` mirrored coarsely on
+> transitions, not per router stamp). Worker/idle entries are NOT persisted (they
+> self‑heal via the pod informer + prune loop). A one‑time backfill of pre‑existing
+> **Suspended** sessions was done via `hack/backfill-session-status.sh` (script, not
+> startup code — single test env, one‑off). Verified live: deleted 5 suspended
+> sessions from Valkey → restarted operator → rebuild restored all 5 from the CRs →
+> a rebuilt session teleport‑resumed from its recovered snapshot. The optional
+> Valkey PVC/AOF (§7) was NOT added.
 
 ## 1. Summary
 

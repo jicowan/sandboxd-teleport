@@ -191,12 +191,41 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              health:
+                description: health is the readiness/restart config (replayed on restore).
+                properties:
+                  probe:
+                    description: probe type used to determine readiness.
+                    enum:
+                    - none
+                    - tcp
+                    - http
+                    type: string
+                  probePath:
+                    description: probePath is the HTTP path to probe (http probe only).
+                    type: string
+                  probePort:
+                    description: probePort is the interior container port to probe.
+                    type: integer
+                  restartPolicy:
+                    description: restartPolicy on unexpected sandbox exit.
+                    enum:
+                    - none
+                    - cold
+                    - restore
+                    type: string
+                type: object
+              iamRoleArn:
+                description: iamRoleArn is the session's assumable AWS role (replayed
+                  on restore).
+                type: string
               image:
                 description: image is the resolved image (recorded for restore identity).
                 type: string
               lastActiveAt:
-                description: lastActiveAt is the last request time stamped by the
-                  router (O3).
+                description: |-
+                  lastActiveAt is the last request time stamped by the router (O3). Mirrored
+                  coarsely (on transitions, not every request) to avoid write amplification.
                 format: date-time
                 type: string
               phase:
@@ -208,9 +237,40 @@ spec:
                 - Suspended
                 - Resuming
                 type: string
+              pool:
+                description: pool is the WarmPool the session's worker is claimed
+                  from.
+                type: string
+              ports:
+                description: ports are the session's exposed port mappings (replayed
+                  on restore).
+                items:
+                  description: PortMap maps a worker pod port to a sandbox container
+                    port (DNAT).
+                  properties:
+                    container:
+                      description: container is the port the sandbox process listens
+                        on.
+                      maximum: 65535
+                      minimum: 1
+                      type: integer
+                    host:
+                      description: host is the port on the worker pod IP. 0 defaults
+                        to container.
+                      maximum: 65535
+                      minimum: 0
+                      type: integer
+                  required:
+                  - container
+                  type: object
+                type: array
               snapshotURI:
                 description: snapshotURI is the current checkpoint location (set once
                   one exists).
+                type: string
+              workerPod:
+                description: workerPod is the worker pod name currently bound (fencing
+                  key); empty when suspended.
                 type: string
               workerPodIP:
                 description: workerPodIP is set while Running/Resuming.

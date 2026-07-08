@@ -301,6 +301,14 @@ func main() {
 		setupLog.Error(err, "Failed to add worker prune loop")
 		os.Exit(1)
 	}
+	// Durable-state recovery: rebuild the Valkey session cache from the durable
+	// Session CRs (etcd) on startup, so a Valkey restart doesn't orphan checkpoints
+	// or lose the session index (PRD-durable-assignment-state). Leader-only via the
+	// manager's leader election; worker/idle entries self-heal via the informer.
+	if err := mgr.Add(controller.NewSessionRebuilder(mgr.GetClient(), kv, resumeNamespace)); err != nil {
+		setupLog.Error(err, "Failed to add session rebuilder")
+		os.Exit(1)
+	}
 
 	// Internal /resume endpoint (control-plane half of the request path, TDD §5.1).
 	// P1: plain HTTP; P1.5 wraps with SPIRE mTLS. Uses the manager's cached client.

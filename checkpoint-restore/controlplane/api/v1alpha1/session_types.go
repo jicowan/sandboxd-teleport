@@ -95,7 +95,33 @@ type SessionStatus struct {
 	// +optional
 	Image string `json:"image,omitempty"`
 
-	// lastActiveAt is the last request time stamped by the router (O3).
+	// The following fields make the Session.status a LOSSLESS durable mirror of the
+	// KV assignment entry, so the Valkey cache can be rebuilt after a restart
+	// (PRD-durable-assignment-state) without re-resolving a possibly-changed
+	// template. They mirror the resumeapi.SessionEntry.
+
+	// pool is the WarmPool the session's worker is claimed from.
+	// +optional
+	Pool string `json:"pool,omitempty"`
+
+	// workerPod is the worker pod name currently bound (fencing key); empty when suspended.
+	// +optional
+	WorkerPod string `json:"workerPod,omitempty"`
+
+	// ports are the session's exposed port mappings (replayed on restore).
+	// +optional
+	Ports []PortMap `json:"ports,omitempty"`
+
+	// health is the readiness/restart config (replayed on restore).
+	// +optional
+	Health *Health `json:"health,omitempty"`
+
+	// iamRoleArn is the session's assumable AWS role (replayed on restore).
+	// +optional
+	IAMRoleARN string `json:"iamRoleArn,omitempty"`
+
+	// lastActiveAt is the last request time stamped by the router (O3). Mirrored
+	// coarsely (on transitions, not every request) to avoid write amplification.
 	// +optional
 	LastActiveAt *metav1.Time `json:"lastActiveAt,omitempty"`
 

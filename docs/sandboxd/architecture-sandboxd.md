@@ -112,8 +112,12 @@ guard, since it is the single writer but must be safe across restarts/HA.
 
 ### Valkey (assignment table)
 
-An in‑cluster Redis‑compatible KV store — the source of truth for *assignment*,
-not a cluster/resource model. Keys:
+An in‑cluster Redis‑compatible KV store — the **hot cache** for *assignment*, not a
+cluster/resource model. It is authoritative during normal operation (CAS‑on‑version,
+single writer), but it is **not the durable source of truth**: session state is
+mirrored to `Session.status` in etcd and the cache is rebuilt from there on operator
+startup (see "Durability" below), so a Valkey restart doesn't lose the session index
+or orphan S3 checkpoints. Keys:
 
 | Key | Value | Writer |
 |-----|-------|--------|
@@ -222,8 +226,10 @@ Absent ───────────────► Resuming ──► Runni
 - **Suspended → Resuming → Running:** the next request teleports the session onto
   any idle worker (possibly a different node) by restoring the snapshot.
 
-The `Session` CRD's `.status.phase` mirrors this (`Absent`/`Running`/`Suspending`/
-`Suspended`/`Resuming`), projected from the authoritative KV entry.
+The `Session` CRD's `.status` mirrors this (`phase` ∈ `Absent`/`Running`/
+`Suspending`/`Suspended`/`Resuming`, plus the durable assignment fields), written on
+each transition — it is the durable copy the cache is rebuilt from (see
+"Durability").
 
 ## Consistency and HA
 
@@ -236,6 +242,30 @@ The `Session` CRD's `.status.phase` mirrors this (`Absent`/`Running`/`Suspending
   record; the router's fast path applies the same check. A worker that dies has its
   KV entry removed by the informer (or the 30s prune), after which routing
   re‑resumes onto a healthy worker.
+
+## Durability (Kubernetes as truth, Valkey as cache)
+
+Valkey has no persistence, so it must not be the only copy of session state. The
+operator therefore:
+
+- **Mirrors** each authoritative session transition into `Session.status` (etcd) —
+  a `SessionMirror` fired at the KV write choke points. `Session.status` is a
+  lossless mirror (phase, pool, workerPod, workerPodIP, snapshotURI, image, ports,
+  health, iamRoleArn; `lastActiveAt` mirrored coarsely on transitions, not per
+  router stamp, to avoid write amplification). etcd is already durable + backed up.
+- **Rebuilds** the Valkey session cache from the `Session` CRs on startup
+  (`SessionRebuilder`, leader‑only Runnable): any `session:<sid>` missing from a
+  wiped cache is repopulated from its durable status; entries already present are
+  left alone (KV wins in normal operation). A `Suspended` session then
+  teleport‑resumes from its recovered `snapshotURI`.
+- **Worker/idle entries are not persisted** — they self‑heal via the pod informer +
+  prune loop, so only session records need durability.
+
+Consistency: KV is authoritative during normal operation; **etcd is authoritative
+on recovery** (a wiped cache is rebuilt from it). The mirror is best‑effort (a
+transient etcd error never fails the resume/suspend that already committed to KV;
+it self‑corrects on the next transition). See
+[PRD-durable-assignment-state.md](../PRD-durable-assignment-state.md).
 
 ## Scheduling model
 

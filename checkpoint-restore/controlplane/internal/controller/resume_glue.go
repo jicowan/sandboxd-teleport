@@ -119,7 +119,8 @@ func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, h
 		return sandboxdclient.New(podIP, httpClient)
 	}
 
-	return resume.New(kv, lookup, clientFor, planFor, opts)
+	return resume.New(kv, lookup, clientFor, planFor, opts).
+		WithMirror(NewSessionMirror(c, namespace))
 }
 
 // BuildSuspender wires resume.Suspender to the operator's cached client + KV.
@@ -150,7 +151,8 @@ func BuildSuspender(c client.Client, kv *assign.Client, namespace string, httpCl
 		}
 		return pol, nil
 	}
-	return resume.NewSuspender(kv, clientFor, policyFor, resume.SuspendOptions{})
+	return resume.NewSuspender(kv, clientFor, policyFor, resume.SuspendOptions{}).
+		WithMirror(NewSessionMirror(c, namespace))
 }
 
 // BuildCheckpointer wires resume.Checkpointer to the cached client + KV, resolving
