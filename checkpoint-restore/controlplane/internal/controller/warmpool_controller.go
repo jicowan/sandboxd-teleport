@@ -67,6 +67,14 @@ const (
 // Configurable so we don't hardcode a registry in code.
 var WorkerImage = "820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v40"
 
+// WorkerTerminationGracePeriodSeconds is the pod termination grace period for
+// worker pods. It must exceed the worst-case checkpoint-on-terminate time
+// (checkpoint + S3 upload) so kubelet doesn't SIGKILL a worker mid-checkpoint
+// when its pod is deleted (scale-in, drain, rollout). The worker's own drain
+// deadline (SANDBOXD_DRAIN_DEADLINE, default 100s) stays under this. 0 uses the
+// k8s default (30s) — too short for large sessions.
+var WorkerTerminationGracePeriodSeconds int64 = 120
+
 // WorkerConfig carries the deployment-time settings for provisioned worker pods
 // that aren't part of the WarmPool API (cluster-specific: S3 identity + bucket).
 // Defaults match the proven static worker-deploy.yaml.
@@ -221,6 +229,16 @@ func (r *WarmPoolReconciler) syncDeletionCosts(ctx context.Context, pool *corev1
 	return nil
 }
 
+// gracePeriod returns the worker pod termination grace period as a pointer
+// (nil when 0, letting k8s apply its default).
+func gracePeriod() *int64 {
+	if WorkerTerminationGracePeriodSeconds <= 0 {
+		return nil
+	}
+	g := WorkerTerminationGracePeriodSeconds
+	return &g
+}
+
 // desiredDeployment builds the worker Deployment for a pool, modeled on
 // sandboxd/worker-deploy.yaml, parameterized by pool name.
 func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool, tmpl *corev1alpha1.SandboxTemplate, replicas int32) *appsv1.Deployment {
@@ -273,11 +291,12 @@ func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool, tmpl
 					// drain/consolidation (and wedged a node-replace during testing).
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName:        r.Worker.ServiceAccount,
-					NodeSelector:              sched.NodeSelector,
-					Tolerations:               sched.Tolerations,
-					Affinity:                  sched.Affinity,
-					TopologySpreadConstraints: sched.TopologySpreadConstraints,
+					ServiceAccountName:            r.Worker.ServiceAccount,
+					TerminationGracePeriodSeconds: gracePeriod(),
+					NodeSelector:                  sched.NodeSelector,
+					Tolerations:                   sched.Tolerations,
+					Affinity:                      sched.Affinity,
+					TopologySpreadConstraints:     sched.TopologySpreadConstraints,
 					Containers: []corev1.Container{{
 						Name:            "sandboxd",
 						Image:           workerImage,

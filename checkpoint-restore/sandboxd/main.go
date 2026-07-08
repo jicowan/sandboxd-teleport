@@ -117,14 +117,33 @@ func main() {
 
 	srv := &http.Server{Addr: addr, Handler: withRequestLog(mux)}
 
-	// Graceful shutdown: on SIGTERM/SIGINT, stop accepting, drain, exit. We do NOT
-	// checkpoint-on-shutdown here (that's the control plane's decision); we just
-	// stop cleanly so kubelet's termination is orderly.
+	// Graceful shutdown: on SIGTERM/SIGINT, DRAIN-WAIT so the control plane can
+	// checkpoint-on-terminate. We do NOT checkpoint here ourselves (the operator is
+	// the sole KV writer and owns the session state machine); instead we keep the
+	// HTTP server serving so the operator's /suspend can land, and only shut down
+	// once the sandbox is gone (i.e. /suspend deleted it) or a drain deadline
+	// elapses. The deadline stays comfortably under the pod's terminationGracePeriod
+	// so kubelet never SIGKILLs us mid-checkpoint. If we hold no sandbox, exit fast.
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 		<-sig
-		log.Printf("shutdown: draining")
+		deadline := envDuration("SANDBOXD_DRAIN_DEADLINE", 100*time.Second)
+		log.Printf("shutdown: draining (deadline=%s, sandboxes=%d)", deadline, len(s.list()))
+		dctx, dcancel := context.WithTimeout(context.Background(), deadline)
+		defer dcancel()
+		t := time.NewTicker(1 * time.Second)
+		defer t.Stop()
+		for len(s.list()) > 0 {
+			select {
+			case <-dctx.Done():
+				log.Printf("shutdown: drain deadline reached with %d sandbox(es) still running; exiting", len(s.list()))
+				goto stop
+			case <-t.C:
+			}
+		}
+		log.Printf("shutdown: no sandboxes remain; exiting")
+	stop:
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		srv.Shutdown(ctx)

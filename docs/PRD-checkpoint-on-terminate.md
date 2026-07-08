@@ -1,10 +1,31 @@
 # PRD — checkpoint‑on‑terminate (don't lose a session when a worker dies)
 
-Status: **Proposed** (not scheduled). Decision‑ready spec; grounded in the shipped
-code on the `checkpoint-restore` branch. Companion to
+Status: **Implemented** (2026‑07‑08, operator `v15` + worker `v43`). Companion to
 [PRD-graceful-scale-in.md](PRD-graceful-scale-in.md): scale‑in ordering picks
 *which* worker dies; this makes a worker's death *lossless* when it holds a
 session. Related: [architecture-sandboxd.md](sandboxd/architecture-sandboxd.md).
+
+> **As built** (Design A, with two refinements to §5.3/§5):
+> - **No `preStop` hook.** The worker image is distroless (no shell), and an
+>   `httpGet` preStop only fires once (can't poll‑until‑drained). Instead the
+>   **worker's own SIGTERM handler drain‑waits** (`sandboxd/main.go`): on SIGTERM it
+>   keeps the HTTP server serving while it still holds a sandbox, so the operator's
+>   `/suspend` can land, and exits once the sandbox is gone or `SANDBOXD_DRAIN_DEADLINE`
+>   (default 100s, < the 120s grace period) elapses. Same effect as a preStop, no
+>   shell needed.
+> - **Terminate path `RemoveWorker`, not `ReleaseWorker`.** A new
+>   `Suspender.SuspendForTerminate(sid, pod, ip, pool)` mirrors idle‑suspend
+>   (Suspending → `/suspend` → Suspended+snapshotURI) but **removes** the worker
+>   entry instead of returning it to the idle pool — a dying worker must never be
+>   handed a new session. It's CAS‑idempotent (no‑ops if idle‑suspend already moved
+>   the session) and bounded by `SuspendDeadline`.
+> - **Trigger:** `WorkerDiscoveryReconciler` already sees a pod enter Terminating;
+>   if KV says the worker is busy it calls `SuspendForTerminate`. `WorkerImage`‑style
+>   `WorkerTerminationGracePeriodSeconds` var (default 120) sets the pod grace
+>   period on the operator‑generated Deployment (and `worker-deploy.yaml`). RBAC
+>   unchanged (operator already had what it needed). Verified live: deleting a busy
+>   aio‑pool worker → session Suspended with a fresh snapshot in ~5s → reconnect
+>   restored the pre‑delete marker file on a different worker.
 
 ## 1. Summary
 
@@ -202,8 +223,8 @@ new subsystem. Likely 1–2 PRs.
 
 | # | Question | Leaning |
 |---|----------|---------|
-| Q1 | Design A (operator‑driven via informer + preStop) or B (worker self‑checkpoints, operator reconciles)? | A — keeps the operator as sole KV writer and reuses the proven suspend flow. |
-| Q2 | `terminationGracePeriodSeconds` value / where configured? | Default 120s, overridable per template/pool (and a global operator default). |
-| Q3 | preStop implementation — poll KV state vs. call a worker endpoint that blocks until suspended? | Poll for `Suspended`/released with a deadline; simplest and observable. |
+| Q1 | Design A (operator‑driven via informer + preStop) or B (worker self‑checkpoints, operator reconciles)? | **RESOLVED → A** (operator sole KV writer, reuses suspend flow). |
+| Q2 | `terminationGracePeriodSeconds` value / where configured? | **RESOLVED → 120s** via `WorkerTerminationGracePeriodSeconds` var on the operator‑generated Deployment + `worker-deploy.yaml`. Per‑pool override deferred. |
+| Q3 | preStop implementation — poll KV state vs. call a worker endpoint that blocks until suspended? | **RESOLVED → neither; no preStop.** Distroless image has no shell and `httpGet` preStop fires once. The worker's SIGTERM handler drain‑waits until its sandbox is gone (or `SANDBOXD_DRAIN_DEADLINE`). |
 | Q4 | Recovery for a session stuck in `Suspending` after a grace overrun? | A reconcile/timeout returns it to a resumable state (treat as needs‑resume). |
 | Q5 | Skip the terminate checkpoint if a periodic checkpoint is very recent? | Optional optimization; default to always checkpointing on terminate. |

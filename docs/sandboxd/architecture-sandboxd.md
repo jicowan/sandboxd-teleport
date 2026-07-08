@@ -219,15 +219,23 @@ The `Session` CRD's `.status.phase` mirrors this (`Absent`/`Running`/`Suspending
   expected concurrent new‑session rate so new users find a warm worker (important
   for slow‑booting images: a saturated pool makes the first user eat a cold start
   and can `503`).
-- **Graceful scale‑in:** the operator stamps each worker pod with
-  `controller.kubernetes.io/pod-deletion-cost` — a low cost on idle workers and a
-  high cost on busy ones — so when a pool scales down (minIdle contraction, an HPA,
-  or a lowered `replicas`) the ReplicaSet controller deletes **idle** workers before
-  **busy** ones. The cost tracks each worker's KV busy/idle state in near‑real‑time
-  (re‑synced on every claim/release nudge). This is best‑effort ordering, not a
-  guarantee: if a scale‑in removes more pods than there are idle workers, busy ones
-  can still be deleted — making that case lossless is the separate
-  checkpoint‑on‑terminate work.
+- **Graceful scale‑in** has two layers:
+  - *Ordering:* the operator stamps each worker pod with
+    `controller.kubernetes.io/pod-deletion-cost` — low on idle workers, high on busy
+    ones — so a scale‑down (minIdle contraction, HPA, or lowered `replicas`) deletes
+    **idle** workers before **busy** ones. The cost tracks KV busy/idle state in
+    near‑real‑time (re‑synced on every claim/release nudge).
+  - *Losslessness:* when a **busy** worker's pod does terminate (scale‑in beyond the
+    idle count, node drain, rollout, eviction), **checkpoint‑on‑terminate** kicks in.
+    The `WorkerDiscoveryReconciler` sees the pod enter Terminating and drives the
+    suspend flow (`SuspendForTerminate`): the worker checkpoints the session to S3,
+    the operator marks it `Suspended` with the fresh snapshot and removes the worker.
+    The worker's SIGTERM handler drain‑waits (keeps serving until its sandbox is
+    gone, bounded by `SANDBOXD_DRAIN_DEADLINE`) within the pod's 120s termination
+    grace period, so the checkpoint completes before kubelet SIGKILLs it. The session
+    then teleport‑resumes on its next request with no lost state. Best‑effort: if the
+    checkpoint can't finish within the grace window (huge session, SIGKILL, node
+    loss) it degrades to resuming from the last snapshot — never a wedge.
 
 ## Trust boundaries and what's next
 

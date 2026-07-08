@@ -94,6 +94,69 @@ func TestSweepSkipsActiveSession(t *testing.T) {
 	}
 }
 
+func TestSuspendForTerminateCheckpointsAndRemovesWorker(t *testing.T) {
+	ctx := context.Background()
+	kv := testKV(t)
+	kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{
+		SID: "s1", State: resumeapi.StateRunning, Pool: "p",
+		WorkerPod: "w1", WorkerPodIP: "10.0.0.1", Image: "redis:7-alpine",
+	})
+	kv.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w1", Pool: "p", PodIP: "10.0.0.1", State: resumeapi.WorkerBusy, SID: "s1"})
+
+	var gotSuspend bool
+	srv := stubSuspendWorker(t, "sandboxes/s1/snap-term", &gotSuspend)
+	s := NewSuspender(kv, clientForStub(srv), nil, SuspendOptions{})
+
+	if err := s.SuspendForTerminate(ctx, "s1", "w1", "10.0.0.1", "p"); err != nil {
+		t.Fatal(err)
+	}
+	if !gotSuspend {
+		t.Fatal("expected /suspend to be called on terminate")
+	}
+	e, _ := kv.GetSession(ctx, "s1")
+	if e.State != resumeapi.StateSuspended || e.SnapshotURI != "sandboxes/s1/snap-term" || e.WorkerPodIP != "" {
+		t.Fatalf("post-terminate session wrong: %+v", e)
+	}
+	// The terminating worker must NOT be returned to the idle pool (it's dying).
+	idle, _ := kv.IdleWorkers(ctx, "p")
+	if len(idle) != 0 {
+		t.Fatalf("terminating worker must not be idle-returned, got %v", idle)
+	}
+	// And its worker entry is gone.
+	if _, err := kv.GetWorker(ctx, "w1"); err == nil {
+		t.Fatal("expected worker entry removed on terminate")
+	}
+}
+
+func TestSuspendForTerminateIdempotentWhenAlreadySuspended(t *testing.T) {
+	ctx := context.Background()
+	kv := testKV(t)
+	// idle-suspend already moved it: Suspended, no worker binding.
+	kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{
+		SID: "s1", State: resumeapi.StateSuspended, Pool: "p", SnapshotURI: "sandboxes/s1/snap-old",
+	})
+	kv.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w1", Pool: "p", PodIP: "10.0.0.1", State: resumeapi.WorkerBusy, SID: "s1"})
+
+	var gotSuspend bool
+	srv := stubSuspendWorker(t, "sandboxes/s1/snap-new", &gotSuspend)
+	s := NewSuspender(kv, clientForStub(srv), nil, SuspendOptions{})
+
+	if err := s.SuspendForTerminate(ctx, "s1", "w1", "10.0.0.1", "p"); err != nil {
+		t.Fatal(err)
+	}
+	if gotSuspend {
+		t.Fatal("must NOT re-checkpoint a session that's already Suspended")
+	}
+	e, _ := kv.GetSession(ctx, "s1")
+	if e.State != resumeapi.StateSuspended || e.SnapshotURI != "sandboxes/s1/snap-old" {
+		t.Fatalf("session should be untouched: %+v", e)
+	}
+	// worker still removed (pod is dying regardless)
+	if _, err := kv.GetWorker(ctx, "w1"); err == nil {
+		t.Fatal("expected worker entry removed even when session already suspended")
+	}
+}
+
 func TestSweepSkipsWhenPolicyNone(t *testing.T) {
 	ctx := context.Background()
 	kv := testKV(t)

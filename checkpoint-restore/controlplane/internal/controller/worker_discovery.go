@@ -47,6 +47,18 @@ type WorkerDiscoveryReconciler struct {
 	KV     *assign.Client
 	// Namespace is where worker pods live (used by the prune sweep to look them up).
 	Namespace string
+	// TerminateSuspender, if set, is invoked when a BUSY worker's pod enters
+	// Terminating: it checkpoints the session to S3 before the pod dies so the
+	// session teleport-resumes losslessly (checkpoint-on-terminate). Optional
+	// (nil disables the behavior — falls back to just removing the KV entry).
+	TerminateSuspender TerminateSuspender
+}
+
+// TerminateSuspender checkpoints a session on a terminating worker. Implemented
+// by resume.Suspender.SuspendForTerminate; an interface here to keep the
+// controller package free of a hard dependency and easy to fake in tests.
+type TerminateSuspender interface {
+	SuspendForTerminate(ctx context.Context, sid, workerPod, workerPodIP, pool string) error
 }
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
@@ -71,8 +83,26 @@ func (r *WorkerDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil // not a pool worker
 	}
 
-	// Terminating pod → treat as gone.
+	// Terminating pod → if it holds a live session, checkpoint that session to S3
+	// before the pod dies (checkpoint-on-terminate) so it teleport-resumes
+	// losslessly; otherwise just drop the KV entry. The worker's own SIGTERM
+	// handler drain-waits (keeps serving until its sandbox is gone) to give this
+	// /suspend time to land within the pod's termination grace period.
 	if pod.DeletionTimestamp != nil {
+		if r.TerminateSuspender != nil {
+			if w, gerr := r.KV.GetWorker(ctx, pod.Name); gerr == nil &&
+				w.State == resumeapi.WorkerBusy && w.SID != "" {
+				if err := r.TerminateSuspender.SuspendForTerminate(ctx, w.SID, w.Pod, w.PodIP, w.Pool); err != nil {
+					// Best-effort: log and still drop the entry. The pod is going away;
+					// a failed checkpoint degrades to today's behavior (resume from the
+					// last snapshot / cold start), never a wedge.
+					log.Error(err, "checkpoint-on-terminate failed", "pod", pod.Name, "sid", w.SID)
+					r.remove(ctx, pod.Name, pool)
+				}
+				// SuspendForTerminate already removed the worker entry on success.
+				return ctrl.Result{}, nil
+			}
+		}
 		r.remove(ctx, pod.Name, pool)
 		return ctrl.Result{}, nil
 	}

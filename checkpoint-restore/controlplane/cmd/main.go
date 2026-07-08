@@ -319,6 +319,12 @@ func main() {
 		setupLog.Error(err, "Failed to add suspend sweeper")
 		os.Exit(1)
 	}
+	// Checkpoint-on-terminate: when a busy worker's pod enters Terminating, the
+	// discovery reconciler drives this suspender to checkpoint the session to S3
+	// before the pod dies (safe scale-in / drain). Wired here since the suspender is
+	// built after discovery; SetupWithManager only registers, so the field is read
+	// once the manager starts.
+	discovery.TerminateSuspender = suspender
 
 	// Periodic background checkpoints (P5, opt-in per template): checkpoint
 	// long-lived Running sessions in place so a worker crash loses at most the

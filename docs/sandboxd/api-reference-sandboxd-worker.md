@@ -336,6 +336,7 @@ usually by the operator from the `SandboxTemplate`/global flags):
 | `SANDBOXD_STREAM_CONSOLE_MAX_BYTES` | `8388608` (8 MiB) | Cap on relayed console bytes per sandbox. |
 | `SANDBOXD_SUPERVISE_INTERVAL` | `10s` | Supervisor loop period (readiness/restart/idle). |
 | `SANDBOXD_GC_INTERVAL` | `5m` | Background on‑disk artifact GC period. |
+| `SANDBOXD_DRAIN_DEADLINE` | `100s` | On SIGTERM, how long the worker keeps serving (drain‑waits) so the operator can checkpoint‑on‑terminate before exit. Keep it under the pod's `terminationGracePeriodSeconds` (120s). |
 | `AWS_REGION` | (SDK default) | Region for S3 (via the AWS default credential/config chain → EKS Pod Identity). |
 
 S3 credentials come from the AWS default chain (EKS Pod Identity via the worker's

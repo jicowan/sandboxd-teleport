@@ -170,6 +170,59 @@ func (s *Suspender) suspendOne(ctx context.Context, e *resumeapi.SessionEntry, a
 	return err
 }
 
+// SuspendForTerminate checkpoints the session on a worker that is TERMINATING
+// (its pod is going away — scale-in, drain, rollout, eviction), so the session
+// teleport-resumes losslessly instead of dying with the pod. It mirrors the
+// idle-suspend flow (Suspending -> /suspend -> Suspended+snapshotURI) with two
+// differences:
+//
+//   - It targets a specific worker (pod/ip/pool/sid known from the WorkerEntry),
+//     not an idle-timed-out session.
+//   - It REMOVES the worker from KV rather than returning it to the idle pool: a
+//     terminating worker must never be handed a new session (it's about to die).
+//
+// It is idempotent under the CAS discipline: if idle-suspend already moved the
+// session to Suspending/Suspended, this no-ops on the missing Running state.
+// Bounded by SuspendDeadline so it can't hang a node drain.
+func (s *Suspender) SuspendForTerminate(ctx context.Context, sid, workerPod, workerPodIP, pool string) error {
+	ctx, cancel := context.WithTimeout(ctx, s.opts.SuspendDeadline)
+	defer cancel()
+
+	// Only a Running session on THIS worker is ours to checkpoint. If it's already
+	// Suspending/Suspended (idle-suspend beat us) or bound elsewhere, do nothing but
+	// still drop the dying worker's KV entry below.
+	cur, err := s.kv.GetSession(ctx, sid)
+	if err == nil && cur.State == resumeapi.StateRunning && cur.WorkerPod == workerPod {
+		if cerr := s.casSession(ctx, sid, func(se *resumeapi.SessionEntry) {
+			se.State = resumeapi.StateSuspending
+		}); cerr != nil {
+			return fmt.Errorf("mark suspending: %w", cerr)
+		}
+		resp, serr := s.clientFor(workerPodIP).Suspend(ctx, sid)
+		if serr != nil {
+			return fmt.Errorf("worker /suspend on terminate: %w", serr)
+		}
+		if cerr := s.casSession(ctx, sid, func(se *resumeapi.SessionEntry) {
+			se.State = resumeapi.StateSuspended
+			se.SnapshotURI = resp.Snapshot
+			if resp.Image != "" {
+				se.Image = resp.Image
+			}
+			se.WorkerPod = ""
+			se.WorkerPodIP = ""
+		}); cerr != nil {
+			return fmt.Errorf("mark suspended: %w", cerr)
+		}
+		metrics.SuspendsTotal.WithLabelValues("terminate", metrics.OutcomeSuccess).Inc()
+	}
+
+	// Remove the terminating worker from KV (NOT release to idle). Safe even if the
+	// session wasn't ours — the pod is going away regardless.
+	rerr := s.kv.RemoveWorker(ctx, workerPod, pool)
+	s.notify.PoolChanged(pool)
+	return rerr
+}
+
 // casSession mirrors the resume workflow's CAS-with-retry.
 func (s *Suspender) casSession(ctx context.Context, sid string, mutate func(*resumeapi.SessionEntry)) error {
 	const maxTries = 5
