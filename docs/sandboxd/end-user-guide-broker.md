@@ -104,6 +104,39 @@ Any client that supports **streamable‑HTTP MCP with OAuth 2.0** works. Configu
 Every request must carry `Authorization: Bearer <token>`; the front door rejects
 anything unauthenticated with `401`.
 
+## First‑connect note for Claude Code: "Trusted Hosts"
+
+On a **brand‑new machine/user**, the first time Claude Code connects it tries to
+register itself with the identity provider (OAuth Dynamic Client Registration).
+Claude Code guards this behind a **"Trusted Hosts"** allowlist, so on first connect
+you may see:
+
+```
+SDK auth failed: Policy 'Trusted Hosts' rejected request to
+client-registration service. Details: Host not trusted.
+```
+
+This is a **client‑side safety check in Claude Code**, not a problem with your
+account or password — it happens *before* you're even asked to log in. It means
+Claude Code doesn't yet trust the identity host (`keycloak.jicomusic.com`) for
+client registration.
+
+**Fix:** tell Claude Code to trust the identity host, then reconnect. Set this
+environment variable **before launching Claude Code** — put it in your shell
+profile (`~/.zshrc` or `~/.bashrc`) so it persists:
+
+```sh
+export CLAUDE_CODE_OAUTH_TRUSTED_HOSTS="keycloak.jicomusic.com"
+```
+
+Then restart Claude Code and authenticate again. Existing users who connected
+earlier won't see this — their client is already registered/cached; it only bites
+a genuinely first‑time connection.
+
+> If your organization manages Claude Code centrally, your admin can set this in
+> managed settings so new users never hit it — ask them rather than setting it
+> yourself.
+
 ## Using the tools
 
 Once connected, your client lists the tools you're authorized for. Common ones:
@@ -146,6 +179,7 @@ retry usually succeeds.
 | `403 Forbidden` right after login | Your account isn't in the required group (`sandbox-users`), or the token didn't come through the gateway. | Ask an admin to add you to `sandbox-users`. |
 | First call times out | Cold start / restore (~45s). | Retry once; later calls are fast. |
 | Login browser window never redirects back | OAuth callback blocked (corporate proxy, non‑loopback redirect). | Ensure your client can open a localhost callback; try Claude Code which uses a loopback redirect. |
+| `Policy 'Trusted Hosts' rejected request to client-registration service. Host not trusted` (Claude Code, first connect) | Claude Code's client‑side guard blocks OAuth client registration against an untrusted identity host — happens before login, unrelated to your account. | Set `CLAUDE_CODE_OAUTH_TRUSTED_HOSTS="keycloak.jicomusic.com"` before launching Claude Code and reconnect. See "First‑connect note" above. |
 
 If problems persist, capture the exact error your client shows and share it with
 your administrator — they can correlate it against the gateway/broker logs.
