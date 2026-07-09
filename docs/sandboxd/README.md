@@ -34,7 +34,8 @@ describes the live reference cluster it says so explicitly.
 | [PRD-sandbox-iam-credentials.md](../PRD-sandbox-iam-credentials.md) | **Implemented** | Let a sandboxed workload assume an AWS IAM role via a container‑credentials endpoint — per‑session, auto‑refreshed, teleport‑safe, never the worker's identity. |
 | [PRD-delegated-agent-access.md](../PRD-delegated-agent-access.md) | Proposed | Propagate the caller's identity past the broker into the sandbox so an agent/MCP server acts **on behalf of the user** against app APIs / other MCP servers (RFC 8693 token exchange, per‑request; app‑layer, not AWS). Phase 2: offline delegation. |
 | [PRD-durable-assignment-state.md](../PRD-durable-assignment-state.md) | **Implemented** | Make Kubernetes (`Session.status` in etcd) the durable source of truth and Valkey a rebuildable cache, so a Valkey restart doesn't orphan S3 checkpoints / lose the session index. |
-| [PRD-control-plane-scalability.md](../PRD-control-plane-scalability.md) | Proposed | Remove the control plane's O(N)-on-a-timer sweeper scans and bound the etcd status-mirror write rate under session churn (index suspend candidates, coalesce mirrors, EndpointSlice discovery). Gated on real load. |
+| [PRD-control-plane-scalability.md](../PRD-control-plane-scalability.md) | **Implemented** (hot paths) | Removed the control plane's O(N)-on-a-timer sweeper scans and bounded the etcd status-mirror write rate under session churn (indexed O(due) sweeps, mirror only durability-critical transitions, O(1) per-pool counts). Remaining follow-ups gated on real load. |
+| [PRD-session-garbage-collection.md](../PRD-session-garbage-collection.md) | **Implemented** | Reap a dead session's whole footprint (S3 snapshot + Valkey entry + `Session` CR) across all dead-session classes: TTL, abandoned (dead-worker zombie), orphan-S3, orphan-CR. Ownership-aware CR deletion; dry-run-first. |
 
 ## The whole picture in one diagram
 

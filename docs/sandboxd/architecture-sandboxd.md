@@ -105,8 +105,21 @@ Responsibilities:
   O(N)**: they read Redis ZSET due‑indexes (`idx:suspend:due`, `idx:checkpoint:due`)
   scored by each session's deadline, so a pass touches only sessions actually due,
   not the whole table (`--sweep-interval-seconds`, default 30s, staggered).
-- **GC.** Optional TTL/orphan snapshot reaper, running under a *separate,
-  least‑privilege* S3 identity (list + delete on `sandboxes/*` only).
+- **Session GC.** Optional reaper of a dead session's **whole footprint** — the S3
+  snapshot, the Valkey `session:*` entry (+ its due‑index membership), and the
+  `Session` CR — running under a *separate, least‑privilege* S3 identity (list +
+  delete on `sandboxes/*` only). Four passes: **TTL** (a Suspended session past its
+  retention — per‑session `ttlAfterSuspendSeconds`, else the operator default
+  `--default-ttl-after-suspend-seconds`); **abandoned** (a non‑Suspended entry whose
+  bound worker is gone / no longer holds it — the same `workerHolds` fence the router
+  uses — idle past `--abandoned-grace-seconds`); **orphan‑S3** (a snapshot prefix no
+  session references); and **orphan‑CR** (an operator‑owned `Session` CR with a dead
+  phase and no KV entry). CR deletion is ownership‑aware: only CRs the operator
+  lazily created (labeled `sandboxd.io/created-by=operator`) are **deleted**;
+  user‑declared Sessions are only tombstoned to `Absent`, never deleted.
+  `--gc-dry-run` (**default on** when GC is enabled) classifies + records candidates
+  without mutating anything, so the classification can be validated against a live
+  fleet before arming (set `SANDBOXD_GC_DRY_RUN=0` to arm).
 - **Lazy Session creation.** On a resume for an unknown session id, the operator
   creates a `Session` object from the pool hint header.
 

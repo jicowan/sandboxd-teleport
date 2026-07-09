@@ -1,12 +1,29 @@
 # PRD — session garbage collection (reap the full session footprint)
 
-Status: **Proposed** (analysis + plan; grounded in the shipped code and the live
-test env on `checkpoint-restore`). Decision‑ready.
-
-Related: [PRD-control-plane-scalability.md](PRD-control-plane-scalability.md),
+Status: **Implemented + verified live** (2026‑07‑09, operator `v22`). Related:
+[PRD-control-plane-scalability.md](PRD-control-plane-scalability.md),
 [PRD-durable-assignment-state.md](PRD-durable-assignment-state.md),
 [architecture-sandboxd.md](sandboxd/architecture-sandboxd.md),
 [admin-guide-crds.md](sandboxd/admin-guide-crds.md).
+
+> **As built (2026‑07‑09, operator v22).** The `gc.Collector`
+> (`internal/gc/gc.go`) now reaps the whole session footprint across four passes:
+> **TTL** (Suspended past retention — per‑session `ttlAfterSuspendSeconds` else
+> `--default-ttl-after-suspend-seconds`; now also deletes KV + CR, not just S3),
+> **abandoned** (non‑Suspended entry whose worker is gone / no longer holds it, idle
+> past `--abandoned-grace-seconds` default 1h → KV + CR), **orphan‑S3** (unchanged),
+> and **orphan‑CR** (operator‑owned CR, dead phase, no KV → delete). CR deletion is a
+> new `controller.SessionReaper` that deletes **only** operator‑owned CRs (label
+> `sandboxd.io/created-by=operator`, stamped by `planFor` on lazy create) and
+> tombstones user‑declared CRs to `Absent`; the delete is guarded by
+> UID+resourceVersion. `--gc-dry-run` **defaults true** (classify + record via
+> `sandboxd_gc_candidates` / `sandboxd_gc_reaped_total`, mutate nothing). Migration:
+> `hack/backfill-created-by-label.sh`. **Verified live:** in dry‑run the classifier
+> matched §3 exactly against 16 real CRs (abandoned:6, orphanCR:8, ttlExpired:0);
+> then armed (`SANDBOXD_GC_DRY_RUN=0`, `--default-ttl-after-suspend-seconds=604800`)
+> and the fleet dropped 16 → 6, reaping the 14 dead sessions' CRs + KV entries and
+> leaving the 5 Suspended + 1 live session untouched. The design/analysis below is
+> preserved as written.
 
 ## 1. Summary
 

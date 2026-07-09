@@ -228,10 +228,13 @@ kubectl get pods -n sandboxd-controlplane-system
 | `--max-concurrent-resumes` | `SANDBOXD_MAX_CONCURRENT_RESUMES` | `0` (unlimited) | Backpressure semaphore on concurrent resumes. |
 | `--resume-deadline-seconds` | `SANDBOXD_RESUME_DEADLINE_SECONDS` | `90` | Resume/warm‑up deadline. Must exceed your image's cold start. |
 | `--sweep-interval-seconds` | `SANDBOXD_SWEEP_INTERVAL_SECONDS` | `30` | Idle‑suspend / periodic‑checkpoint sweep period. Sweeps are O(due) (indexed), so this is a granularity knob, not a scan‑cost one; the checkpoint sweep runs a half‑interval offset to avoid lockstep. |
-| `--enable-checkpoint-gc` | `SANDBOXD_ENABLE_GC` (`=1`) | `false` | Enable snapshot GC (requires `--worker-bucket`). |
-| `--checkpoint-gc-interval-seconds` | `SANDBOXD_GC_INTERVAL_SECONDS` | `300` | GC period. |
+| `--enable-checkpoint-gc` | `SANDBOXD_ENABLE_GC` (`=1`) | `false` | Enable session GC — TTL + abandoned + orphan S3/CR reaping (requires `--worker-bucket`). |
+| `--checkpoint-gc-interval-seconds` | `SANDBOXD_GC_INTERVAL_SECONDS` | `300` | GC sweep period. |
+| `--gc-dry-run` | `SANDBOXD_GC_DRY_RUN` (`=1`) | `true` | GC classifies + records candidates (logs + `sandboxd_gc_candidates` / `sandboxd_gc_reaped_total`) but **mutates nothing**. Set to `0` to arm actual reaping. |
+| `--default-ttl-after-suspend-seconds` | `SANDBOXD_DEFAULT_TTL_AFTER_SUSPEND_SECONDS` | `0` | Default retention for a Suspended session's checkpoint when the `Session` sets no `ttlAfterSuspendSeconds`. `0` = keep forever. |
+| `--abandoned-grace-seconds` | `SANDBOXD_ABANDONED_GRACE_SECONDS` | `3600` | How long a non‑Suspended session (or orphan CR) must look dead before GC reaps it. `0` disables the abandoned + orphan‑CR passes. |
 | `--leader-elect` | — | `false` | Leader election (enable for HA). |
-| `--metrics-bind-address` | — | `0` (off) | Prometheus metrics addr. Enable to export `sandboxd_*` metrics (resumes, suspends, pool workers, sweep duration/due). |
+| `--metrics-bind-address` | — | `0` (off) | Prometheus metrics addr. Enable to export `sandboxd_*` metrics (resumes, suspends, pool workers, sweep duration/due, GC candidates/reaped). |
 
 ### Router flags reference
 
@@ -272,21 +275,54 @@ kubectl get wp -n default
 
 See [admin-guide-crds.md](admin-guide-crds.md) for every template/pool field.
 
-## Step 6 — (Optional) Snapshot GC
+## Step 6 — (Optional) Session GC
 
-GC deletes expired/orphaned snapshots under a **separate, least‑privilege** S3
-identity — list + delete on `sandboxes/*` only, so the "privileged worker + delete"
-combination never coexists.
+GC reaps a dead session's **whole footprint** — the S3 snapshot, the Valkey
+`session:*` entry (+ its due‑index membership), and the `Session` CR — across every
+way a session goes dead. Four passes:
+
+- **TTL** — a `Suspended` session whose checkpoint is older than its retention
+  (per‑session `ttlAfterSuspendSeconds`, else `--default-ttl-after-suspend-seconds`).
+- **Abandoned** — a non‑`Suspended` entry whose bound worker is gone / no longer
+  holds it (the same `workerHolds` fence the router uses), idle past
+  `--abandoned-grace-seconds`. Catches zombie‑`Running` entries pointing at a dead
+  worker.
+- **Orphan‑S3** — a `sandboxes/<sid>/` snapshot prefix referenced by no session.
+- **Orphan‑CR** — an operator‑owned `Session` CR with a dead phase and no KV entry.
+
+CR deletion is **ownership‑aware**: only CRs the operator lazily created (labeled
+`sandboxd.io/created-by=operator`) are deleted; a **user‑declared** `Session` is only
+tombstoned to `Absent`, never deleted.
+
+S3 deletes run under a **separate, least‑privilege** S3 identity — list + delete on
+`sandboxes/*` only — so the "privileged worker + delete" combination never coexists.
 
 1. Create an operator GC IAM role granting only `s3:ListBucket` +
    `s3:DeleteObject` on `sandboxes/*` of the bucket, trust `pods.eks.amazonaws.com`.
    (No manifest ships for this — create it out‑of‑band.)
 2. Associate it to the **operator's** ServiceAccount (`sandboxd-operator`) via a
-   Pod Identity association.
-3. Enable GC on the operator: add `--enable-checkpoint-gc` (needs
-   `--worker-bucket`), optionally tune `--checkpoint-gc-interval-seconds`.
+   Pod Identity association. (CR deletes use the operator's existing RBAC, which
+   already grants `delete` on `sessions` — no change needed.)
+3. Enable GC on the operator: add `--enable-checkpoint-gc` (needs `--worker-bucket`),
+   optionally tune `--checkpoint-gc-interval-seconds`,
+   `--default-ttl-after-suspend-seconds`, and `--abandoned-grace-seconds`.
 
-GC is **off by default**.
+GC is **off by default**, and when enabled it starts in **dry‑run**
+(`--gc-dry-run=true`): it logs and counts what it *would* reap (per‑class candidate
+counts + the `sandboxd_gc_candidates` gauge) but deletes nothing. **Validate the
+classification against your fleet first** — watch the `gc-sweeper` "would reap
+session footprint" log line and confirm the per‑class counts match live/dead
+sessions — then arm reaping with `SANDBOXD_GC_DRY_RUN=0` (or `--gc-dry-run=false`).
+
+> **Migration:** Sessions created before this feature carry no
+> `sandboxd.io/created-by` label, so GC treats their CRs as user‑declared
+> (tombstone‑only). If they were in fact operator/broker‑created, label them with
+> `hack/backfill-created-by-label.sh` so the operator‑owned reap path applies.
+
+> **Setting a default TTL** (`--default-ttl-after-suspend-seconds`) is what makes the
+> TTL pass actually fire — with the default `0` (keep forever), suspended‑session
+> snapshots are retained indefinitely. Pick a retention that matches your
+> come‑back‑and‑resume promise (e.g. `604800` = 7 days).
 
 ## Step 6b — (Optional) Per‑session IAM credentials for sandboxes
 

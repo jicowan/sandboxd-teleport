@@ -162,7 +162,7 @@ Printer columns: `Phase` (`.status.phase`), `Worker` (`.status.workerPodIP`).
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
 | `idleTimeoutSeconds` | int | No | Overrides the template idle timeout. |
-| `ttlAfterSuspendSeconds` | int | No | How long the S3 checkpoint is retained after suspend before GC. |
+| `ttlAfterSuspendSeconds` | int | No | How long the S3 checkpoint is retained after suspend before GC reaps the whole session footprint (S3 snapshot + KV entry + this `Session` CR). Unset falls back to the operator's `--default-ttl-after-suspend-seconds`; if that is also `0`, the checkpoint is kept forever. |
 
 ### `.status` (durable mirror of the KV assignment entry)
 
