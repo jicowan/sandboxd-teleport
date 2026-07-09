@@ -6,6 +6,13 @@ code on the `checkpoint-restore` branch. Related:
 [architecture-broker.md](sandboxd/architecture-broker.md),
 [PRD-sandbox-iam-credentials.md](PRD-sandbox-iam-credentials.md) (the AWS analog).
 
+> **Update (2026‑07‑09):** investigated "can the router pass an optional JWT to the
+> sandbox generically?" Answer: **yes, and the router + worker need zero changes** —
+> the broker is the only seam (see §5.2, verified against the code). Added **Phase 0
+> — raw JWT passthrough** (§5.5) as the near‑zero‑code starting point for trusted
+> pools, with the token‑theft tradeoff stated plainly, plus a generic scope note
+> (any sandboxed workload MAY consume the token; sandboxd doesn't assume agents/MCP).
+
 ## 1. Summary
 
 Let an agent or MCP server running **inside a sandbox act on behalf of the calling
@@ -26,6 +33,13 @@ token‑lifetime problem. Autonomous/offline delegation is a harder Phase 2 (§9
 This is the application‑layer JWT‑delegation pattern (nested `act`/`obo` claims,
 RFC 8693 token exchange) — *not* AWS IAM. It complements the AWS path
 (`PRD-sandbox-iam-credentials.md`); use that for AWS resources, this for app/MCP.
+
+> **Scope note.** sandboxd is a **generic platform for running sandboxed pods** — an
+> agent or MCP server is one possible workload, not an assumption. This PRD uses
+> agent/MCP examples because delegation is most obviously useful there, but the
+> *mechanism* — propagate the caller's identity token into the sandbox as a header —
+> is workload‑agnostic. Any sandboxed workload MAY read the injected token; one that
+> ignores it is unaffected. Nothing below requires the workload to be an agent.
 
 ## 2. Background — where identity dies today
 
@@ -110,19 +124,36 @@ In `broker_sandboxd.py`, on each forwarded MCP request (`_forward`):
 Token exchange failures are non‑fatal to the request unless the pool requires
 delegation (config): fail closed only when the workload can't function without it.
 
-### 5.2 Router / worker: pass‑through, no interpretation
+### 5.2 Router / worker: pass‑through — verified to need **zero code changes**
 
-The router already proxies the MCP request to the sandbox's workload port; it
-simply **forwards the delegation header unchanged** (it stays MCP‑agnostic — it
-doesn't parse or depend on the token). The worker/DNAT path is untouched. No KV, no
-operator involvement — this is purely data‑plane header propagation, unlike the AWS
-credential vendor (which needed a control‑plane role + endpoint).
+Investigated 2026‑07‑09 against the shipped code. The propagation path from the
+broker into the sandbox already carries an arbitrary header end‑to‑end, so **neither
+the router nor the worker needs any change** to deliver a token to the workload:
+
+- **Router (`internal/router/router.go`):** it proxies via `r.Clone(ctx)` →
+  `httputil.ReverseProxy`. Go's `ReverseProxy` copies **all** request headers to the
+  upstream and strips only the hop‑by‑hop ones (`Connection`, `Keep‑Alive`,
+  `Transfer‑Encoding`, …). It never touches `Authorization` or any `X‑*` header. The
+  router's identity code (`session.go`) only *reads* `X‑Session‑ID`/`X‑Session‑Pool`
+  and *writes* none — a grep confirms no `Header.Del`/`Header.Set` on the proxied
+  request. So any header the broker adds is forwarded to the worker unchanged, for
+  free. The router stays protocol‑agnostic — it doesn't parse or depend on the token.
+- **Worker (`sandboxd/network.go`):** the worker delivers inbound traffic to the
+  sandbox via **nftables DNAT** (`podIP:hostPort → interiorIP:containerPort`) — pure
+  kernel networking, no userspace proxy in the path. It is completely transparent to
+  HTTP headers, so the token reaches the sandboxed workload's listener untouched.
+
+Net: this is purely data‑plane header propagation originating at the broker — no KV,
+no operator involvement, no new endpoint, unlike the AWS credential vendor (which
+needed a control‑plane role + a link‑local vending endpoint). **The entire feature is
+"the broker adds one header."**
 
 > Trust note: the router forwarding a bearer token into the sandbox is only safe
-> because the sandbox is the intended audience and the token is downscoped +
-> short‑lived. This interacts with the deferred **P1.5** hardening (router trusting
-> headers, mTLS worker↔router) — delegation should ship with or after P1.5 so the
-> propagation channel is authenticated.
+> because the sandbox is the intended audience and (for Phase 1) the token is
+> downscoped + short‑lived. This interacts with the deferred **P1.5** hardening
+> (router trusting headers, mTLS worker↔router) — token forwarding should ship with
+> or after P1.5 so the propagation channel is authenticated. This matters *more* for
+> Phase 0 raw passthrough (§5.5), where the forwarded token is the user's full JWT.
 
 ### 5.3 Sandbox workload: reads the token (cooperation required)
 
@@ -140,11 +171,47 @@ follow the same contract.)
 ### 5.4 Configuration / opt‑in
 
 - Per‑pool via `SandboxTemplate` (e.g. `spec.delegation.enabled` + the target
-  audience/scopes the pool's agent needs), mirroring how `iam.roleArn` is per‑pool.
+  audience/scopes the pool's workload needs), mirroring how `iam.roleArn` is per‑pool.
   Off by default.
-- The set of scopes the agent may request is **operator‑declared** (not chosen by
+- The set of scopes that may be requested is **operator‑declared** (not chosen by
   the untrusted workload); the broker filters to `requested ∩ user‑has` at exchange
   time.
+
+### 5.5 Phase 0 — raw JWT passthrough (simplest starting point; opt‑in)
+
+Because §5.2 proved the propagation path needs **no** router/worker changes, the
+smallest possible increment — ahead of the RFC 8693 exchange in §5.1 — is for the
+broker to forward the **user's own validated JWT** into the sandbox unchanged, as an
+opt‑in per‑pool header. No token exchange, no Keycloak config beyond what the broker
+already does to validate the inbound token.
+
+- **What it delivers:** the sandboxed workload — **whatever it is** (sandboxd is a
+  generic platform for running sandboxed pods; there is no assumption that an agent or
+  MCP server runs inside) — receives a verifiable token identifying the calling user
+  for the current request. A workload that wants caller identity or a user credential
+  can read and validate it; a workload that ignores it is unaffected.
+- **Mechanism:** in `broker_sandboxd.py._forward`, when the pool opts in, add
+  `X‑Delegated‑Authorization: Bearer <the inbound user JWT>` (and optionally
+  `X‑On‑Behalf‑Of: <subject>`). The broker already holds the validated token. The
+  router forwards it and the worker DNATs it through, both unchanged (§5.2).
+- **Opt‑in, off by default:** gated by a `SandboxTemplate` field (§5.4). When off,
+  behavior is unchanged (no identity forwarded) — the safe default.
+
+**Why Phase 0 is not the safe end state (the tradeoff, stated plainly):** the raw
+user JWT is *not* downscoped or audience‑bound to the sandbox. It carries the user's
+full scopes/groups, has the router audience, and is valid for its full lifetime
+(~1h). Handing it to an **untrusted, multi‑tenant sandbox** means a compromised or
+malicious workload can **replay the user's full authority** anywhere that token is
+accepted, for the rest of its lifetime. That is exactly the confused‑deputy /
+token‑theft risk §7 calls out, and it is why the real Phase 1 does RFC 8693
+downscoping (agent‑needs ∩ user‑has, audience‑bound, short‑lived) before injection.
+
+**So Phase 0 is appropriate only for trusted pools** — e.g. a first‑party workload
+image the operator controls, or a dev/test pool — **and must ship with or after
+P1.5** (the router→worker hop is unauthenticated today; forwarding the user's full
+bearer token over it is the worst case for interception). It is a stepping stone that
+exercises the propagation path and the per‑pool opt‑in with near‑zero code, not a
+substitute for the downscoped exchange for untrusted or arbitrary‑image pools.
 
 ## 6. Authorization gate (shared with BYOC / IAM)
 
@@ -220,11 +287,16 @@ to the calling user, scoped to the user's permissions, with no user token stored
 
 ## 11. Effort estimate
 
-Medium (Phase 1). Mostly broker work (RFC 8693 exchange + header injection) + a
-`SandboxTemplate.spec.delegation` field + router header pass‑through (nearly free) +
-docs/recipe for the workload contract. No new control‑plane component (contrast the
-AWS vendor). Pairs with P1.5 for the propagation channel. Phase 2 is a separate,
-larger effort.
+- **Phase 0 (raw passthrough, §5.5): small.** Broker adds one opt‑in header + a
+  `SandboxTemplate.spec.delegation.enabled` field. Router/worker: **zero changes**
+  (§5.2, verified). No Keycloak work beyond existing inbound validation. Appropriate
+  for trusted pools; ship with/after P1.5.
+- **Phase 1 (downscoped, §5.1): medium.** Adds RFC 8693 token exchange at Keycloak +
+  the scope‑downscoping config on top of Phase 0's plumbing. Still no new
+  control‑plane component (contrast the AWS vendor). Pairs with P1.5 for the
+  propagation channel.
+- **Phase 2 (offline, §9): large, separate PRD** — the durable‑grant / refresh‑authority
+  core is unsolved.
 
 ## 12. Open questions
 
@@ -236,3 +308,4 @@ larger effort.
 | Q4 | Ship before, with, or after P1.5? | With/after — the propagation channel should be authenticated (mTLS + NetworkPolicy) before forwarding bearer tokens to workers. |
 | Q5 | Does the sandbox get the token every request, or cached for the MCP session? | Every request (per‑request lifetime is the whole point); revisit only if perf demands. |
 | Q6 | Phase 2 refresh authority: broker holds an offline grant vs. a delegation service? | Defer to the Phase 2 PRD. |
+| Q7 | Start with Phase 0 raw passthrough or go straight to downscoped Phase 1? | Phase 0 is fine to exercise the path on a **trusted** pool (near‑zero code); it is **not** safe for untrusted/arbitrary‑image pools — those need Phase 1 downscoping. Both share the same broker seam + opt‑in field, so Phase 0 → Phase 1 is additive. |
