@@ -89,6 +89,78 @@ func (m *SessionMirror) Delete(ctx context.Context, sid string) {
 	}
 }
 
+// SessionReaper removes the durable Session CR when GC decides a session is dead
+// (PRD-session-garbage-collection §6.2). It is the CR-deleting counterpart to
+// SessionMirror: where the mirror keeps status in sync and the mirror's Delete
+// only tombstones to Absent (reset), the reaper actually deletes the object — but
+// ONLY when the CR is operator-owned (lazy-created, carrying
+// LabelCreatedBy=CreatedByOperator). A user-declared Session is never deleted by
+// GC; the reaper tombstones it to Absent instead, leaving the object the user owns
+// in place. All operations are best-effort and idempotent (a partial reap self-
+// heals on the next GC sweep).
+type SessionReaper struct {
+	client    client.Client
+	namespace string
+	dryRun    bool
+}
+
+// NewSessionReaper builds a reaper. dryRun=true logs the intended action without
+// mutating anything (validation before arming; PRD §7/§8).
+func NewSessionReaper(c client.Client, namespace string, dryRun bool) *SessionReaper {
+	return &SessionReaper{client: c, namespace: namespace, dryRun: dryRun}
+}
+
+// Reap removes (operator-owned) or tombstones (user-owned) the Session CR for sid.
+// Returns (deleted, error): deleted=true when an operator-owned CR was (or, in dry-
+// run, would be) deleted; false when the CR was tombstoned, absent, or user-owned.
+// Missing CR is not an error (already gone).
+func (r *SessionReaper) Reap(ctx context.Context, sid string) (bool, error) {
+	if sid == "" {
+		return false, nil
+	}
+	log := logf.FromContext(ctx).WithName("session-reaper")
+	var s corev1alpha1.Session
+	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: sid}, &s); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil // already gone
+		}
+		return false, err
+	}
+	operatorOwned := s.Labels[LabelCreatedBy] == CreatedByOperator
+	if !operatorOwned {
+		// User-declared CR: never delete; tombstone to Absent so it stops looking live.
+		if s.Status.Phase == resumeapi.StateAbsent {
+			return false, nil
+		}
+		if r.dryRun {
+			log.Info("dry-run: would tombstone user-owned Session to Absent", "sid", sid)
+			return false, nil
+		}
+		s.Status = corev1alpha1.SessionStatus{Phase: resumeapi.StateAbsent, Conditions: s.Status.Conditions}
+		if err := r.client.Status().Update(ctx, &s); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if r.dryRun {
+		log.Info("dry-run: would DELETE operator-owned Session CR", "sid", sid, "phase", s.Status.Phase)
+		return true, nil
+	}
+	// Delete guarded by resourceVersion (Preconditions) so we never race a
+	// concurrent update into deleting a CR that just came back to life.
+	if err := r.client.Delete(ctx, &s, client.Preconditions{
+		UID:             &s.UID,
+		ResourceVersion: &s.ResourceVersion,
+	}); err != nil {
+		if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+			return false, nil // already gone / changed under us; next sweep re-evaluates
+		}
+		return false, err
+	}
+	log.Info("reaped operator-owned Session CR", "sid", sid, "phase", s.Status.Phase)
+	return true, nil
+}
+
 // applyEntryToStatus maps a KV SessionEntry onto Session.status (the lossless
 // durable mirror). lastActiveAt is mirrored coarsely (it rides transitions here,
 // not every router stamp) to avoid write amplification.

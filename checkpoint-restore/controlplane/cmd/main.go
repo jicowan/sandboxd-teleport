@@ -37,8 +37,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -138,9 +138,18 @@ func main() {
 	var enableGC bool
 	var gcIntervalSec int
 	flag.BoolVar(&enableGC, "enable-checkpoint-gc", envOr("SANDBOXD_ENABLE_GC", "") == "1",
-		"Enable S3 checkpoint GC (TTL + orphans). Off by default (deletes data; needs scoped S3 role).")
+		"Enable session GC (TTL + abandoned + orphan S3/CR). Off by default (deletes data; needs scoped S3 role).")
 	flag.IntVar(&gcIntervalSec, "checkpoint-gc-interval-seconds", envInt("SANDBOXD_GC_INTERVAL_SECONDS", 300),
-		"Checkpoint GC sweep interval in seconds.")
+		"Session GC sweep interval in seconds.")
+	var gcDefaultTTLSec int
+	flag.IntVar(&gcDefaultTTLSec, "default-ttl-after-suspend-seconds", envInt("SANDBOXD_DEFAULT_TTL_AFTER_SUSPEND_SECONDS", 0),
+		"Default retention for a suspended session's checkpoint when the Session sets no ttlAfterSuspendSeconds. 0 = keep forever (today's behavior).")
+	var gcAbandonedGraceSec int
+	flag.IntVar(&gcAbandonedGraceSec, "abandoned-grace-seconds", envInt("SANDBOXD_ABANDONED_GRACE_SECONDS", 3600),
+		"How long a non-suspended session (or orphan CR) must look dead before GC reaps it. 0 = disable the abandoned + orphan-CR passes.")
+	var gcDryRun bool
+	flag.BoolVar(&gcDryRun, "gc-dry-run", envOr("SANDBOXD_GC_DRY_RUN", "1") == "1",
+		"GC classifies + records candidates (metrics/logs) but mutates NOTHING. Default true — set to 0 to arm actual reaping.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -358,16 +367,22 @@ func main() {
 			setupLog.Error(nil, "checkpoint GC enabled but no --worker-bucket set")
 			os.Exit(1)
 		}
-		col, err := controller.BuildCollector(context.Background(), mgr.GetClient(), kv, resumeNamespace, workerBucket)
+		col, err := controller.BuildCollector(context.Background(), mgr.GetClient(), kv, resumeNamespace, controller.GCConfig{
+			Bucket:                workerBucket,
+			DefaultTTLSeconds:     gcDefaultTTLSec,
+			AbandonedGraceSeconds: gcAbandonedGraceSec,
+			DryRun:                gcDryRun,
+		})
 		if err != nil {
-			setupLog.Error(err, "Failed to build checkpoint collector")
+			setupLog.Error(err, "Failed to build session collector")
 			os.Exit(1)
 		}
 		if err := controller.AddGCSweeper(mgr, col, time.Duration(gcIntervalSec)*time.Second); err != nil {
 			setupLog.Error(err, "Failed to add GC sweeper")
 			os.Exit(1)
 		}
-		setupLog.Info("checkpoint GC enabled", "bucket", workerBucket, "intervalSec", gcIntervalSec)
+		setupLog.Info("session GC enabled", "bucket", workerBucket, "intervalSec", gcIntervalSec,
+			"defaultTTLSec", gcDefaultTTLSec, "abandonedGraceSec", gcAbandonedGraceSec, "dryRun", gcDryRun)
 	}
 	// +kubebuilder:scaffold:builder
 

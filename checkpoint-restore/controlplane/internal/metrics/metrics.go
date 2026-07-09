@@ -88,13 +88,30 @@ var (
 		Name: "sandboxd_sweep_due",
 		Help: "Sessions found due on the last sweep pass, by sweep (suspend|checkpoint).",
 	}, []string{"sweep"})
+
+	// GCReapedTotal counts session-footprint reaps by the store cleared and the
+	// session class that triggered it (PRD-session-garbage-collection §7). store is
+	// one of s3|kv|cr; class is ttl|abandoned|orphan-cr|orphan-s3. In dry-run these
+	// count what WOULD be reaped, tagged separately via GCCandidates.
+	GCReapedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "sandboxd_gc_reaped_total",
+		Help: "Session-footprint items reaped by GC, by store (s3|kv|cr) and class.",
+	}, []string{"store", "class"})
+
+	// GCCandidates is the number of items the last GC pass identified as reapable,
+	// by class — set regardless of dry-run, so a dry-run deploy still shows what the
+	// armed GC would remove (the validation signal before arming; PRD §8).
+	GCCandidates = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "sandboxd_gc_candidates",
+		Help: "Reapable items identified on the last GC pass, by class (ttl|abandoned|orphan-cr|orphan-s3).",
+	}, []string{"class"})
 )
 
 // register wires everything into the controller-runtime registry exactly once.
 func init() {
 	ctrlmetrics.Registry.MustRegister(
 		PoolWorkers, ResumesTotal, ResumeDuration, SuspendsTotal, CheckpointsTotal,
-		SweepDuration, SweepDue,
+		SweepDuration, SweepDue, GCReapedTotal, GCCandidates,
 	)
 }
 

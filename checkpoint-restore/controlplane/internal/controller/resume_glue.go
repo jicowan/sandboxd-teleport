@@ -27,8 +27,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	corev1alpha1 "github.com/jicowan/aio-sandbox/controlplane/api/v1alpha1"
 	"github.com/jicowan/aio-sandbox/controlplane/internal/assign"
@@ -64,7 +64,14 @@ func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, h
 				return nil, fmt.Errorf("session %q not found and no pool hint given", sid)
 			}
 			s = corev1alpha1.Session{
-				ObjectMeta: metav1.ObjectMeta{Name: sid, Namespace: namespace},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sid,
+					Namespace: namespace,
+					// Mark this CR operator-owned so GC may reap it when the session
+					// dies (a user-declared Session carries no such label and is only
+					// tombstoned to Absent, never deleted).
+					Labels: map[string]string{LabelCreatedBy: CreatedByOperator},
+				},
 				Spec: corev1alpha1.SessionSpec{
 					PoolRef: &corev1alpha1.LocalRef{Name: poolHint},
 					Subject: subject,

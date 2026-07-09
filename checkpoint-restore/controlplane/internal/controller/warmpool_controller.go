@@ -48,6 +48,16 @@ const (
 	LabelAppWorker = "worker"
 )
 
+// LabelCreatedBy marks who created a Session CR. The operator stamps
+// CreatedByOperator on Sessions it lazily creates from a broker pool hint
+// (resume_glue.go planFor); user-declared Sessions carry no such label. GC uses
+// this to decide whether it may DELETE a dead Session CR (operator-owned, pure
+// control-plane bookkeeping) or must only tombstone it to Absent (user-owned).
+const (
+	LabelCreatedBy    = "sandboxd.io/created-by"
+	CreatedByOperator = "operator"
+)
+
 // podDeletionCostAnnotation and the idle/busy cost values drive graceful
 // scale-in: the built-in ReplicaSet controller deletes the LOWEST-cost pods
 // first when it scales a Deployment down. By stamping idle workers with a low
