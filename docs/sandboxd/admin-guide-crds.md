@@ -8,6 +8,8 @@ group **`core.sandboxd.io`**, version **`v1alpha1`**.
 | `SandboxTemplate` | `sbxt` | Blueprint for what to run as a sandbox (image, ports, health, idle policy, worker overrides). |
 | `WarmPool` | `wp` | Desired set of warm workers built from one template; owns worker scaling. |
 | `Session` | `sess` | A durable user session (usually created lazily by the operator); its status mirrors the KV assignment entry. |
+| `ForkSet` | `fork` | Fan out N independent child Sessions from one common source — a snapshot (`baseRef`) or a pool's image. Owns its children. |
+| `BaseSnapshot` | `basesnap` | A promoted, pinnable "golden" checkpoint (copy‑on‑promote to `bases/`) that a `ForkSet` restores its forks from. |
 
 Field tables list the JSON field name, type, whether it's required, the
 default/validation, and meaning. "Required" means the field has no default and the
@@ -156,12 +158,14 @@ Printer columns: `Phase` (`.status.phase`), `Worker` (`.status.workerPodIP`).
 | `subject` | string | No | Opaque identity the router matches the JWT‑derived subject against. |
 | `iam` | IAMSpec | No | Assume an AWS IAM role for this session's sandbox (`iam.roleArn`), overriding the pool template's `iam`. |
 | `lifecycle` | SessionLifecycle | No | Overrides template idle/TTL for this session. |
+| `forkFrom` | ForkProvenance | No | Set by the `ForkSet` controller on a fork child: `{baseRef, snapshotURI}` records the base it was seeded from (snapshot source; empty for image forks). Makes the child self‑describing and is the base‑reclaim ref‑count key. Not set by hand. |
 
 #### SessionLifecycle
 
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
 | `idleTimeoutSeconds` | int | No | Overrides the template idle timeout. |
+| `idleAction` | string | No | Overrides the template idle *action* for this session: `suspend` (checkpoint→S3, free worker), `reset` (discard state, free worker), or `none`. Lets an ephemeral fork choose `reset`‑on‑idle without a dedicated pool. Empty = inherit the template's action. |
 | `ttlAfterSuspendSeconds` | int | No | How long the S3 checkpoint is retained after suspend before GC reaps the whole session footprint (S3 snapshot + KV entry + this `Session` CR). Unset falls back to the operator's `--default-ttl-after-suspend-seconds`; if that is also `0`, the checkpoint is kept forever. |
 
 ### `.status` (durable mirror of the KV assignment entry)
@@ -195,6 +199,125 @@ kubectl get sess -n default
 # NAME                                   PHASE       WORKER
 # sess-jicowan-93b7baf854168a42          Running     10.0.5.178
 ```
+
+---
+
+## ForkSet (`fork`)
+
+Fans out **N independent child `Session`s from one common source** in a single
+declarative object (docs/PRD-snapshot-fork.md). A `ForkSet` is to forked Sessions what
+a `WarmPool` is to worker pods: the controller creates and owns N `Session` children
+(ownerRefs) and rolls their readiness up into `.status`. The **source** is selected by
+`baseRef`:
+
+- **`baseRef` set → snapshot source.** Children restore (`/restore`) from a `BaseSnapshot`
+  — identical RAM+FS state (the "branch from a common reached state" / RL rollout case).
+- **`baseRef` omitted → image source.** Children cold‑start (`/run`) from `pool`'s
+  template image — independent per‑boot init. No `BaseSnapshot` involved.
+
+Has a `status` subresource. Printer columns: `Desired`, `Ready`, `Phase`.
+
+### `.spec`
+
+| Field | Type | Required | Meaning |
+|-------|------|----------|---------|
+| `baseRef` | LocalRef | No | The `BaseSnapshot` to fork from (snapshot source). Omit for image‑source fan‑out. |
+| `count` | int32 | **Yes** | Number of fork children (N) to create; min 1. |
+| `namePrefix` | string | No | Deterministic child naming (`sess-fork-<prefix>-<n>`) so a harness can address a specific fork. Defaults to the ForkSet name. |
+| `pool` | string | **Yes** | Pool that places the forks; for the image source it also supplies the template image. Must be `runsc`‑compatible with the base (snapshot source). |
+| `activation` | string | No | `Eager` (materialize all N now) or `Lazy` (born Suspended/Absent, materialize on first contact). Default `Lazy`. |
+| `lifecycle` | SessionLifecycle | No | Per‑fork idle policy applied to every child — notably `idleAction: reset` for ephemeral rollouts (leaves no snapshot) vs `suspend` for durable branches. |
+| `subject` | string | No | Owner identity for attribution / fan‑out quota. |
+| `iam` | IAMSpec | No | Per‑fork AWS role, overriding the base's / template's `iam`. |
+
+### `.status`
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `desired` | int32 | Fork children requested (mirrors `spec.count`). |
+| `ready` | int32 | Children whose Session has reached Running (read from the KV assignment table). |
+| `forks` | []string | Created child session ids — what a harness reads back to address each fork. |
+| `phase` | string | `Progressing` \| `Ready` \| `Failed`. |
+| `conditions` | []metav1.Condition | Standard condition list. |
+
+### Example
+
+```yaml
+apiVersion: core.sandboxd.io/v1alpha1
+kind: ForkSet
+metadata: { name: rl-batch, namespace: default }
+spec:
+  baseRef: { name: golden-cartpole-v3 }   # omit for image-source fan-out
+  count: 16
+  namePrefix: rollout
+  pool: aio-pool
+  activation: Eager
+  lifecycle: { idleAction: reset, idleTimeoutSeconds: 600 }
+```
+
+```sh
+kubectl apply -f forkset.yaml
+kubectl get fork rl-batch -n default          # watch .status.ready reach .status.desired
+kubectl get fork rl-batch -n default -o jsonpath='{.status.forks}'   # the N session ids to drive
+```
+
+> **Addressing a fork:** send its session id as `X-Session-ID` to the router (each
+> child is a normal session on its own worker). The router is unchanged — it resolves
+> whatever id it's handed. Deleting the `ForkSet` cascade‑deletes its child Sessions.
+
+> **Where forked state lives is a workload concern.** A fork restores the workload's
+> whole checkpointed state, but caller‑written data only survives if the workload
+> persisted it somewhere the checkpoint captures. E.g. the **AIO sandbox** runs each
+> `/v1/shell/exec` in an isolated shell — `/tmp` writes don't persist across exec calls
+> or checkpoint/restore, but writes under the working dir **`/home/gem`** do. Put
+> fork‑relevant state where your target image persists it.
+
+---
+
+## BaseSnapshot (`basesnap`)
+
+A promoted, forkable "golden" checkpoint, decoupled from any single session's mutable
+snapshot lineage. The controller resolves a **Suspended** source session's current
+snapshot and does an S3 server‑side **copy‑on‑promote** into a fork‑stable
+`bases/<name>/` prefix — distinct from the per‑session `sandboxes/<sid>/` space the GC
+orphan‑S3 sweep touches, so a base is structurally exempt from orphan reaping. A
+finalizer reclaims the `bases/<name>/` objects when the CR is deleted. Has a `status`
+subresource. Printer columns: `Ready`, `Refs`, `Pinned`, `Phase`.
+
+### `.spec`
+
+| Field | Type | Required | Meaning |
+|-------|------|----------|---------|
+| `sourceSessionRef` | LocalRef | **Yes** | The Suspended `Session` whose current checkpoint is promoted to this base. |
+| `pinned` | bool | No | Keep indefinitely: while true the base is never auto‑reclaimed even when `refCount` reaches 0. |
+
+### `.status`
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `snapshotURI` | string | The fork‑stable `bases/<name>/…` prefix the base was copied to. |
+| `image` / `runscVersion` / `ports` / `health` / `iamRoleArn` | — | Restore identity captured from the source at promote time (forks are self‑describing). |
+| `refCount` | int32 | Holds keeping the base alive: forks not yet past their first restore, plus explicit pins. Drops as forks materialize. |
+| `ready` | bool | True once copy‑on‑promote completes (base is forkable). |
+| `phase` | string | `Pending` \| `Ready` \| `Reclaimed` \| `Failed`. |
+
+### Example
+
+```yaml
+apiVersion: core.sandboxd.io/v1alpha1
+kind: BaseSnapshot
+metadata: { name: golden-cartpole-v3, namespace: default }
+spec:
+  sourceSessionRef: { name: sess-golden }   # must be Suspended with a snapshot
+  pinned: true
+```
+
+> **Reclaim:** an unpinned base becomes eligible only when `refCount == 0` and a grace
+> has elapsed (the base reaper then deletes the CR; the finalizer clears its S3).
+> Deleting the CR directly (incl. a pinned one) also reclaims its S3 via the finalizer.
+> A fork depends on the base **only for its first restore** — afterward it has its own
+> lineage — so a base whose forks are all Running (and unpinned) is immediately
+> reclaimable.
 
 ---
 

@@ -122,6 +122,13 @@ Responsibilities:
   fleet before arming (set `SANDBOXD_GC_DRY_RUN=0` to arm).
 - **Lazy Session creation.** On a resume for an unknown session id, the operator
   creates a `Session` object from the pool hint header.
+- **Fork fan‑out.** A `ForkSet` mints N independent child `Session`s from one common
+  source — a `BaseSnapshot` (restore, identical state) or a pool's image (cold‑start)
+  — reusing the resume path; children are ordinary sessions afterward, routed
+  individually by `X‑Session‑ID`. A `BaseSnapshot` is a promoted golden checkpoint
+  (S3 copy‑on‑promote to a fork‑stable `bases/` prefix, outside the GC orphan sweep;
+  finalizer‑backed reclaim; refCount gated on first‑restore + pins). See
+  [PRD-snapshot-fork.md](../PRD-snapshot-fork.md).
 
 The operator uses CAS‑on‑version (Lua) for every KV write — that's the split‑brain
 guard, since it is the single writer but must be safe across restarts/HA.

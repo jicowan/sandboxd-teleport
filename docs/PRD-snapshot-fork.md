@@ -1,12 +1,42 @@
 # PRD — ForkSet (fan out N sessions from a common source: snapshot or image)
 
-Status: **Proposed** (analysis + plan; grounded in the shipped code on the
-`checkpoint-restore` branch). Decision‑ready.
-
-Related: [architecture-sandboxd.md](sandboxd/architecture-sandboxd.md),
+Status: **Implemented + verified live** (2026‑07‑19, operator `v28` + worker
+`sandboxd:v52`). Both sources shipped: image (cold‑start fan‑out) and snapshot
+(copy‑on‑promote → restore‑from‑base). Related:
+[architecture-sandboxd.md](sandboxd/architecture-sandboxd.md),
 [PRD-session-garbage-collection.md](PRD-session-garbage-collection.md),
 [PRD-durable-assignment-state.md](PRD-durable-assignment-state.md),
 [admin-guide-crds.md](sandboxd/admin-guide-crds.md).
+
+> **As built (2026‑07‑19).** Two CRDs — `ForkSet` (the one→N fan‑out parent, owns
+> N child `Session`s; `baseRef` optional selects snapshot vs image) and
+> `BaseSnapshot` (a promoted, pinnable golden checkpoint) — plus two additive
+> `Session` fields (`spec.forkFrom{baseRef,snapshotURI}`, `SessionLifecycle.idleAction`).
+> No router or worker protocol change: children ride the existing resume path
+> (image → `/run`, snapshot → `/restore`), addressed individually by `X‑Session‑ID`.
+>
+> - **Copy‑on‑promote** (`internal/snapshot`): `BaseSnapshotReconciler` S3
+>   server‑side‑copies a Suspended source session's checkpoint from
+>   `sandboxes/<sid>/…` to a fork‑stable `bases/<id>/…` prefix — outside what the GC
+>   orphan‑S3 pass sweeps (`sandboxes/` only), so a base is **structurally** exempt
+>   from orphan reaping. A **finalizer** reclaims `bases/<id>/` on CR delete (covers
+>   pinned/direct deletes; single source of S3 reclaim).
+> - **Base reaper**: derives `refCount` = forks‑not‑yet‑restored + explicit pins,
+>   reclaims a base only when `pinned==false && refCount==0 && past grace`. A fork
+>   depends on the base **only for its first restore** (thereafter its own lineage),
+>   so refCount drops as forks materialize. CR‑existence is the retention guarantee;
+>   reclaim errs toward over‑retention.
+> - **Eager materialization** dedups per‑SID (a `sync.Map` inflight guard) so the
+>   requeue loop can't re‑fire a slow restore into a worker‑claim storm.
+>
+> **Verified live** (EKSClusterStack‑cluster, us‑west‑2): image fan‑out (3 forks,
+> distinct workers, RL parallel rollout) and snapshot fan‑out (promote a golden
+> checkpoint → 3 forks restore the **identical** `/home/gem` state → diverge
+> independently; refCount tracked; finalizer reclaimed `bases/` on delete; pool
+> stable, no claim storm, zero controller errors). Operator S3 IAM extended for
+> `bases/*` (GetObject `sandboxes/*`, Put/Get/Delete `bases/*`). Commits: `35ff1f5`
+> (ForkSet), `61942cb` (BaseSnapshot conflict), `edffd20` (worker snapshot‑collision
+> + WarmPool conflict). Design/analysis below preserved as written.
 
 ## 1. Summary
 
@@ -443,6 +473,22 @@ one parameter to it (max forks / concurrent forks per subject).
   must land on workers matching the base's `runscVersion` (the worker already 409s a
   mismatch — the fork scheduler should prefer/require matching‑image pools, same as
   teleport).
+- **Where the forked state actually lives is a workload concern (learned live).** A
+  fork restores the workload's whole checkpointed RAM+FS, but *what the caller wrote*
+  only survives if the workload persisted it somewhere the checkpoint captures. Example
+  from live validation: the **AIO sandbox** runs each `/v1/shell/exec` in an isolated,
+  ephemeral shell context — writes to `/tmp` do **not** persist across exec calls (nor,
+  therefore, across checkpoint/restore), while writes under the working dir
+  **`/home/gem`** do persist and restore correctly across forks. This is not a
+  sandboxd/checkpoint bug (the golden session's own restore showed the same behavior);
+  it means a harness must place fork‑relevant state where the target workload persists
+  it. Verify per workload; document the persistent path for each fork‑able image.
+- **Worker sandbox‑id reuse (fixed).** Restoring a fork onto a worker that previously
+  hosted a sandbox with the *same* id (e.g. `idleAction: reset` recycling under
+  capacity pressure) could hit a containerd snapshot `already exists` on `/run`/`/restore`.
+  The worker now force‑removes a stale same‑key snapshot and retries once
+  (`sandboxd/containerd.go`, worker `v52`). Watch for it if running a very high‑churn
+  fleet with heavy sid reuse.
 
 ## 8. Testing / acceptance
 
@@ -584,11 +630,14 @@ snapshot source (base + pinning + GC).
 
 ## 12. Status
 
-**Proposed — nothing built.** Both runtime primitives already exist — `/restore` from an
-arbitrary snapshot (exercised by teleport) and `/run` cold‑start from an image (the P1
-path); this PRD is the control‑plane fan‑out (`ForkSet`, + `BaseSnapshot`/pinning/GC for
-the snapshot source) on top of them. See [[sandboxd-pending-work]] (memory) for the
-cross‑session tracker.
+**Implemented + verified live** (2026‑07‑19, operator `v28` + worker `sandboxd:v52`) —
+see the as‑built note at the top. Both sources shipped (image fan‑out + snapshot
+copy‑on‑promote/restore), finalizer‑backed base reclaim, refCount, and the
+worker‑side sid‑reuse fix. **Not yet built (deferred):** the broker `fork_session`
+sugar (§5.2 — the CR is the substrate today), the fan‑out quota on the shared authz
+gate (§6), a CEL runsc‑match admission rule (§5.2 validation), and the §9 items (CoW
+storage, snapshot‑read cache, nested fork trees). See [[sandboxd-pending-work]]
+(memory) for the cross‑session tracker.
 
 > **Naming note:** the file is `PRD-snapshot-fork.md` for link stability, but the
 > feature is **ForkSet** (fan out N from a snapshot *or* an image). `baseRef` optional

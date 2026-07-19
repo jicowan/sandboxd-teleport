@@ -19,7 +19,7 @@ describes the live reference cluster it says so explicitly.
 | 2 | [admin-guide-broker.md](admin-guide-broker.md) | Platform admins | Install & configure the broker, agentgateway, and Keycloak. |
 | 3 | [architecture-broker.md](architecture-broker.md) | Architects / admins | How the broker, agentgateway, and Keycloak fit together (the auth front door). |
 | 4 | [install-guide-sandboxd.md](install-guide-sandboxd.md) | Platform admins | Deploy the operator, router, Valkey, RBAC, Pod Identity, CRDs, and a pool. |
-| 5 | [admin-guide-crds.md](admin-guide-crds.md) | Platform admins | Reference for every CRD field (SandboxTemplate, WarmPool, Session). |
+| 5 | [admin-guide-crds.md](admin-guide-crds.md) | Platform admins | Reference for every CRD field (SandboxTemplate, WarmPool, Session, ForkSet, BaseSnapshot). |
 | 6 | [architecture-sandboxd.md](architecture-sandboxd.md) | Architects / admins | How sandboxd, the router, the operator, Valkey, and workers relate. |
 | 7 | [runbook-reproduce-test-env.md](runbook-reproduce-test-env.md) | Operators | End‑to‑end reproduction of the test environment + run a sample container. |
 | 8 | [api-reference-sandboxd-worker.md](api-reference-sandboxd-worker.md) | Operators / integrators | HTTP API surface of the sandboxd worker agent (`:8090`). |
@@ -36,7 +36,7 @@ describes the live reference cluster it says so explicitly.
 | [PRD-durable-assignment-state.md](../PRD-durable-assignment-state.md) | **Implemented** | Make Kubernetes (`Session.status` in etcd) the durable source of truth and Valkey a rebuildable cache, so a Valkey restart doesn't orphan S3 checkpoints / lose the session index. |
 | [PRD-control-plane-scalability.md](../PRD-control-plane-scalability.md) | **Implemented** (hot paths) | Removed the control plane's O(N)-on-a-timer sweeper scans and bounded the etcd status-mirror write rate under session churn (indexed O(due) sweeps, mirror only durability-critical transitions, O(1) per-pool counts). Remaining follow-ups gated on real load. |
 | [PRD-session-garbage-collection.md](../PRD-session-garbage-collection.md) | **Implemented** | Reap a dead session's whole footprint (S3 snapshot + Valkey entry + `Session` CR) across all dead-session classes: TTL, abandoned (dead-worker zombie), orphan-S3, orphan-CR. Ownership-aware CR deletion; dry-run-first. |
-| [PRD-snapshot-fork.md](../PRD-snapshot-fork.md) | Proposed | **ForkSet:** fan out N independent sessions from one common source — a **snapshot** (identical RAM+FS state, amortized/reproducible) or an **image** (independent per-boot init), via optional `baseRef`. RL parallel rollouts / branch-from-common-start. Both runtime primitives exist (`/restore`, `/run`); needs the `ForkSet` fan-out CR (+ `BaseSnapshot`/pinning/GC for the snapshot source). No router change. |
+| [PRD-snapshot-fork.md](../PRD-snapshot-fork.md) | **Implemented** | **ForkSet:** fan out N independent sessions from one common source — a **snapshot** (`BaseSnapshot` copy-on-promote → restore, identical RAM+FS state) or an **image** (cold-start, independent per-boot init), via optional `baseRef`. RL parallel rollouts / branch-from-common-start. Live-verified (operator v28 / worker v52); finalizer-backed base reclaim + refCount; no router change. |
 
 ## The whole picture in one diagram
 
