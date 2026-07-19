@@ -21,6 +21,7 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/errdefs"
 	"github.com/opencontainers/image-spec/identity"
 )
 
@@ -96,9 +97,24 @@ func prepareRootfsContainerd(ref, destRootfs, snapKey string) (*imageConfig, err
 	// the same OS thread that ran mount.All, before any netns work — not to retry.
 	// Verified: cold uncached images now run first-attempt (memcached/nats/mongo/
 	// httpd/rabbitmq + a cold teleport all passed 5/5).
+	// Clear any stale snapshot under this key before Prepare. A prior sandbox with
+	// the SAME sandbox id may have run on this worker (fork sid reuse / reset+retry
+	// under churn) and left its overlay snapshot behind — Prepare then fails
+	// "already exists". Unmount the rootfs first (Remove fails while the snapshot is
+	// still mounted), then Remove.
 	syscall.Unmount(destRootfs, syscall.MNT_DETACH)
 	sn.Remove(ctx, snapKey)
 	mounts, err := sn.Prepare(ctx, snapKey, parent)
+	if err != nil && errdefs.IsAlreadyExists(err) {
+		// The pre-Prepare Remove didn't take (snapshot still referenced/mounted).
+		// Force a clean removal and retry once — this is the churn-triggered
+		// sid-reuse collision, recoverable without failing the run.
+		syscall.Unmount(destRootfs, syscall.MNT_DETACH)
+		if rerr := sn.Remove(ctx, snapKey); rerr != nil {
+			return nil, fmt.Errorf("snapshot prepare: %w (stale snapshot remove failed: %v)", err, rerr)
+		}
+		mounts, err = sn.Prepare(ctx, snapKey, parent)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("snapshot prepare: %w", err)
 	}

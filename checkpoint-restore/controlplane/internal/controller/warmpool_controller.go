@@ -195,6 +195,12 @@ func (r *WarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			existing.Spec.Replicas = dep.Spec.Replicas
 			existing.Spec.Template = dep.Spec.Template
 			if err := r.Update(ctx, &existing); err != nil {
+				if apierrors.IsConflict(err) {
+					// Another reconcile (scale churn / owned-Deployment event) updated
+					// the Deployment between our Get and this write. Expected and
+					// self-healing: requeue and recompute — not an error.
+					return ctrl.Result{Requeue: true}, nil
+				}
 				return ctrl.Result{}, fmt.Errorf("update worker deployment: %w", err)
 			}
 			log.Info("updated worker deployment", "deployment", dep.Name, "replicas", pool.Spec.Replicas)
@@ -400,7 +406,16 @@ func (r *WarmPoolReconciler) updateStatus(ctx context.Context, pool *corev1alpha
 		}
 	}
 	setReadyCond(&pool.Status.Conditions, metav1.ConditionTrue, "Provisioned", "worker deployment reconciled")
-	return r.Status().Update(ctx, pool)
+	if err := r.Status().Update(ctx, pool); err != nil {
+		// A concurrent reconcile updated the pool between Get and this write. The
+		// status is a projection refreshed on the next reconcile (nudged on every
+		// claim/release), so a lost race self-heals — don't surface it as an error.
+		if apierrors.IsConflict(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (r *WarmPoolReconciler) setReady(ctx context.Context, pool *corev1alpha1.WarmPool, s metav1.ConditionStatus, reason, msg string) {
