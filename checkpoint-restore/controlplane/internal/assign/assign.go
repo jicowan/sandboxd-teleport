@@ -55,8 +55,10 @@ func poolAllKey(pool string) string  { return "pool:" + pool + ":all" }
 
 // Secondary indexes (ZSETs) so the sweepers read only sessions that are DUE,
 // turning the O(N)-per-15s scans into O(due) lookups (PRD-control-plane-scalability).
-//   suspendDueKey:    member=sid, score=suspend deadline ms (lastActiveAt + idleTimeout)
-//   checkpointDueKey: member=sid, score=next periodic-checkpoint deadline ms
+//
+//	suspendDueKey:    member=sid, score=suspend deadline ms (lastActiveAt + idleTimeout)
+//	checkpointDueKey: member=sid, score=next periodic-checkpoint deadline ms
+//
 // Maintained atomically inside the session write/stamp Lua scripts; a session is
 // removed from both when it leaves Running (suspend/reset/delete).
 const (

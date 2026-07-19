@@ -28,14 +28,8 @@ rules:
 - apiGroups:
   - core.sandboxd.io
   resources:
-  - sandboxtemplates
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - core.sandboxd.io
-  resources:
+  - basesnapshots
+  - forksets
   - sessions
   - warmpools
   verbs:
@@ -49,6 +43,16 @@ rules:
 - apiGroups:
   - core.sandboxd.io
   resources:
+  - basesnapshots/finalizers
+  - forksets/finalizers
+  - warmpools/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - core.sandboxd.io
+  resources:
+  - basesnapshots/status
+  - forksets/status
   - sessions/status
   - warmpools/status
   verbs:
@@ -58,6 +62,8 @@ rules:
 - apiGroups:
   - core.sandboxd.io
   resources:
-  - warmpools/finalizers
+  - sandboxtemplates
   verbs:
-  - update
+  - get
+  - list
+  - watch

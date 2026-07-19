@@ -42,8 +42,8 @@ var _ = Describe("Session durability (etcd-as-truth, Valkey-as-cache)", func() {
 			SID: "s-rt", State: resumeapi.StateSuspended, Pool: "p1",
 			WorkerPod: "w1", WorkerPodIP: "10.0.0.5", Image: "img:1",
 			SnapshotURI: "sandboxes/s-rt/snap-1", IAMRoleARN: "arn:aws:iam::1:role/r",
-			Ports:  []sbxapi.PortMap{{Container: 8080, Host: 8080}},
-			Health: &sbxapi.Health{Probe: "http", ProbePort: 8080, ProbePath: "/h", RestartPolicy: "restore"},
+			Ports:        []sbxapi.PortMap{{Container: 8080, Host: 8080}},
+			Health:       &sbxapi.Health{Probe: "http", ProbePort: 8080, ProbePath: "/h", RestartPolicy: "restore"},
 			LastActiveAt: 1_700_000_000_000,
 		}
 		var st corev1alpha1.SessionStatus

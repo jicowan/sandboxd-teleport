@@ -4,29 +4,35 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: sessions.core.sandboxd.io
+  name: basesnapshots.core.sandboxd.io
 spec:
   group: core.sandboxd.io
   names:
-    kind: Session
-    listKind: SessionList
-    plural: sessions
+    kind: BaseSnapshot
+    listKind: BaseSnapshotList
+    plural: basesnapshots
     shortNames:
-    - sess
-    singular: session
+    - basesnap
+    singular: basesnapshot
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
+    - jsonPath: .status.ready
+      name: Ready
+      type: boolean
+    - jsonPath: .status.refCount
+      name: Refs
+      type: integer
+    - jsonPath: .spec.pinned
+      name: Pinned
+      type: boolean
     - jsonPath: .status.phase
       name: Phase
-      type: string
-    - jsonPath: .status.workerPodIP
-      name: Worker
       type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: Session is the Schema for the sessions API
+        description: BaseSnapshot is the Schema for the basesnapshots API.
         properties:
           apiVersion:
             description: |-
@@ -46,88 +52,18 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of Session
+            description: spec defines the desired base snapshot
             properties:
-              cmd:
-                description: cmd overrides the entrypoint for arbitrary-image mode.
-                items:
-                  type: string
-                type: array
-              env:
-                description: env for arbitrary-image mode.
-                items:
-                  type: string
-                type: array
-              forkFrom:
+              pinned:
                 description: |-
-                  forkFrom records that this Session is a fork child and, for the snapshot
-                  source, the base it was seeded from. Set by the ForkSet controller; empty for
-                  normal and image-source sessions. It makes a child self-describing (a rebuild
-                  knows its base) and is the ref-count decrement key for base reclaim
-                  (docs/PRD-snapshot-fork.md §5.4).
-                properties:
-                  baseRef:
-                    description: |-
-                      baseRef names the BaseSnapshot this fork was seeded from (snapshot source).
-                      Empty for an image-source fork.
-                    properties:
-                      name:
-                        description: name of the referenced object.
-                        type: string
-                    required:
-                    - name
-                    type: object
-                  snapshotURI:
-                    description: |-
-                      snapshotURI is the base snapshot this fork restored from (snapshot source).
-                      Empty for an image-source fork.
-                    type: string
-                type: object
-              iam:
+                  pinned keeps the base indefinitely: while true it is never auto-reclaimed even
+                  when refCount reaches 0. Set false to let the base be reclaimed once unreferenced.
+                type: boolean
+              sourceSessionRef:
                 description: |-
-                  iam optionally lets this session's sandbox assume an AWS IAM role, overriding
-                  the pool template's iam. Authorization is enforced at the front door / control
-                  plane before the Session is created.
-                properties:
-                  roleArn:
-                    description: |-
-                      roleArn is the ARN of the IAM role the sandbox may assume. Authorization for
-                      which sessions may use which role is enforced at the front door / control
-                      plane, not here.
-                    type: string
-                type: object
-              image:
-                description: |-
-                  image is a caller-supplied arbitrary image (arbitrary-image mode, O6):
-                  authz-gated at the front door before creation. Mutually exclusive with
-                  poolRef. When set, cmd/env/ports may accompany it.
-                type: string
-              lifecycle:
-                description: lifecycle overrides template idle/TTL for this session.
-                properties:
-                  idleAction:
-                    description: |-
-                      idleAction overrides the template idle action for this session: suspend
-                      (checkpoint->S3, free worker), reset (discard state, free worker), or none.
-                      Lets an ephemeral fork choose reset-on-idle without a dedicated pool
-                      (docs/PRD-snapshot-fork.md §5.3). Empty = inherit the template's action.
-                    enum:
-                    - suspend
-                    - reset
-                    - none
-                    type: string
-                  idleTimeoutSeconds:
-                    description: idleTimeoutSeconds overrides the template idle timeout.
-                    type: integer
-                  ttlAfterSuspendSeconds:
-                    description: |-
-                      ttlAfterSuspendSeconds is how long the S3 checkpoint is retained after
-                      suspend before GC.
-                    type: integer
-                type: object
-              poolRef:
-                description: poolRef selects a WarmPool (template mode). Mutually
-                  exclusive with image.
+                  sourceSessionRef names a SUSPENDED Session whose current snapshot is promoted
+                  to this base. (Increment 2 supports promoting an already-suspended session; a
+                  checkpoint-a-live-session mode is a follow-up.)
                 properties:
                   name:
                     description: name of the referenced object.
@@ -135,39 +71,14 @@ spec:
                 required:
                 - name
                 type: object
-              ports:
-                description: ports for arbitrary-image mode.
-                items:
-                  description: PortMap maps a worker pod port to a sandbox container
-                    port (DNAT).
-                  properties:
-                    container:
-                      description: container is the port the sandbox process listens
-                        on.
-                      maximum: 65535
-                      minimum: 1
-                      type: integer
-                    host:
-                      description: host is the port on the worker pod IP. 0 defaults
-                        to container.
-                      maximum: 65535
-                      minimum: 0
-                      type: integer
-                  required:
-                  - container
-                  type: object
-                type: array
-              subject:
-                description: |-
-                  subject is the opaque identity the router matches the JWT-derived subject
-                  against (O4).
-                type: string
+            required:
+            - sourceSessionRef
             type: object
           status:
-            description: status defines the observed state of Session
+            description: status defines the observed state
             properties:
               conditions:
-                description: conditions represent the current state of the Session
+                description: conditions represent the current state of the BaseSnapshot
                   resource.
                 items:
                   description: Condition contains details for one aspect of the current
@@ -228,7 +139,8 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               health:
-                description: health is the readiness/restart config (replayed on restore).
+                description: Health describes how the worker probes the sandbox and
+                  how it restarts it.
                 properties:
                   probe:
                     description: probe type used to determine readiness.
@@ -252,34 +164,21 @@ spec:
                     type: string
                 type: object
               iamRoleArn:
-                description: iamRoleArn is the session's assumable AWS role (replayed
-                  on restore).
                 type: string
               image:
-                description: image is the resolved image (recorded for restore identity).
-                type: string
-              lastActiveAt:
                 description: |-
-                  lastActiveAt is the last request time stamped by the router (O3). Mirrored
-                  coarsely (on transitions, not every request) to avoid write amplification.
-                format: date-time
+                  The resolved restore identity, copied from the source session at promote time
+                  so forks are self-describing.
                 type: string
               phase:
-                description: phase mirrors the KV session state.
+                description: phase is the base lifecycle state.
                 enum:
-                - Absent
-                - Running
-                - Suspending
-                - Suspended
-                - Resuming
-                type: string
-              pool:
-                description: pool is the WarmPool the session's worker is claimed
-                  from.
+                - Pending
+                - Ready
+                - Reclaimed
+                - Failed
                 type: string
               ports:
-                description: ports are the session's exposed port mappings (replayed
-                  on restore).
                 items:
                   description: PortMap maps a worker pod port to a sandbox container
                     port (DNAT).
@@ -300,16 +199,24 @@ spec:
                   - container
                   type: object
                 type: array
+              ready:
+                description: ready is true once the base is forkable (copy-on-promote
+                  complete).
+                type: boolean
+              refCount:
+                description: |-
+                  refCount is the number of holds keeping the base alive: forks that have not yet
+                  completed their first restore, plus explicit pins. A fork needs the base only
+                  for its first restore, so this drops as forks materialize. Reclaim is eligible
+                  only when pinned==false AND refCount==0 (docs/PRD-snapshot-fork.md §5.4).
+                format: int32
+                type: integer
+              runscVersion:
+                type: string
               snapshotURI:
-                description: snapshotURI is the current checkpoint location (set once
-                  one exists).
-                type: string
-              workerPod:
-                description: workerPod is the worker pod name currently bound (fencing
-                  key); empty when suspended.
-                type: string
-              workerPodIP:
-                description: workerPodIP is set while Running/Resuming.
+                description: |-
+                  snapshotURI is the fork-stable S3 prefix (bases/<name>/snap-…) the base was
+                  copied to. Set once copy-on-promote completes.
                 type: string
             type: object
         required:

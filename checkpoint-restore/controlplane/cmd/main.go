@@ -334,6 +334,47 @@ func main() {
 		os.Exit(1)
 	}
 
+	// ForkSet fan-out (docs/PRD-snapshot-fork.md): a ForkSet mints N child Sessions
+	// from a common source — an image (cold-start from a pool) or a BaseSnapshot
+	// (restore from a promoted checkpoint). Eager children are materialized via the
+	// resume workflow.
+	if err := (&controller.ForkSetReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		KV:     kv,
+		Materialize: func(ctx context.Context, sid, subject, pool string) error {
+			_, err := resumeWF.Resume(ctx, sid, subject, pool)
+			return err
+		},
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "forkset")
+		os.Exit(1)
+	}
+
+	// Snapshot fork support: BaseSnapshot promotion (copy-on-promote) + the base
+	// reaper (reclaim unpinned+unreferenced bases). Both need the S3 store; without
+	// a bucket the snapshot source is unavailable (image forks still work).
+	if workerBucket != "" {
+		store, serr := controller.BuildSnapshotStore(context.Background(), workerBucket)
+		if serr != nil {
+			setupLog.Error(serr, "Failed to build snapshot store")
+			os.Exit(1)
+		}
+		if err := (&controller.BaseSnapshotReconciler{
+			Client: mgr.GetClient(), Scheme: mgr.GetScheme(), KV: kv, Store: store,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create controller", "controller", "basesnapshot")
+			os.Exit(1)
+		}
+		reaper := controller.NewBaseReaper(mgr.GetClient(), kv, store, resumeNamespace,
+			time.Duration(gcAbandonedGraceSec)*time.Second, time.Duration(gcIntervalSec)*time.Second, gcDryRun)
+		if err := controller.AddBaseReaper(mgr, reaper); err != nil {
+			setupLog.Error(err, "Failed to add base reaper")
+			os.Exit(1)
+		}
+		setupLog.Info("snapshot fork enabled", "bucket", workerBucket, "baseReaperGraceSec", gcAbandonedGraceSec, "dryRun", gcDryRun)
+	}
+
 	// Idle-suspend sweeper (P2): periodically checkpoint idle Running sessions to
 	// S3 and free their workers. The teleport completes when a later request hits
 	// the router and the resume path restores from the recorded snapshot (P3).

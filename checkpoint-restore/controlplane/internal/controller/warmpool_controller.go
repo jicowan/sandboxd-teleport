@@ -58,6 +58,16 @@ const (
 	CreatedByOperator = "operator"
 )
 
+// LabelForkSet marks a Session as a child of a ForkSet (value = ForkSet name), so
+// the ForkSet controller can enumerate its children for readiness rollup and
+// scale-down reaping (docs/PRD-snapshot-fork.md §5.2).
+const LabelForkSet = "sandboxd.io/forkset"
+
+// LabelForkBase marks a snapshot-source fork child with the BaseSnapshot name it
+// was seeded from, so the base reaper can derive a base's refCount by listing its
+// not-yet-materialized children (docs/PRD-snapshot-fork.md §5.4).
+const LabelForkBase = "sandboxd.io/fork-base"
+
 // podDeletionCostAnnotation and the idle/busy cost values drive graceful
 // scale-in: the built-in ReplicaSet controller deletes the LOWEST-cost pods
 // first when it scales a Deployment down. By stamping idle workers with a low

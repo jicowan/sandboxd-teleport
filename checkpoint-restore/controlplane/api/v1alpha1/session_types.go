@@ -62,6 +62,27 @@ type SessionSpec struct {
 	// lifecycle overrides template idle/TTL for this session.
 	// +optional
 	Lifecycle SessionLifecycle `json:"lifecycle,omitempty"`
+
+	// forkFrom records that this Session is a fork child and, for the snapshot
+	// source, the base it was seeded from. Set by the ForkSet controller; empty for
+	// normal and image-source sessions. It makes a child self-describing (a rebuild
+	// knows its base) and is the ref-count decrement key for base reclaim
+	// (docs/PRD-snapshot-fork.md §5.4).
+	// +optional
+	ForkFrom *ForkProvenance `json:"forkFrom,omitempty"`
+}
+
+// ForkProvenance records a fork child's origin (docs/PRD-snapshot-fork.md §5.5).
+type ForkProvenance struct {
+	// baseRef names the BaseSnapshot this fork was seeded from (snapshot source).
+	// Empty for an image-source fork.
+	// +optional
+	BaseRef *LocalRef `json:"baseRef,omitempty"`
+
+	// snapshotURI is the base snapshot this fork restored from (snapshot source).
+	// Empty for an image-source fork.
+	// +optional
+	SnapshotURI string `json:"snapshotURI,omitempty"`
 }
 
 // SessionLifecycle overrides idle and checkpoint-TTL for a single session.
@@ -69,6 +90,14 @@ type SessionLifecycle struct {
 	// idleTimeoutSeconds overrides the template idle timeout.
 	// +optional
 	IdleTimeoutSeconds int `json:"idleTimeoutSeconds,omitempty"`
+
+	// idleAction overrides the template idle action for this session: suspend
+	// (checkpoint->S3, free worker), reset (discard state, free worker), or none.
+	// Lets an ephemeral fork choose reset-on-idle without a dedicated pool
+	// (docs/PRD-snapshot-fork.md §5.3). Empty = inherit the template's action.
+	// +kubebuilder:validation:Enum=suspend;reset;none
+	// +optional
+	IdleAction string `json:"idleAction,omitempty"`
 
 	// ttlAfterSuspendSeconds is how long the S3 checkpoint is retained after
 	// suspend before GC.
