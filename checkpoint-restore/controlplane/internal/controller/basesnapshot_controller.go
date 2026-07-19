@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -102,15 +103,18 @@ func (r *BaseSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Ensure the finalizer is present on a live base (so a future delete reclaims S3).
+	// Return-and-requeue after adding it so promotion runs in a fresh reconcile
+	// against a stable object — avoids racing this metadata write's own watch event
+	// with the promote status update (which would conflict).
 	if !controllerutil.ContainsFinalizer(&base, baseSnapshotFinalizer) {
 		controllerutil.AddFinalizer(&base, baseSnapshotFinalizer)
 		if err := r.Update(ctx, &base); err != nil {
+			if apierrors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
 			return ctrl.Result{}, err
 		}
-		// Re-fetch after the metadata update so subsequent status writes don't conflict.
-		if err := r.Get(ctx, req.NamespacedName, &base); err != nil {
-			return ctrl.Result{}, client.IgnoreNotFound(err)
-		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Once promoted, a base is immutable — nothing to do. (Reclaim is the GC reaper.)
@@ -149,6 +153,14 @@ func (r *BaseSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	r.setReady(ctx, &base, metav1.ConditionTrue, "Promoted",
 		fmt.Sprintf("copied %d objects to %s", res.Objects, res.SnapshotURI))
 	if err := r.Status().Update(ctx, &base); err != nil {
+		if apierrors.IsConflict(err) {
+			// A concurrent reconcile (e.g. the finalizer-add write's watch event)
+			// modified the object between our read and this write. Expected and
+			// self-healing: requeue and recompute against the latest object. The
+			// promote itself already happened (S3 copy is idempotent), so the next
+			// pass just re-writes status.
+			return ctrl.Result{Requeue: true}, nil
+		}
 		log.Error(err, "update basesnapshot status")
 		return ctrl.Result{}, err
 	}

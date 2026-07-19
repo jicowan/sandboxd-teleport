@@ -95,7 +95,11 @@ var _ = Describe("BaseSnapshot Controller (copy-on-promote)", func() {
 		Expect(k8sClient.Create(ctx, base)).To(Succeed())
 
 		r := &BaseSnapshotReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), KV: kv, Store: store}
-		_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: "golden-1"}})
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: "golden-1"}}
+		// First reconcile adds the finalizer + requeues; second promotes.
+		_, err = r.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = r.Reconcile(ctx, req)
 		Expect(err).NotTo(HaveOccurred())
 
 		var got corev1alpha1.BaseSnapshot
@@ -128,7 +132,9 @@ var _ = Describe("BaseSnapshot Controller (copy-on-promote)", func() {
 
 		store := snapshot.New(&fakeSnapS3{objects: map[string]bool{}}, "bucket")
 		r := &BaseSnapshotReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), KV: kv, Store: store}
-		_, _ = r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: "golden-2"}})
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: "golden-2"}}
+		_, _ = r.Reconcile(ctx, req) // finalizer + requeue
+		_, _ = r.Reconcile(ctx, req) // resolve source -> fail
 
 		var got corev1alpha1.BaseSnapshot
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "golden-2"}, &got)).To(Succeed())
@@ -160,7 +166,9 @@ var _ = Describe("BaseSnapshot Controller (copy-on-promote)", func() {
 		Expect(k8sClient.Create(ctx, base)).To(Succeed())
 
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: "golden-fin"}}
-		// First reconcile: adds finalizer + promotes.
+		// First reconcile adds finalizer + requeues; second promotes.
+		_, err = r.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
 		_, err = r.Reconcile(ctx, req)
 		Expect(err).NotTo(HaveOccurred())
 
