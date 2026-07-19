@@ -1,4 +1,4 @@
-# PRD — delegated agent access (user‑identity propagation to sandboxes)
+# PRD — delegated agent access (protocol‑native user‑identity propagation to sandboxes)
 
 Status: **Proposed** (not scheduled). Decision‑ready spec; grounded in the shipped
 code on the `checkpoint-restore` branch. Related:
@@ -9,9 +9,19 @@ code on the `checkpoint-restore` branch. Related:
 > **Update (2026‑07‑09):** investigated "can the router pass an optional JWT to the
 > sandbox generically?" Answer: **yes, and the router + worker need zero changes** —
 > the broker is the only seam (see §5.2, verified against the code). Added **Phase 0
-> — raw JWT passthrough** (§5.5) as the near‑zero‑code starting point for trusted
-> pools, with the token‑theft tradeoff stated plainly, plus a generic scope note
-> (any sandboxed workload MAY consume the token; sandboxd doesn't assume agents/MCP).
+> — raw passthrough** (§5.5) as the near‑zero‑code starting point for trusted pools.
+>
+> **Update 2 (2026‑07‑09) — the key reframe:** identity should ride each protocol's
+> **native auth channel**, not a bespoke `X-Delegated-Authorization` header a workload
+> must be specially coded to read. MCP and A2A already define *where identity goes and
+> how the receiver validates it* — MCP servers are OAuth **resource servers** (token on
+> the transport `Authorization`); A2A propagates per the agent card's declared security
+> scheme. So the broker stays **protocol‑aware** (that's a feature, not AIO coupling),
+> and "generic" means two narrower things: **(a) de‑couple from AIO specifically**
+> (names/defaults + AIO's cold‑start/warm quirk → per‑pool config), and **(b) become
+> multi‑protocol via pluggable adapters** (MCP today, A2A next), where each adapter
+> knows the protocol's lifecycle *and* its identity‑propagation mechanism. This is now
+> §5.6, and it flips Q1 (use the protocol‑native `Authorization`, not a custom header).
 
 ## 1. Summary
 
@@ -34,12 +44,17 @@ This is the application‑layer JWT‑delegation pattern (nested `act`/`obo` cla
 RFC 8693 token exchange) — *not* AWS IAM. It complements the AWS path
 (`PRD-sandbox-iam-credentials.md`); use that for AWS resources, this for app/MCP.
 
-> **Scope note.** sandboxd is a **generic platform for running sandboxed pods** — an
-> agent or MCP server is one possible workload, not an assumption. This PRD uses
-> agent/MCP examples because delegation is most obviously useful there, but the
-> *mechanism* — propagate the caller's identity token into the sandbox as a header —
-> is workload‑agnostic. Any sandboxed workload MAY read the injected token; one that
-> ignores it is unaffected. Nothing below requires the workload to be an agent.
+> **Design principle — propagate identity through the protocol's native channel.**
+> The broker is **protocol‑aware on purpose.** MCP and A2A already specify *how a
+> receiver takes and validates identity* — an MCP server is an OAuth **resource
+> server** that validates a bearer token on the transport `Authorization`; an A2A
+> agent declares its accepted **security scheme** in its agent card. So the broker
+> injects identity into *that* native slot, which means the in‑sandbox workload
+> validates it with **standard, off‑the‑shelf protocol machinery** — no custom header,
+> no "the workload must be specially coded to read our header." A generic HTTP proxy
+> couldn't do this (it would have to invent a side‑channel an arbitrary app has no
+> reason to understand); a protocol‑aware broker can. See §5.6 for the multi‑protocol
+> adapter model and what "generic broker" therefore means.
 
 ## 2. Background — where identity dies today
 
@@ -79,8 +94,10 @@ exists (it proxies `/mcp`); this adds a header instead of stripping identity.
   another MCP server *we* host.
 - **Not** autonomous/offline delegation in Phase 1 (agent acting when the user
   isn't connected) — that's Phase 2 (§9), with an unsolved durable‑grant core.
-- **Not** a new sandbox runtime capability — the agent/server code must be written
-  to read the injected token (no transparent SDK convention exists, unlike AWS).
+- **Not** a new sandbox runtime capability — the in‑sandbox server consumes identity
+  with **standard protocol machinery** (MCP resource‑server validation of the transport
+  `Authorization`; A2A's declared scheme), not sandboxd‑specific code. (This is weaker
+  than the pre‑reframe "must read our custom header" — see Update 2 / §5.6.)
 
 ## 4. The interactive insight (why Phase 1 is tractable)
 
@@ -114,10 +131,18 @@ In `broker_sandboxd.py`, on each forwarded MCP request (`_forward`):
   supports standard token exchange; the broker is a confidential client.
 - The resulting token carries the delegation relationship: `sub` = agent, `act.sub`
   = user (or `obo`), plus the filtered scopes.
-- **Inject it into the sandbox** as a header on the proxied request — proposed
-  `X-Delegated-Authorization: Bearer <delegated-token>` (kept distinct from the
-  sandbox workload's own `Authorization`, if any). Also pass the raw user subject
-  (`X-On-Behalf-Of: <subject>`) for convenience/audit.
+- **Inject it into the sandbox via the protocol's native auth channel** (§5.6). For
+  MCP that is the transport **`Authorization: Bearer <delegated-token>`** the
+  in‑sandbox MCP resource server already validates — *not* a bespoke
+  `X-Delegated-Authorization` (that was the pre‑reframe design; see Update 2). For A2A,
+  per the agent card's declared security scheme. Optionally also pass
+  `X-On-Behalf-Of: <subject>` for audit/convenience.
+- **Audience must match the receiver.** Because an MCP resource server validates
+  `aud`, the exchanged token's audience must be the **in‑sandbox MCP server's**
+  audience — not `sandbox-router`. This is precisely why the MCP‑native path needs
+  RFC 8693 **exchange** (re‑mint with the right `aud` + downscope), and why raw
+  passthrough (§5.5) only works on a pool whose MCP server is deliberately configured
+  to accept the router audience.
 - **Opt‑in per pool/session** (see 5.4). When off, behavior is unchanged (no
   identity forwarded) — safe default.
 
@@ -155,18 +180,23 @@ needed a control‑plane role + a link‑local vending endpoint). **The entire f
 > or after P1.5 so the propagation channel is authenticated. This matters *more* for
 > Phase 0 raw passthrough (§5.5), where the forwarded token is the user's full JWT.
 
-### 5.3 Sandbox workload: reads the token (cooperation required)
+### 5.3 Sandbox workload: validates via standard protocol machinery
 
-The agent / MCP server in the sandbox reads `X-Delegated-Authorization` and:
-- **Inbound MCP server:** treats it as the caller's identity — validates it (JWKS
-  from Keycloak), enforces per‑user authorization on its tools/resources.
-- **Outbound agent:** attaches it as the `Authorization` on downstream calls to
-  services that accept the delegation format.
+Because identity rides the protocol's native channel (§5.6), the in‑sandbox workload
+consumes it with **off‑the‑shelf protocol machinery**, not custom code for our header:
+- **Inbound MCP server:** it is an OAuth **resource server** — it already validates
+  the transport `Authorization` bearer (JWKS from Keycloak, `aud` = its own audience)
+  and enforces per‑user authz on its tools/resources. Standard MCP auth; nothing
+  sandboxd‑specific to implement.
+- **Outbound agent:** attaches the delegated token as `Authorization` on downstream
+  calls to services that accept the delegation format (another hosted MCP server, an
+  A2A peer).
 
-This is a **documented contract**, not transparent — the workload must be written
-to use the header. We provide the header + a validation recipe; the workload
-cooperates. (Where the downstream is another sandbox MCP server we host, both ends
-follow the same contract.)
+This is a far weaker "cooperation" requirement than the pre‑reframe design: instead of
+"the workload must be coded to read `X-Delegated-Authorization`," it is "the workload
+speaks its own protocol's standard auth" — which a compliant MCP/A2A server already
+does. (Where the downstream is another MCP/A2A endpoint we host, both ends are just
+speaking the protocol.)
 
 ### 5.4 Configuration / opt‑in
 
@@ -185,15 +215,18 @@ broker to forward the **user's own validated JWT** into the sandbox unchanged, a
 opt‑in per‑pool header. No token exchange, no Keycloak config beyond what the broker
 already does to validate the inbound token.
 
-- **What it delivers:** the sandboxed workload — **whatever it is** (sandboxd is a
-  generic platform for running sandboxed pods; there is no assumption that an agent or
-  MCP server runs inside) — receives a verifiable token identifying the calling user
-  for the current request. A workload that wants caller identity or a user credential
-  can read and validate it; a workload that ignores it is unaffected.
-- **Mechanism:** in `broker_sandboxd.py._forward`, when the pool opts in, add
-  `X‑Delegated‑Authorization: Bearer <the inbound user JWT>` (and optionally
-  `X‑On‑Behalf‑Of: <subject>`). The broker already holds the validated token. The
-  router forwards it and the worker DNATs it through, both unchanged (§5.2).
+- **What it delivers:** the sandboxed MCP server receives a verifiable token
+  identifying the calling user for the current request, in the slot it already
+  validates.
+- **Mechanism:** in `broker_sandboxd.py`'s forward path, when the pool opts in, set the
+  proxied transport **`Authorization: Bearer <the inbound user JWT>`** (optionally
+  `X‑On‑Behalf‑Of: <subject>` for audit). The broker already holds the validated
+  token. The router forwards it and the worker DNATs it through, both unchanged (§5.2).
+- **Only works if the in‑sandbox server accepts the router audience.** Since the raw
+  user token has `aud=sandbox-router`, a Phase‑0 MCP server must be configured to
+  accept that audience — fine for a first‑party/dev pool you control, not for arbitrary
+  workloads. That audience mismatch is the concrete reason Phase 1's exchange (re‑mint
+  to the server's own `aud`) is the real path.
 - **Opt‑in, off by default:** gated by a `SandboxTemplate` field (§5.4). When off,
   behavior is unchanged (no identity forwarded) — the safe default.
 
@@ -212,6 +245,84 @@ P1.5** (the router→worker hop is unauthenticated today; forwarding the user's 
 bearer token over it is the worst case for interception). It is a stepping stone that
 exercises the propagation path and the per‑pool opt‑in with near‑zero code, not a
 substitute for the downscoped exchange for untrusted or arbitrary‑image pools.
+
+### 5.6 Generic broker: protocol‑aware core + pluggable adapters
+
+"Generic broker" does **not** mean protocol‑agnostic — being MCP‑aware is what lets us
+propagate identity natively (§ Design principle). It means two things:
+
+**(a) De‑couple from AIO *specifically*.** The broker's AIO ties are shallow and
+config‑shaped:
+- **Names/defaults** — `SANDBOXD_POOL=aio-pool`, `EXPECTED_AUDIENCE=sandbox-router`,
+  `GATEWAY_AZP=aio-sandbox-client`, `REQUIRED_GROUP=sandbox-users` are already
+  env‑driven; only the *defaults* are AIO. Re‑default / document them.
+- **Cold‑start/warm is AIO‑specific.** The instant‑`initialize` + background `_warm`
+  machinery exists to hide AIO's ~45s boot. Another MCP workload has a different (or
+  no) cold‑start profile. Drive warm‑on‑connect from the pool's `SandboxTemplate`
+  (health/warm config), not a broker constant.
+
+**(b) Be multi‑protocol among *identity‑carrying* protocols.** Factor the broker into a
+**protocol‑agnostic core** + a **per‑pool protocol adapter**:
+
+- **Core (shared):** JWT validation + group gate, per‑user quota, **session resolution
+  / addressing** (§ below), and transparent streaming forward to the router with
+  `X‑Session‑ID`/`X‑Session‑Pool`. None of this is protocol‑specific.
+- **Adapter (per pool, from the `SandboxTemplate`):** knows the protocol's **lifecycle**
+  *and* its **identity‑propagation mechanism**:
+  - **`mcp`** (today): answer `initialize` locally, rewrite protocol version,
+    short‑circuit `notifications/initialized`/`ping`, key sessions off
+    `mcp-session-id`, warm‑on‑connect; propagate identity as the transport
+    `Authorization` bearer (the MCP resource‑server slot).
+  - **`a2a`** (next — validates the abstraction): A2A task/context lifecycle; propagate
+    per the agent card's declared **security scheme**.
+  - **`raw`** (optional): passthrough with no protocol lifecycle, identity as
+    `Authorization` — the trusted‑pool shortcut of §5.5 for workloads that just want the
+    bearer.
+
+Which adapter runs is **per‑pool config**, since the `SandboxTemplate` already knows the
+workload's shape (ports/health). The identity‑propagation step (§5.1) is then an adapter
+capability, not broker‑global behavior.
+
+**Session addressing (unblocks this and ForkSet).** Today `_sid_for` bakes in one
+durable session per principal (`sess-<principal>-<hash>`). A generic broker must let the
+**protocol's own session token** select the session — MCP's `mcp-session-id`, A2A's
+task/context id — so a caller can address a *specific* session (e.g. a fork
+`sess-fork-…-3`), not only the principal‑derived one. This is the same need
+[[PRD-snapshot-fork]] (ForkSet) has for addressing individual forks, and it's the
+deepest of the changes here (it touches the broker↔router session contract). The router
+itself is unchanged — it already resolves whatever `X‑Session‑ID` it's handed (§5.2).
+
+**Net:** the JWT‑propagation work and the "generic broker" work are the *same* refactor
+seen from two angles — a **protocol‑aware core with pluggable, identity‑propagating
+adapters**, where identity always rides the protocol's native mechanism (with RFC 8693
+exchange to get the audience right).
+
+### 5.7 What lives in the broker vs. agentgateway
+
+The front door is already two components with a clean split
+([architecture-broker.md](sandboxd/architecture-broker.md)): **agentgateway** (the
+internet‑facing MCP‑aware edge) and the **broker** (internal, session‑aware). The
+principle for placing this work: **agentgateway does coarse, stateless, edge‑global
+policy; the broker does per‑session/per‑pool context that only it has.**
+
+| Concern | Where | Why |
+|---------|-------|-----|
+| Verify the user JWT (issuer/aud/sig), reject at the edge | **agentgateway** (already does) | Stateless, request‑local; belongs at the internet edge as defense‑in‑depth. |
+| Coarse tool/eligibility gate (the `tools/list` allowlist by group) | **agentgateway** (already does) | Edge‑global policy that needs no session context; already implemented there. |
+| RFC 8693 **token exchange** (re‑mint → downscoped, audience = the in‑sandbox server) | **broker** | Needs the **target pool's** requestable scopes + the in‑sandbox server's audience — per‑pool context agentgateway doesn't carry. The broker already holds the validated claims and is a confidential OAuth client. |
+| **Protocol‑native injection** (put the exchanged token on the MCP `Authorization` / A2A scheme) | **broker** (the adapter, §5.6) | The broker is the seam that talks to the specific pool/session and knows which adapter applies. |
+| **Session resolution / addressing** (which `sess-…` / fork this request targets) | **broker** | Inherently per‑session; agentgateway is session‑agnostic. |
+| Fan‑out quota / per‑subject session cap | **broker** | Needs session‑count state the broker owns. |
+
+Why not push exchange up into agentgateway? Two reasons: (1) the exchange audience +
+scope set are **per‑pool** (they depend on which sandbox the session lands in), which
+agentgateway doesn't know — it terminates MCP generically and forwards; (2) it would
+couple the edge to per‑pool delegation config, undoing the clean "edge = coarse global
+authz, broker = session/pool context" separation the deployment already has. So the
+edge stays as‑is (verify + coarse gate + forward the JWT unchanged), and **all of §5.1,
+§5.6 lives in the broker.** If a future need arises to enforce delegation *policy* at
+the edge (e.g. "this client may never delegate"), that coarse rule can live in
+agentgateway while the mechanism stays in the broker.
 
 ## 6. Authorization gate (shared with BYOC / IAM)
 
@@ -302,7 +413,9 @@ to the calling user, scoped to the user's permissions, with no user token stored
 
 | # | Question | Leaning |
 |---|----------|---------|
-| Q1 | Header name/shape for the delegated token? | `X-Delegated-Authorization: Bearer …` + `X-On-Behalf-Of: <sub>`; keep distinct from any workload `Authorization`. |
+| Q1 | Where does the delegated token ride? | **Flipped by Update 2:** the protocol's **native** channel — MCP transport `Authorization: Bearer …` (the resource‑server slot), A2A's declared scheme; optional `X-On-Behalf-Of: <sub>` for audit. Not a bespoke `X-Delegated-Authorization`. |
+| Q8 | How much lives in the broker vs. agentgateway? | See §5.7 — agentgateway does coarse edge authn/authz (verify JWT, group/tool gate) it already does; the **broker** owns per‑request token exchange + protocol‑native injection + session addressing, because those need per‑session/per‑pool context the gateway doesn't have. |
+| Q9 | One broker process per protocol, or one broker with adapters? | One core + pluggable adapters selected per pool (§5.6); revisit only if a protocol needs a wholly separate deployment. |
 | Q2 | Emit `act`/`obo` per the OAuth draft, or a simpler custom claim now? | Do RFC 8693 exchange now; make the emitted claim shape configurable to track the draft. |
 | Q3 | Where are the agent's requestable scopes declared? | Operator‑declared per pool (`SandboxTemplate`), filtered to ∩ user‑has at exchange. Never workload‑chosen. |
 | Q4 | Ship before, with, or after P1.5? | With/after — the propagation channel should be authenticated (mTLS + NetworkPolicy) before forwarding bearer tokens to workers. |
