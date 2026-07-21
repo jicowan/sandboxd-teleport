@@ -224,7 +224,7 @@ Has a `status` subresource. Printer columns: `Desired`, `Ready`, `Phase`.
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
 | `baseRef` | LocalRef | No | The `BaseSnapshot` to fork from (snapshot source). Omit for image‑source fan‑out. |
-| `count` | int32 | **Yes** | Number of fork children (N) to create; min 1. |
+| `count` | int32 | **Yes** | Number of fork children (N) to create. **Range 1–256.** The maximum is a **hard, apiserver-enforced cap** baked into the CRD schema — see the box below. |
 | `namePrefix` | string | No | Deterministic child naming (`sess-fork-<prefix>-<n>`) so a harness can address a specific fork. Defaults to the ForkSet name. |
 | `pool` | string | **Yes** | Pool that places the forks; for the image source it also supplies the template image. Must be `runsc`‑compatible with the base (snapshot source). |
 | `activation` | string | No | `Eager` (materialize all N now) or `Lazy` (born Suspended/Absent, materialize on first contact). Default `Lazy`. |
@@ -273,6 +273,57 @@ kubectl get fork rl-batch -n default -o jsonpath='{.status.forks}'   # the N ses
 > `/v1/shell/exec` in an isolated shell — `/tmp` writes don't persist across exec calls
 > or checkpoint/restore, but writes under the working dir **`/home/gem`** do. Put
 > fork‑relevant state where your target image persists it.
+
+### The `count` fan‑out cap (important — scope + how to change it)
+
+`spec.count` is capped at **256** by the CRD schema (`maximum: 256`). This is the
+operator's **absolute, bypass‑proof per‑object guardrail** (docs/PRD‑snapshot‑fork.md
+§6): the **apiserver** rejects a `ForkSet` with `count > 256` at admission — before any
+sandboxd code runs — so it holds for **every** caller equally, a direct `kubectl apply`
+as much as the example broker. It bounds the blast radius of a single fan‑out (one
+`ForkSet` ⇒ up to N workers), catching the "typed `count: 100000`" mistake.
+
+**Scope — read carefully:** the cap is **per `ForkSet`**, **not** a total across the
+cluster or per user.
+
+| Limit | Scope | Enforced by | Status |
+|-------|-------|-------------|--------|
+| **Per‑ForkSet `count` ≤ 256** | one object | CRD schema / apiserver (bypass‑proof) | **enforced** |
+| Total concurrent forks **per subject** | all a user's ForkSets | the caller's front door (e.g. the example broker's `fork_session`) — the operator can't see identity | not built (fan‑out quota; see [PRD‑broker‑fork‑session](../PRD-broker-fork-session.md)) |
+| Total concurrent forks **cluster‑wide** | whole cluster | would be an operator reconciler check (not admission‑time, so not bypass‑proof) | not built |
+
+So N separate ForkSets can still sum past 256 (e.g. 10 × 200). Bounding the **total**
+is the aggregate‑quota work — per‑subject at the front door (intended design) and/or a
+cluster‑wide reconciler gate — deliberately out of scope of this per‑object cap. The
+design split: the **operator owns the absolute per‑object ceiling; the caller owns
+per‑identity policy** below it.
+
+**Why hardcoded (not an env/flag):** the cap is in the CRD's OpenAPI schema so the
+**apiserver** enforces it — and the apiserver validates against the static CRD, with no
+access to an operator env var or flag. Making it runtime‑configurable would require a
+validating webhook or `ValidatingAdmissionPolicy` (deliberately avoided). The tradeoff
+is **bypass‑proof but fixed**.
+
+**To change the cap in the future:**
+
+1. Edit the marker on `ForkSetSpec.Count` in
+   `checkpoint-restore/controlplane/api/v1alpha1/forkset_types.go`:
+   ```go
+   // +kubebuilder:validation:Maximum=256   // <-- change this number
+   ```
+2. Regenerate + re‑apply the CRD:
+   ```sh
+   cd checkpoint-restore/controlplane && make manifests
+   kubectl apply -f config/crd/bases/core.sandboxd.io_forksets.yaml
+   ```
+   (No operator rebuild needed — the cap lives entirely in the CRD schema.)
+3. **Lowering** the cap does **not** retroactively reject ForkSets already created above
+   the new value; it only gates new/updated objects.
+
+If instead you want a **tunable** limit (per deployment/subject) rather than a fixed
+ceiling, add it as a **reconciler/front‑door check** on top of this CRD cap — the two
+compose (CRD = hard un‑bypassable ceiling; reconciler/broker = softer tunable policy
+below it). That check would be admission‑after‑the‑fact, not apiserver‑enforced.
 
 ---
 

@@ -73,8 +73,18 @@ spec:
                 - name
                 type: object
               count:
-                description: count is the number of fork children (N) to create.
+                description: |-
+                  count is the number of fork children (N) to create.
+
+                  The maximum is the operator's ABSOLUTE, bypass-proof fan-out guardrail
+                  (docs/PRD-snapshot-fork.md §6): a hard cap enforced by the apiserver via the
+                  CRD schema, so it holds for EVERY caller — a direct `kubectl apply` as much as
+                  the example broker. It bounds blast radius (one ForkSet = up to N workers). It
+                  is intentionally a fixed cap, not per-subject quota: per-identity limits are
+                  the CALLER's job (the broker's fork_session), which the operator cannot and
+                  does not enforce here.
                 format: int32
+                maximum: 256
                 minimum: 1
                 type: integer
               iam:

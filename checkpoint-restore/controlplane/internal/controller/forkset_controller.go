@@ -98,6 +98,24 @@ func (r *ForkSetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			_ = r.Status().Update(ctx, &fs)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
+		// Snapshot-source cross-object check: the target pool must resolve to a
+		// SandboxTemplate. A bogus pool otherwise fails opaquely later (the seeded
+		// children never place). Fail fast with a clear condition instead.
+		//
+		// NOTE: the PRD also wants a runsc-VERSION match (base vs pool), but that is
+		// not computable from the CRDs today — base.status.runscVersion is never
+		// populated (session state carries no runsc) and a pool exposes no runsc
+		// (it's implicit in the worker image). The worker's /restore 409s a genuine
+		// runsc mismatch as the backstop; threading runsc through
+		// checkpoint→session→base is future work.
+		if _, terr := templateForPool(ctx, r.Client, fs.Namespace, fs.Spec.Pool); terr != nil {
+			r.setReady(ctx, &fs, metav1.ConditionFalse, "PoolUnresolved",
+				fmt.Sprintf("pool %q does not resolve to a SandboxTemplate: %v", fs.Spec.Pool, terr))
+			fs.Status.Phase = corev1alpha1.ForkSetProgressing
+			fs.Status.Desired = fs.Spec.Count
+			_ = r.Status().Update(ctx, &fs)
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
 		base = &b
 	}
 

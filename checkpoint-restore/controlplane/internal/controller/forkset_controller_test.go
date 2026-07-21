@@ -44,6 +44,23 @@ var _ = Describe("ForkSet Controller (image source)", func() {
 		})
 	}
 
+	It("rejects count over the hard cap (CEL) and accepts within it", func() {
+		ctx := context.Background()
+		// Over the cap (256): the apiserver's CRD schema rejects it at create.
+		over := &corev1alpha1.ForkSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "batch-cap-over", Namespace: ns},
+			Spec:       corev1alpha1.ForkSetSpec{Count: 257, Pool: "aio-pool"},
+		}
+		err := k8sClient.Create(ctx, over)
+		Expect(err).To(HaveOccurred(), "count=257 must be rejected by the CRD cap")
+		// At the cap: accepted.
+		atCap := &corev1alpha1.ForkSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "batch-cap-ok", Namespace: ns},
+			Spec:       corev1alpha1.ForkSetSpec{Count: 256, Pool: "aio-pool"},
+		}
+		Expect(k8sClient.Create(ctx, atCap)).To(Succeed())
+	})
+
 	It("fans out N child Sessions owned by the ForkSet, image source", func() {
 		ctx := context.Background()
 		fs := &corev1alpha1.ForkSet{
@@ -195,6 +212,16 @@ var _ = Describe("ForkSet Controller (image source)", func() {
 			Image:       "ghcr.io/agent-infra/sandbox:latest",
 		}
 		Expect(k8sClient.Status().Update(ctx, base)).To(Succeed())
+
+		// Snapshot-source forks now require the target pool to resolve to a template.
+		Expect(k8sClient.Create(ctx, &corev1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "aio-tmpl-e", Namespace: ns},
+			Spec:       corev1alpha1.SandboxTemplateSpec{Image: "ghcr.io/agent-infra/sandbox:latest"},
+		})).To(Succeed())
+		Expect(k8sClient.Create(ctx, &corev1alpha1.WarmPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "aio-pool", Namespace: ns},
+			Spec:       corev1alpha1.WarmPoolSpec{TemplateRef: corev1alpha1.LocalRef{Name: "aio-tmpl-e"}, Replicas: 1},
+		})).To(Succeed())
 
 		fs := &corev1alpha1.ForkSet{
 			ObjectMeta: metav1.ObjectMeta{Name: "batch-e", Namespace: ns},

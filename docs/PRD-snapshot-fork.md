@@ -273,9 +273,25 @@ status:
 | `lifecycle.idleTimeoutSeconds` / `ttlAfterSuspendSeconds` | per‑fork idle + retention. |
 | `subject` | owner for the fan‑out quota + attribution. |
 
-**Validation:** `baseRef` present ⟹ the referenced `BaseSnapshot` must exist and be
-`ready`; the `pool`'s `runscVersion` must match the base's. `baseRef` absent ⟹ `pool`
-is required (it supplies the image). A CEL admission rule can enforce both.
+**Validation (as built):**
+- **`count ≤ 256` — CEL/CRD hard cap, IMPLEMENTED.** Enforced by the apiserver via the
+  CRD schema (`+kubebuilder:validation:Maximum=256`), so it's bypass‑proof for every
+  caller. It is a **per‑ForkSet** ceiling (blast radius of one fan‑out), NOT a
+  cluster‑ or per‑subject total — see §6. Hardcoded, not env/flag (the apiserver can't
+  read operator config); to change it, edit the marker + `make manifests` +
+  re‑apply the CRD (no operator rebuild). See admin‑guide‑crds "The `count` fan‑out cap".
+- **`baseRef` present ⟹ pool resolves to a template — reconciler check, IMPLEMENTED.**
+  The reconciler fails fast (condition `PoolUnresolved`) if the target pool doesn't
+  resolve to a `SandboxTemplate`, and requires the base to be `ready` (condition
+  `BaseNotReady`). `baseRef` absent ⟹ `pool` required (CRD `Required`).
+- **runsc‑version match — NOT implemented (data gap).** The PRD wanted "the pool's
+  `runscVersion` must match the base's," but that's not computable from the CRDs today:
+  `BaseSnapshot.status.runscVersion` is never populated (session state carries no
+  runsc) and a pool exposes no runsc (it's implicit in the worker image). The worker's
+  `/restore` 409s a genuine runsc mismatch as the backstop; threading runsc through
+  checkpoint→session→base is future work. (A cross‑object *ready* check can't be an
+  embedded‑CEL rule anyway — that only sees the object under validation — so it lives
+  in the reconciler, not admission.)
 
 **Controller flow (per fork child):** mint a new `Session` (id `sess-fork-<prefix>-<n>`)
 with `spec.forkFrom = {baseRef, snapshotURI}` (5.5, empty for the image source) and the
@@ -441,11 +457,31 @@ restored, a **distinct worker binding** in KV, so:
 
 ## 6. Authorization
 
-*Who* may fork, *how many* forks (fan‑out cap), and *from which* bases is a
-subject→entitlement decision — the **same gate** deferred for BYOC, per‑session IAM,
-and delegated access. Forking amplifies resource use (N workers per call), so a
-per‑subject fan‑out quota is the key new control. This PRD assumes that gate; it adds
-one parameter to it (max forks / concurrent forks per subject).
+Two layers, split by what each can actually enforce:
+
+**Operator — absolute, bypass‑proof, per‑object (IMPLEMENTED).** The CRD caps
+`count ≤ 256` at the apiserver (§5.2). This is the operator's hard ceiling on a single
+fan‑out and holds for every caller (direct `kubectl apply` included). **Scope: it is
+per‑`ForkSet`, not a total.** N separate ForkSets can still sum past 256 — bounding the
+*aggregate* is the caller's job (below), because the apiserver validates one object in
+isolation and can't see cluster‑wide state.
+
+**Caller — per‑identity / aggregate policy (NOT built).** *Who* may fork, *total*
+concurrent forks per subject, and *from which* bases is a subject→entitlement decision
+— the **same gate** deferred for BYOC, per‑session IAM, and delegated access. Forking
+amplifies resource use (N workers per call), so a **per‑subject fan‑out quota** (sum
+across a user's ForkSets) is the key new control; it lives at the front door (the
+example broker's `fork_session`), which is the only place identity is known — the
+operator records the opaque `spec.subject` but does not enforce per‑subject limits. A
+**cluster‑wide** total could additionally be an operator reconciler gate (list all fork
+children, refuse past a budget) — reconciler‑time, not apiserver‑enforced — but is not
+built. Summary of the three limits (per‑object done; both aggregates deferred):
+
+| Limit | Scope | Enforced by | Status |
+|-------|-------|-------------|--------|
+| `count ≤ 256` | one ForkSet | CRD/apiserver (bypass‑proof) | **done** |
+| total per subject | a user's ForkSets | front door (broker `fork_session`) | deferred (quota) |
+| total cluster‑wide | whole cluster | operator reconciler (not bypass‑proof) | deferred |
 
 ## 7. Risks / considerations
 
@@ -633,11 +669,13 @@ snapshot source (base + pinning + GC).
 **Implemented + verified live** (2026‑07‑19, operator `v28` + worker `sandboxd:v52`) —
 see the as‑built note at the top. Both sources shipped (image fan‑out + snapshot
 copy‑on‑promote/restore), finalizer‑backed base reclaim, refCount, and the
-worker‑side sid‑reuse fix. **Not yet built (deferred):** the broker `fork_session`
-sugar (§5.2 — the CR is the substrate today), the fan‑out quota on the shared authz
-gate (§6), a CEL runsc‑match admission rule (§5.2 validation), and the §9 items (CoW
-storage, snapshot‑read cache, nested fork trees). See [[sandboxd-pending-work]]
-(memory) for the cross‑session tracker.
+worker‑side sid‑reuse fix. **Also shipped (2026‑07‑21, operator `v32`):** the CEL
+`count ≤ 256` hard cap (§5.2/§6) and the reconciler pool‑resolvability check.
+**Not yet built (deferred):** the broker `fork_session` sugar (§5.2 — the CR is the
+substrate today), the **aggregate** fan‑out quota (per‑subject at the front door +
+optional cluster‑wide reconciler gate, §6), a runsc‑version match (data gap, §5.2), and
+the §9 items (CoW storage, snapshot‑read cache, nested fork trees). See
+[[sandboxd-pending-work]] (memory) for the cross‑session tracker.
 
 > **Naming note:** the file is `PRD-snapshot-fork.md` for link stability, but the
 > feature is **ForkSet** (fan out N from a snapshot *or* an image). `baseRef` optional
