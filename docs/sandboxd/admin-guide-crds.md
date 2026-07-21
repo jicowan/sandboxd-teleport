@@ -159,6 +159,7 @@ Printer columns: `Phase` (`.status.phase`), `Worker` (`.status.workerPodIP`).
 | `iam` | IAMSpec | No | Assume an AWS IAM role for this session's sandbox (`iam.roleArn`), overriding the pool template's `iam`. |
 | `lifecycle` | SessionLifecycle | No | Overrides template idle/TTL for this session. |
 | `forkFrom` | ForkProvenance | No | Set by the `ForkSet` controller on a fork child: `{baseRef, snapshotURI}` records the base it was seeded from (snapshot source; empty for image forks). Makes the child self‑describing and is the base‑reclaim ref‑count key. Not set by hand. |
+| `suspendRequest` | string | No | **Edge‑triggered, one‑shot** request to checkpoint+suspend this session **now** (docs/PRD-on-demand-suspend.md). Set it to a fresh **opaque token** (uuid/timestamp/etc.); when it differs from `status.lastSuspendHandled` the operator performs exactly one checkpoint→S3→Suspended→free‑worker, then sets the watermark equal. It is **not** a level‑triggered desired‑state — reactive resume (a request to the router) may bring the session back to Running afterward and will **not** re‑suspend it (the token is already handled). Wait for `status.lastSuspendHandled == spec.suspendRequest && status.snapshotURI != ""` to know the snapshot is durable (e.g. before promoting a `BaseSnapshot`). |
 
 #### SessionLifecycle
 
@@ -192,7 +193,8 @@ mirror so a rebuild needs no template re‑resolution.
 | `health` | Health | — | Readiness/restart config (replayed on restore). |
 | `iamRoleArn` | string | — | Session's assumable AWS role (replayed on restore). |
 | `lastActiveAt` | metav1.Time | — | Last request time (mirrored coarsely, on transitions — not every request). |
-| `conditions` | []metav1.Condition | — | Standard condition list. |
+| `lastSuspendHandled` | string | — | Watermark for `spec.suspendRequest`: the token the operator most recently completed, set **only after** the checkpoint is durably in S3 and the session is Suspended. Equal to `spec.suspendRequest` ⇒ the on‑demand suspend is done; differing ⇒ pending/in‑flight. |
+| `conditions` | []metav1.Condition | — | Standard condition list (includes a `SuspendRequest` condition surfacing on‑demand‑suspend progress: `Suspended`/`SuspendFailed`). |
 
 ```sh
 kubectl get sess -n default

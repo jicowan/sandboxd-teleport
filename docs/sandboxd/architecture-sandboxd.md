@@ -105,6 +105,14 @@ Responsibilities:
   O(N)**: they read Redis ZSET due‑indexes (`idx:suspend:due`, `idx:checkpoint:due`)
   scored by each session's deadline, so a pass touches only sessions actually due,
   not the whole table (`--sweep-interval-seconds`, default 30s, staggered).
+- **On‑demand suspend.** Besides idle‑timeout and checkpoint‑on‑terminate, a session
+  can be checkpoint‑suspended **on request**: set `Session.spec.suspendRequest` to a
+  fresh opaque token and a `SessionReconciler` performs one checkpoint→S3→Suspended,
+  then advances the `status.lastSuspendHandled` watermark. **Edge‑triggered** (one‑shot
+  per token) so it never fights reactive resume — the session may be requested back to
+  Running afterward and won't be re‑suspended. The declarative, CR‑driven "save my
+  state now" primitive (docs/PRD-on-demand-suspend.md); the example broker's
+  `fork_session` composes it.
 - **Session GC.** Optional reaper of a dead session's **whole footprint** — the S3
   snapshot, the Valkey `session:*` entry (+ its due‑index membership), and the
   `Session` CR — running under a *separate, least‑privilege* S3 identity (list +
