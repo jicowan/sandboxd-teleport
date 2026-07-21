@@ -359,10 +359,20 @@ longer keeping up. Full analysis + remaining options:
 
 ## Trust boundaries and what's next
 
-- The router currently **trusts the `X-Session-ID` header** from the broker; only
-  the broker can reach it in‑cluster. The planned **P1.5** phase adds SPIRE mTLS
-  (sandboxd `:8090`, operator `/resume`, router→worker) and a NetworkPolicy locking
-  workers to router/operator‑only ingress, which also closes this header‑trust gap.
+- **Control‑hop mTLS (P1.5) — implemented (opt‑in).** The two control hops —
+  **router → operator `/resume`** and **operator → worker** control API (`:8090`) —
+  can be secured with **SPIFFE mTLS via SPIRE**, mutually authenticated on the peer's
+  SPIFFE ID (`spiffe://sandboxd/{router,operator,worker}`). Enabled by `--mtls` /
+  `SANDBOXD_MTLS=1` (off by default → plain HTTP). This turns "anything that can reach
+  the port" into "only the workload with the expected SPIFFE ID" — closing the
+  unauthenticated‑`/resume` gap. kubelet probes stay on plain ports (worker `:8092`,
+  operator `:8081`), off the mTLS ports. See
+  [security-spiffe-spire.md](security-spiffe-spire.md).
+- **Still to do (data‑plane pass):** the **broker → router** and **router → worker**
+  hops are not yet mTLS'd (the router still **trusts the `X-Session-ID` header** from
+  the broker; only the broker can reach it in‑cluster). A second pass extends mTLS to
+  those hops (the router's inbound `:8080` will then need a plain health port too) plus
+  a NetworkPolicy locking workers to router/operator‑only ingress.
 - **Single worker namespace:** the operator assumes one namespace
   (`--resume-namespace`) for templates/pools/sessions and worker‑pod prune, and KV
   keys carry no namespace. Multi‑namespace (per‑tenant) workers are a known future
@@ -373,10 +383,10 @@ longer keeping up. Full analysis + remaining options:
 
 | Component | Image (reference) | Ports | Namespace |
 |-----------|-------------------|-------|-----------|
-| operator | `…/sandboxd-operator` | `:8081` health, `:8082` `/resume` | `sandboxd-controlplane-system` |
+| operator | `…/sandboxd-operator` | `:8081` health, `:8082` `/resume` (mTLS when `--mtls`) | `sandboxd-controlplane-system` |
 | router | `…/sandboxd-router` | `:8080` (`/mcp`, `/_warm`, `/healthz`) | `sandboxd-controlplane-system` |
 | Valkey | `valkey/valkey:8-alpine` | `:6379` | `sandboxd-controlplane-system` |
-| sandboxd worker | `…/sandboxd` | `:8090` | `default` (pools) |
+| sandboxd worker | `…/sandboxd` | `:8090` control (mTLS when `SANDBOXD_MTLS=1`), `:8092` plain health, `:8091` cred‑vendor (netns) | `default` (pools) |
 
 See [install-guide-sandboxd.md](install-guide-sandboxd.md) to deploy these and
 [admin-guide-crds.md](admin-guide-crds.md) for the CRD fields that drive them.

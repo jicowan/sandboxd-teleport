@@ -7,14 +7,20 @@ checkpoint, restore, suspend, and inspect nested gVisor sandboxes on a worker po
 > **Audience & trust.** This API is an **internal control interface**, not a
 > user‑facing one. In normal operation only the operator (resume/suspend/checkpoint
 > workflows) and the router (data‑plane proxy to the sandbox's *workload* port,
-> not to `:8090`) talk to a worker. It has no authentication of its own — it relies
-> on being reachable only in‑cluster (the planned P1.5 phase adds mTLS +
-> NetworkPolicy). Documented here for operators debugging a worker directly and for
-> anyone building against the control plane.
+> not to `:8090`) talk to a worker. **Authentication (P1.5, opt‑in):** with
+> `SANDBOXD_MTLS=1` the `:8090` control API requires **SPIFFE mTLS** and authorizes
+> the caller's SPIFFE ID == `spiffe://sandboxd/operator` — so only the operator can
+> drive it. Off by default (plain HTTP, in‑cluster reachability only). See
+> [security-spiffe-spire.md](security-spiffe-spire.md). Documented here for operators
+> debugging a worker directly and for anyone building against the control plane.
 
 ## Conventions
 
-- **Base URL:** `http://<worker-pod-ip>:8090`.
+- **Base URL:** `http://<worker-pod-ip>:8090` — or **`https://…:8090`** under mTLS
+  (`SANDBOXD_MTLS=1`), where a client SVID is required.
+- **Health probes:** kubelet liveness/readiness use a **separate plain‑HTTP listener
+  on `:8092`** (`SANDBOXD_HEALTH_ADDR`, `/healthz`), never the mTLS control port — so
+  probes work regardless of the `:8090` TLS mode.
 - **Content type:** requests and responses are JSON (`application/json`) except
   `/logs` (`text/plain`) and `/healthz` (plain text).
 - **Errors:** non‑2xx responses are `{"error": "<message>"}`. A malformed JSON body

@@ -235,6 +235,10 @@ kubectl get pods -n sandboxd-controlplane-system
 | `--abandoned-grace-seconds` | `SANDBOXD_ABANDONED_GRACE_SECONDS` | `3600` | How long a non‑Suspended session (or orphan CR) must look dead before GC reaps it. `0` disables the abandoned + orphan‑CR passes. |
 | `--leader-elect` | — | `false` | Leader election (enable for HA). |
 | `--metrics-bind-address` | — | `0` (off) | Prometheus metrics addr. Enable to export `sandboxd_*` metrics (resumes, suspends, pool workers, sweep duration/due, GC candidates/reaped). |
+| `--mtls` | `SANDBOXD_MTLS` (`=1`) | `false` | Enable SPIFFE mTLS on the control hops (router→operator `/resume`, operator→worker). Requires SPIRE + the Workload API socket. Also injects mTLS into provisioned worker pods. See [security-spiffe-spire.md](security-spiffe-spire.md). |
+| `--spiffe-socket` | `SPIFFE_ENDPOINT_SOCKET` | CSI default | SPIRE Workload API socket. |
+| `--spiffe-router-id` | `SANDBOXD_SPIFFE_ROUTER_ID` | `spiffe://sandboxd/router` | SPIFFE ID authorized as the `/resume` caller. |
+| `--spiffe-worker-id` | `SANDBOXD_SPIFFE_WORKER_ID` | `spiffe://sandboxd/worker` | SPIFFE ID authorized when calling workers. |
 
 ### Router flags reference
 
@@ -242,9 +246,12 @@ kubectl get pods -n sandboxd-controlplane-system
 |------|-----|---------|---------|
 | `--listen` | `ROUTER_LISTEN` | `:8080` | Listen address. |
 | `--kv-addr` | `SANDBOXD_KV_ADDR` | `valkey:6379` | Valkey address. |
-| `--resume-url` | `SANDBOXD_RESUME_URL` | `http://sandboxd-controlplane-operator:8082/resume` | Operator `/resume` URL. **The smoke manifest overrides this to `http://sandboxd-operator:8082/resume`** to match the operator Service name — set it to match yours. |
+| `--resume-url` | `SANDBOXD_RESUME_URL` | `http://sandboxd-controlplane-operator:8082/resume` | Operator `/resume` URL. **The smoke manifest overrides this to `http://sandboxd-operator:8082/resume`** to match the operator Service name — set it to match yours. **With `--mtls`, use `https://`.** |
 | `--worker-port` | — | `8090` | sandboxd worker data port. |
 | `--resume-deadline-seconds` | `SANDBOXD_RESUME_DEADLINE_SECONDS` | `90` | Time‑to‑first‑byte / warm‑up bound. |
+| `--mtls` | `SANDBOXD_MTLS` (`=1`) | `false` | Enable SPIFFE mTLS for the router→operator `/resume` hop. Requires SPIRE + the Workload API socket. |
+| `--spiffe-socket` | `SPIFFE_ENDPOINT_SOCKET` | CSI default | SPIRE Workload API socket. |
+| `--spiffe-operator-id` | `SANDBOXD_SPIFFE_OPERATOR_ID` | `spiffe://sandboxd/operator` | SPIFFE ID the router authorizes when calling `/resume`. |
 
 ## Step 5 — Create a pool of gVisor workers
 

@@ -23,6 +23,7 @@ describes the live reference cluster it says so explicitly.
 | 6 | [architecture-sandboxd.md](architecture-sandboxd.md) | Architects / admins | How sandboxd, the router, the operator, Valkey, and workers relate. |
 | 7 | [runbook-reproduce-test-env.md](runbook-reproduce-test-env.md) | Operators | End‑to‑end reproduction of the test environment + run a sample container. |
 | 8 | [api-reference-sandboxd-worker.md](api-reference-sandboxd-worker.md) | Operators / integrators | HTTP API surface of the sandboxd worker agent (`:8090`). |
+| 9 | [security-spiffe-spire.md](security-spiffe-spire.md) | Platform admins / security | Secure the control‑plane hops (router→operator, operator→worker) with SPIFFE/SPIRE mTLS: install, register identities, enable, verify. |
 
 ## Proposals (not yet scheduled)
 
