@@ -1,7 +1,14 @@
 # PRD — on‑demand session suspend (declarative, edge‑triggered)
 
-Status: **Proposed** (decision‑ready; grounded in the shipped code on the
-`checkpoint-restore` branch). Related:
+Status: **Implemented + verified live** (2026‑07‑20, operator `v29`). As built: 2
+additive Session fields (`spec.suspendRequest` + `status.lastSuspendHandled`), an
+exported `Suspender.SuspendNow` over the existing `suspendOne`, and a new
+`SessionReconciler` (the first controller to watch Session). Live‑verified: patch
+`suspendRequest` → Suspended + fresh snapshot + watermark advances; a marker survives
+checkpoint/restore; a request resumes it and it STAYS Running (stale token doesn't
+re‑suspend — the level‑vs‑edge guard); same token is a no‑op; a new token suspends
+again. On‑demand checkpoints are GC'd identically to any suspended‑session snapshot.
+Commits `73d225a` (PRD) + `021ae1e` (impl). Related:
 [PRD-snapshot-fork.md](PRD-snapshot-fork.md) (the primary consumer),
 [PRD-durable-assignment-state.md](PRD-durable-assignment-state.md),
 [architecture-sandboxd.md](sandboxd/architecture-sandboxd.md),
