@@ -107,6 +107,64 @@ type WorkerConfig struct {
 	// vendor. Injected into workers as SANDBOXD_CRED_TOKEN_KEY, which enables
 	// per-session IAM credentials. Empty = credential vendor disabled.
 	CredTokenSecret string
+	// MTLS enables SPIFFE mTLS on the worker control API (:8090): the worker
+	// requires the operator's client SVID. When set, worker pods mount the SPIFFE
+	// CSI Workload API socket and get SANDBOXD_MTLS=1. kubelet probes always target
+	// the dedicated plain health port (:8092), never the mTLS control port. P1.5.
+	MTLS bool
+}
+
+// SPIFFE CSI driver + Workload API mount for worker pods (P1.5). The CSI driver
+// (csi.spiffe.io) publishes the agent socket read-only into the pod.
+const (
+	spiffeCSIDriver    = "csi.spiffe.io"
+	spiffeSocketVolume = "spiffe-workload-api"
+	spiffeSocketMount  = "/spiffe-workload-api"
+)
+
+// workerHealthPort is the worker's dedicated PLAIN-HTTP health listener
+// (SANDBOXD_HEALTH_ADDR :8092). kubelet probes hit this, never the control API on
+// :8090 — so probes work identically whether or not the control port runs mTLS
+// (kubelet has no SVID). Serves only /healthz.
+const workerHealthPort = 8092
+
+// workerReadinessProbe always probes the plain health port with httpGet /healthz —
+// independent of the control-API TLS mode.
+func workerReadinessProbe() *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+			Path: "/healthz", Port: intstrHealth()}},
+		InitialDelaySeconds: 2, PeriodSeconds: 5,
+	}
+}
+
+// workerVolumeMounts adds the SPIFFE socket mount (read-only) when mTLS is on.
+func workerVolumeMounts(mtls bool, propagation *corev1.MountPropagationMode) []corev1.VolumeMount {
+	vm := []corev1.VolumeMount{
+		{Name: "containerd-sock", MountPath: "/run/containerd/containerd.sock"},
+		{Name: "containerd-data", MountPath: "/var/lib/containerd", MountPropagation: propagation},
+	}
+	if mtls {
+		ro := true
+		vm = append(vm, corev1.VolumeMount{Name: spiffeSocketVolume, MountPath: spiffeSocketMount, ReadOnly: ro})
+	}
+	return vm
+}
+
+// workerVolumes adds the SPIFFE CSI volume when mTLS is on.
+func workerVolumes(mtls bool, hostPathSocket, hostPathDir *corev1.HostPathType) []corev1.Volume {
+	vols := []corev1.Volume{
+		{Name: "containerd-sock", VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: "/run/containerd/containerd.sock", Type: hostPathSocket}}},
+		{Name: "containerd-data", VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/containerd", Type: hostPathDir}}},
+	}
+	if mtls {
+		ro := true
+		vols = append(vols, corev1.Volume{Name: spiffeSocketVolume, VolumeSource: corev1.VolumeSource{
+			CSI: &corev1.CSIVolumeSource{Driver: spiffeCSIDriver, ReadOnly: &ro}}})
+	}
+	return vols
 }
 
 // WarmPoolReconciler reconciles a WarmPool object into a Deployment of sandboxd
@@ -329,28 +387,21 @@ func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool, tmpl
 					Affinity:                      sched.Affinity,
 					TopologySpreadConstraints:     sched.TopologySpreadConstraints,
 					Containers: []corev1.Container{{
-						Name:            "sandboxd",
-						Image:           workerImage,
-						Ports:           []corev1.ContainerPort{{ContainerPort: 8090, Name: "http"}},
+						Name:  "sandboxd",
+						Image: workerImage,
+						Ports: []corev1.ContainerPort{
+							{ContainerPort: 8090, Name: "http"},
+							{ContainerPort: workerHealthPort, Name: "health"},
+						},
 						Env:             r.workerEnv(tmpl),
 						Resources:       workerResources,
 						SecurityContext: &corev1.SecurityContext{Privileged: &privileged},
-						ReadinessProbe: &corev1.Probe{
-							ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
-								Path: "/healthz", Port: intstr8090()}},
-							InitialDelaySeconds: 2, PeriodSeconds: 5,
-						},
-						VolumeMounts: []corev1.VolumeMount{
-							{Name: "containerd-sock", MountPath: "/run/containerd/containerd.sock"},
-							{Name: "containerd-data", MountPath: "/var/lib/containerd", MountPropagation: &propagation},
-						},
+						// kubelet probes hit the dedicated plain health port (:8092), never
+						// the mTLS control API on :8090 — so probing is mode-independent.
+						ReadinessProbe: workerReadinessProbe(),
+						VolumeMounts:   workerVolumeMounts(r.Worker.MTLS, &propagation),
 					}},
-					Volumes: []corev1.Volume{
-						{Name: "containerd-sock", VolumeSource: corev1.VolumeSource{
-							HostPath: &corev1.HostPathVolumeSource{Path: "/run/containerd/containerd.sock", Type: &hostPathSocket}}},
-						{Name: "containerd-data", VolumeSource: corev1.VolumeSource{
-							HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/containerd", Type: &hostPathDir}}},
-					},
+					Volumes: workerVolumes(r.Worker.MTLS, &hostPathSocket, &hostPathDir),
 				},
 			},
 		},
@@ -384,6 +435,10 @@ func (r *WarmPoolReconciler) workerEnv(tmpl *corev1alpha1.SandboxTemplate) []cor
 				LocalObjectReference: corev1.LocalObjectReference{Name: r.Worker.CredTokenSecret},
 				Key:                  "token",
 			}}})
+	}
+	// P1.5: require the operator's client SVID on the worker control API.
+	if r.Worker.MTLS {
+		env = append(env, corev1.EnvVar{Name: "SANDBOXD_MTLS", Value: "1"})
 	}
 	return env
 }

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"time"
@@ -123,7 +124,10 @@ func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, h
 	}
 
 	clientFor := func(podIP string) *sandboxdclient.Client {
-		return sandboxdclient.New(podIP, httpClient)
+		if httpClient != nil {
+			return sandboxdclient.NewMTLS(podIP, httpClient)
+		}
+		return sandboxdclient.New(podIP, nil)
 	}
 
 	return resume.New(kv, lookup, clientFor, planFor, opts).
@@ -134,7 +138,10 @@ func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, h
 // It resolves each session's idle policy from its pool's SandboxTemplate.
 func BuildSuspender(c client.Client, kv *assign.Client, namespace string, httpClient *http.Client) *resume.Suspender {
 	clientFor := func(podIP string) *sandboxdclient.Client {
-		return sandboxdclient.New(podIP, httpClient)
+		if httpClient != nil {
+			return sandboxdclient.NewMTLS(podIP, httpClient)
+		}
+		return sandboxdclient.New(podIP, nil)
 	}
 	policyFor := func(ctx context.Context, sid string) (resume.IdlePolicy, error) {
 		var s corev1alpha1.Session
@@ -166,7 +173,10 @@ func BuildSuspender(c client.Client, kv *assign.Client, namespace string, httpCl
 // each session's periodic-checkpoint interval from its pool's template (P5).
 func BuildCheckpointer(c client.Client, kv *assign.Client, namespace string, httpClient *http.Client) *resume.Checkpointer {
 	clientFor := func(podIP string) *sandboxdclient.Client {
-		return sandboxdclient.New(podIP, httpClient)
+		if httpClient != nil {
+			return sandboxdclient.NewMTLS(podIP, httpClient)
+		}
+		return sandboxdclient.New(podIP, nil)
 	}
 	policyFor := func(ctx context.Context, sid string) (resume.CheckpointPolicy, error) {
 		var s corev1alpha1.Session
@@ -320,27 +330,36 @@ func portsFromCRD(in []corev1alpha1.PortMap) []sbxapi.PortMap {
 }
 
 // ResumeServer is a manager Runnable that serves the internal /resume endpoint.
-// P1: plain HTTP on addr. P1.5 will wrap with SPIRE mTLS.
+// P1: plain HTTP on addr. P1.5: when TLSConfig is set (SPIFFE mTLS authorizing the
+// router's SPIFFE ID) the server requires+verifies a client SVID; nil = plain HTTP.
 type ResumeServer struct {
-	Addr    string
-	Handler http.Handler
+	Addr      string
+	Handler   http.Handler
+	TLSConfig *tls.Config // nil = plain HTTP (rollout fallback)
 }
 
-// NewResumeServer builds the Runnable.
-func NewResumeServer(addr string, h http.Handler) *ResumeServer {
-	return &ResumeServer{Addr: addr, Handler: h}
+// NewResumeServer builds the Runnable. tlsCfg nil => plain HTTP.
+func NewResumeServer(addr string, h http.Handler, tlsCfg *tls.Config) *ResumeServer {
+	return &ResumeServer{Addr: addr, Handler: h, TLSConfig: tlsCfg}
 }
 
-// Start runs the HTTP server until the manager context is cancelled.
+// Start runs the HTTP(S) server until the manager context is cancelled.
 func (s *ResumeServer) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.Handle("/resume", s.Handler)
-	srv := &http.Server{Addr: s.Addr, Handler: mux}
+	srv := &http.Server{Addr: s.Addr, Handler: mux, TLSConfig: s.TLSConfig}
 	go func() {
 		<-ctx.Done()
 		_ = srv.Close()
 	}()
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	var err error
+	if s.TLSConfig != nil {
+		// certs come from the SVID in TLSConfig; empty cert/key file args are correct.
+		err = srv.ListenAndServeTLS("", "")
+	} else {
+		err = srv.ListenAndServe()
+	}
+	if err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
@@ -350,6 +369,6 @@ func (s *ResumeServer) Start(ctx context.Context) error {
 var _ manager.Runnable = &ResumeServer{}
 
 // AddResumeServer registers the resume HTTP server with the manager.
-func AddResumeServer(mgr ctrl.Manager, addr string, h http.Handler) error {
-	return mgr.Add(NewResumeServer(addr, h))
+func AddResumeServer(mgr ctrl.Manager, addr string, h http.Handler, tlsCfg *tls.Config) error {
+	return mgr.Add(NewResumeServer(addr, h, tlsCfg))
 }

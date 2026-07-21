@@ -26,6 +26,10 @@ import (
 // intstr8090 returns the sandboxd HTTP port as an IntOrString for probes.
 func intstr8090() intstr.IntOrString { return intstr.FromInt32(8090) }
 
+// intstrHealth returns the sandboxd plain-HTTP health port (kubelet probes hit this,
+// never the mTLS control API on :8090).
+func intstrHealth() intstr.IntOrString { return intstr.FromInt32(workerHealthPort) }
+
 // deploymentMatches reports whether the existing worker Deployment already has
 // the desired replicas and pod template (so we skip a no-op update).
 func deploymentMatches(existing, desired *appsv1.Deployment) bool {

@@ -1,0 +1,42 @@
+# Declarative SPIRE registration for the sandboxd control-plane workloads.
+# The SPIRE controller-manager reconciles these into server registration entries,
+# minting an X509-SVID for any pod matching the selectors (SA + namespace).
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: sandboxd-operator
+spec:
+  className: spire-system-spire
+  spiffeIDTemplate: "spiffe://sandboxd/operator"
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sandboxd-operator
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: sandboxd-controlplane-system
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: sandboxd-router
+spec:
+  className: spire-system-spire
+  spiffeIDTemplate: "spiffe://sandboxd/router"
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sandboxd-router
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: sandboxd-controlplane-system
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: sandboxd-worker
+spec:
+  className: spire-system-spire
+  spiffeIDTemplate: "spiffe://sandboxd/worker"
+  workloadSelectorTemplates:
+    - "k8s:sa:sandboxd-worker"
+    - "k8s:ns:default"

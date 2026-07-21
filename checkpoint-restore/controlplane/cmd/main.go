@@ -47,6 +47,8 @@ import (
 	"github.com/jicowan/aio-sandbox/controlplane/internal/assign"
 	"github.com/jicowan/aio-sandbox/controlplane/internal/controller"
 	"github.com/jicowan/aio-sandbox/controlplane/internal/resume"
+	"github.com/jicowan/aio-sandbox/controlplane/internal/spiffemtls"
+	"net/http"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -150,6 +152,17 @@ func main() {
 	var gcDryRun bool
 	flag.BoolVar(&gcDryRun, "gc-dry-run", envOr("SANDBOXD_GC_DRY_RUN", "1") == "1",
 		"GC classifies + records candidates (metrics/logs) but mutates NOTHING. Default true — set to 0 to arm actual reaping.")
+	// P1.5 SPIFFE mTLS on the control hops (router->operator /resume, operator->worker).
+	var mtlsEnabled bool
+	var spiffeSocket, spiffeRouterID, spiffeWorkerID string
+	flag.BoolVar(&mtlsEnabled, "mtls", envOr("SANDBOXD_MTLS", "") == "1",
+		"Enable SPIFFE mTLS on control hops (requires the SPIRE Workload API socket). Off by default (plain HTTP fallback).")
+	flag.StringVar(&spiffeSocket, "spiffe-socket", envOr("SPIFFE_ENDPOINT_SOCKET", ""),
+		"SPIRE Workload API socket (default unix:///spiffe-workload-api/spire-agent.sock).")
+	flag.StringVar(&spiffeRouterID, "spiffe-router-id", envOr("SANDBOXD_SPIFFE_ROUTER_ID", "spiffe://sandboxd/router"),
+		"SPIFFE ID the operator authorizes as the caller of /resume.")
+	flag.StringVar(&spiffeWorkerID, "spiffe-worker-id", envOr("SANDBOXD_SPIFFE_WORKER_ID", "spiffe://sandboxd/worker"),
+		"SPIFFE ID the operator authorizes when calling worker control endpoints.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -273,6 +286,32 @@ func main() {
 	}
 	setupLog.Info("connected to assignment table", "addr", kvAddr)
 
+	// P1.5: build the SPIFFE X509 source once and derive the control-hop mTLS
+	// server/clients from it. mtlsSource==nil (flag off) => every helper returns nil
+	// and the plain-HTTP path is used (rollout fallback).
+	var mtlsSource *spiffemtls.Source
+	var resumeTLS *tls.Config         // /resume server: authorize the router as caller
+	var workerHTTPClient *http.Client // operator->worker: present operator SVID, authorize worker
+	if mtlsEnabled {
+		src, serr := spiffemtls.New(context.Background(), spiffeSocket, 30*time.Second)
+		if serr != nil {
+			setupLog.Error(serr, "Failed to init SPIFFE mTLS source")
+			os.Exit(1)
+		}
+		mtlsSource = src
+		defer mtlsSource.Close()
+		if resumeTLS, err = mtlsSource.ServerTLSConfig(spiffeRouterID); err != nil {
+			setupLog.Error(err, "Failed to build /resume mTLS server config")
+			os.Exit(1)
+		}
+		if workerHTTPClient, err = mtlsSource.HTTPClient(spiffeWorkerID, 0); err != nil {
+			setupLog.Error(err, "Failed to build operator->worker mTLS client")
+			os.Exit(1)
+		}
+		setupLog.Info("SPIFFE mTLS enabled on control hops", "id", mtlsSource.ID(),
+			"authorizeCaller", spiffeRouterID, "authorizeWorker", spiffeWorkerID)
+	}
+
 	if workerImage != "" {
 		controller.WorkerImage = workerImage
 	}
@@ -289,6 +328,7 @@ func main() {
 			Bucket:          workerBucket,
 			Region:          workerRegion,
 			CredTokenSecret: credTokenSecret,
+			MTLS:            mtlsEnabled,
 		},
 		PoolEvents: poolNotifier.Events(),
 	}).SetupWithManager(mgr); err != nil {
@@ -324,12 +364,12 @@ func main() {
 
 	// Internal /resume endpoint (control-plane half of the request path, TDD §5.1).
 	// P1: plain HTTP; P1.5 wraps with SPIRE mTLS. Uses the manager's cached client.
-	resumeWF := controller.BuildResumeWorkflow(mgr.GetClient(), kv, resumeNamespace, nil,
+	resumeWF := controller.BuildResumeWorkflow(mgr.GetClient(), kv, resumeNamespace, workerHTTPClient,
 		resume.Options{
 			MaxConcurrentResumes: maxConcurrentResumes,
 			ResumeDeadline:       time.Duration(resumeDeadlineSec) * time.Second,
 		}).WithNotifier(poolNotifier)
-	if err := controller.AddResumeServer(mgr, resumeAddr, resume.NewHandler(resumeWF)); err != nil {
+	if err := controller.AddResumeServer(mgr, resumeAddr, resume.NewHandler(resumeWF), resumeTLS); err != nil {
 		setupLog.Error(err, "Failed to add resume server")
 		os.Exit(1)
 	}
@@ -379,7 +419,7 @@ func main() {
 	// S3 and free their workers. The teleport completes when a later request hits
 	// the router and the resume path restores from the recorded snapshot (P3).
 	sweepInterval := time.Duration(sweepIntervalSec) * time.Second
-	suspender := controller.BuildSuspender(mgr.GetClient(), kv, resumeNamespace, nil).WithNotifier(poolNotifier)
+	suspender := controller.BuildSuspender(mgr.GetClient(), kv, resumeNamespace, workerHTTPClient).WithNotifier(poolNotifier)
 	if err := controller.AddSuspendSweeper(mgr, suspender, sweepInterval); err != nil {
 		setupLog.Error(err, "Failed to add suspend sweeper")
 		os.Exit(1)
@@ -407,7 +447,7 @@ func main() {
 	// Periodic background checkpoints (P5, opt-in per template): checkpoint
 	// long-lived Running sessions in place so a worker crash loses at most the
 	// interval, not everything since the last idle-suspend.
-	checkpointer := controller.BuildCheckpointer(mgr.GetClient(), kv, resumeNamespace, nil)
+	checkpointer := controller.BuildCheckpointer(mgr.GetClient(), kv, resumeNamespace, workerHTTPClient)
 	if err := controller.AddCheckpointSweeper(mgr, checkpointer, sweepInterval); err != nil {
 		setupLog.Error(err, "Failed to add checkpoint sweeper")
 		os.Exit(1)

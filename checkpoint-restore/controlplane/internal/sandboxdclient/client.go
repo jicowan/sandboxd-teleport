@@ -41,14 +41,25 @@ type Client struct {
 	hc      *http.Client
 }
 
-// New returns a client for a worker reachable at host (pod IP). Transport is the
-// http.Client to use; pass nil for a sane default. P1.5 passes an mTLS client.
+// New returns a plain-HTTP client for a worker reachable at host (pod IP). hc nil
+// -> a sane default. Use NewMTLS when the worker control API requires SPIFFE mTLS.
 func New(host string, hc *http.Client) *Client {
+	return newScheme("http", host, hc)
+}
+
+// NewMTLS returns an https client for a worker whose control API is behind SPIFFE
+// mTLS (P1.5). hc MUST carry the SVID-presenting mTLS transport (else the TLS
+// handshake/authorization fails); the scheme is https so requests actually use it.
+func NewMTLS(host string, hc *http.Client) *Client {
+	return newScheme("https", host, hc)
+}
+
+func newScheme(scheme, host string, hc *http.Client) *Client {
 	if hc == nil {
 		hc = &http.Client{Timeout: 0} // no global timeout; per-call ctx governs
 	}
 	return &Client{
-		baseURL: fmt.Sprintf("http://%s:%d", host, DefaultPort),
+		baseURL: fmt.Sprintf("%s://%s:%d", scheme, host, DefaultPort),
 		hc:      hc,
 	}
 }

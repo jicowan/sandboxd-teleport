@@ -1,0 +1,32 @@
+# SPIFFE mTLS enablement overlay for the router (companion to
+# controlplane-mtls-patch.yaml, which patches the operator). Adds the SPIRE Workload
+# API socket + --mtls and flips --resume-url to https:// (the operator /resume server
+# is mTLS). See docs/sandboxd/security-spiffe-spire.md.
+#
+#   kubectl patch deploy sandboxd-router -n sandboxd-controlplane-system \
+#     --patch-file deploy/spire/router-mtls-patch.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandboxd-router
+  namespace: sandboxd-controlplane-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: router
+          args:
+            - --listen=:8080
+            - --kv-addr=valkey:6379
+            - --resume-url=https://sandboxd-operator:8082/resume
+            - --worker-port=8090
+            - --mtls
+          volumeMounts:
+            - name: spiffe-workload-api
+              mountPath: /spiffe-workload-api
+              readOnly: true
+      volumes:
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

@@ -20,34 +20,34 @@ import (
 )
 
 type server struct {
-	work    string // base workdir (bundles, runsc root, image staging)
-	runsc   *runscDriver
-	s3      *s3Store
-	bucket  string
-	podIP    string // worker pod's routable IP (for nftables DNAT target)
-	netns    bool   // whether the checkpointable veth/interior-netns path is active
-	compress bool   // default: compress checkpoint pages (SANDBOXD_COMPRESS)
-	region   string // AWS region (for injected AWS_REGION)
+	work     string // base workdir (bundles, runsc root, image staging)
+	runsc    *runscDriver
+	s3       *s3Store
+	bucket   string
+	podIP    string      // worker pod's routable IP (for nftables DNAT target)
+	netns    bool        // whether the checkpointable veth/interior-netns path is active
+	compress bool        // default: compress checkpoint pages (SANDBOXD_COMPRESS)
+	region   string      // AWS region (for injected AWS_REGION)
 	cred     *credVendor // per-session AWS credential vendor (nil if disabled)
 	credPort int         // interior-gateway port the vendor listens on
-	mu      sync.Mutex
-	sb      map[string]*sandbox    // sandboxId -> metadata
-	hs      map[string]*healthState // sandboxId -> runtime health (not persisted)
+	mu       sync.Mutex
+	sb       map[string]*sandbox     // sandboxId -> metadata
+	hs       map[string]*healthState // sandboxId -> runtime health (not persisted)
 }
 
 // sandbox is the metadata needed to teleport: which image it is + its config
 // digest + latest snapshot URI + port mappings. Persisted to <work>/meta/<id>.json.
 type sandbox struct {
-	ID        string    `json:"id"`
-	Image     string    `json:"image"`
-	Digest    string    `json:"digest"`
-	Bundle    string    `json:"bundle"`
-	Snapshot  string    `json:"snapshot"` // s3 prefix of the latest checkpoint
-	Ports     []portMap `json:"ports"`    // podIP:host -> interior:container
-	Health    health    `json:"health"`   // restart policy + readiness probe + idle
-	RunscVer  string    `json:"runscVersion"`
-	IAMRoleARN string   `json:"iamRoleArn,omitempty"` // session's assumable role (cred vendor)
-	CreatedAt string    `json:"createdAt"`
+	ID         string    `json:"id"`
+	Image      string    `json:"image"`
+	Digest     string    `json:"digest"`
+	Bundle     string    `json:"bundle"`
+	Snapshot   string    `json:"snapshot"` // s3 prefix of the latest checkpoint
+	Ports      []portMap `json:"ports"`    // podIP:host -> interior:container
+	Health     health    `json:"health"`   // restart policy + readiness probe + idle
+	RunscVer   string    `json:"runscVersion"`
+	IAMRoleARN string    `json:"iamRoleArn,omitempty"` // session's assumable role (cred vendor)
+	CreatedAt  string    `json:"createdAt"`
 }
 
 func main() {
@@ -63,10 +63,10 @@ func main() {
 	startReaper()
 
 	s := &server{
-		work:   work,
-		runsc:  newRunsc(runscBin, filepath.Join(work, "rt")),
-		bucket: bucket,
-		podIP:    os.Getenv("SANDBOXD_POD_IP"), // set via downward API
+		work:     work,
+		runsc:    newRunsc(runscBin, filepath.Join(work, "rt")),
+		bucket:   bucket,
+		podIP:    os.Getenv("SANDBOXD_POD_IP"),          // set via downward API
 		compress: os.Getenv("SANDBOXD_COMPRESS") != "0", // default ON (A/B: ~4x smaller, ~2x faster suspend); opt out with =0
 		region:   os.Getenv("AWS_REGION"),
 		credPort: int(envInt64("SANDBOXD_CRED_PORT", 8091)),
@@ -125,17 +125,33 @@ func main() {
 	mux.HandleFunc("/checkpoint", s.handleCheckpoint)
 	mux.HandleFunc("/restore", s.handleRestore)
 	mux.HandleFunc("/status", s.handleStatus)
-	mux.HandleFunc("/sandbox", s.handleDelete)      // DELETE ?sandboxId=
-	mux.HandleFunc("/sandboxes", s.handleList)      // GET : all tracked sandboxes
-	mux.HandleFunc("/suspend", s.handleSuspend)     // POST : checkpoint->S3->free worker
-	mux.HandleFunc("/reset", s.handleReset)         // POST : free worker WITHOUT checkpoint
-	mux.HandleFunc("/capacity", s.handleCapacity)   // GET : busy/idle for the scheduler
-	mux.HandleFunc("/logs", s.handleLogs)           // GET ?sandboxId= : nested gVisor logs
-	mux.HandleFunc("/metrics", s.handleMetrics)     // GET : basic counters
+	mux.HandleFunc("/sandbox", s.handleDelete)    // DELETE ?sandboxId=
+	mux.HandleFunc("/sandboxes", s.handleList)    // GET : all tracked sandboxes
+	mux.HandleFunc("/suspend", s.handleSuspend)   // POST : checkpoint->S3->free worker
+	mux.HandleFunc("/reset", s.handleReset)       // POST : free worker WITHOUT checkpoint
+	mux.HandleFunc("/capacity", s.handleCapacity) // GET : busy/idle for the scheduler
+	mux.HandleFunc("/logs", s.handleLogs)         // GET ?sandboxId= : nested gVisor logs
+	mux.HandleFunc("/metrics", s.handleMetrics)   // GET : basic counters
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]string{"runsc": s.runsc.version(), "bucket": bucket})
 	})
+
+	// Dedicated PLAIN-HTTP health listener for kubelet probes. It is ALWAYS plain
+	// (never mTLS) so liveness/readiness probes work regardless of the control-API
+	// TLS mode — kubelet has no SVID. Serves only /healthz; carries no control API.
+	// The worker pod's probes target this port, not :8090.
+	healthAddr := envOr("SANDBOXD_HEALTH_ADDR", ":8092")
+	{
+		hmux := http.NewServeMux()
+		hmux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+		healthSrv := &http.Server{Addr: healthAddr, Handler: hmux}
+		go func() {
+			if err := healthSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("WARN: health listener stopped: %v", err)
+			}
+		}()
+	}
 
 	srv := &http.Server{Addr: addr, Handler: withRequestLog(mux)}
 
@@ -188,6 +204,28 @@ func main() {
 		defer cancel()
 		srv.Shutdown(ctx)
 	}()
+
+	// P1.5: when SANDBOXD_MTLS=1, the control API requires the operator's client
+	// SVID (SPIFFE mTLS). Off by default -> plain HTTP (rollout fallback). The
+	// readiness probe must be tcpSocket (not httpGet) under mTLS, since kubelet has
+	// no SVID — the operator sets that on the worker Deployment.
+	mtls := os.Getenv("SANDBOXD_MTLS") == "1"
+	if mtls {
+		operatorID := envOr("SANDBOXD_SPIFFE_OPERATOR_ID", "spiffe://sandboxd/operator")
+		cfg, closeSrc, err := mtlsServerConfig(os.Getenv("SPIFFE_ENDPOINT_SOCKET"), operatorID, 30*time.Second)
+		if err != nil {
+			log.Fatalf("mTLS init: %v", err)
+		}
+		defer closeSrc()
+		srv.TLSConfig = cfg
+		log.Printf("sandboxd listening on %s with SPIFFE mTLS (authorize caller=%s) (work=%s runsc=%s bucket=%s gc=%s)",
+			addr, operatorID, work, runscBin, bucket, gcEvery)
+		if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+		log.Printf("stopped")
+		return
+	}
 
 	log.Printf("sandboxd listening on %s (work=%s runsc=%s bucket=%s gc=%s)", addr, work, runscBin, bucket, gcEvery)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

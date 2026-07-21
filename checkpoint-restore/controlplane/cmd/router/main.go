@@ -33,6 +33,7 @@ import (
 
 	"github.com/jicowan/aio-sandbox/controlplane/internal/assign"
 	"github.com/jicowan/aio-sandbox/controlplane/internal/router"
+	"github.com/jicowan/aio-sandbox/controlplane/internal/spiffemtls"
 )
 
 func envOr(k, def string) string {
@@ -52,9 +53,35 @@ func main() {
 	flag.IntVar(&workerPort, "worker-port", 8090, "sandboxd port on worker pods.")
 	flag.IntVar(&resumeDeadlineSec, "resume-deadline-seconds", envInt("SANDBOXD_RESUME_DEADLINE_SECONDS", 90),
 		"Time-to-first-byte / warm-up deadline for a miss (must exceed cold-start for large images like AIO).")
+	// P1.5 SPIFFE mTLS: router->operator /resume hop (this pass). Off by default.
+	var mtlsEnabled bool
+	var spiffeSocket, spiffeOperatorID string
+	flag.BoolVar(&mtlsEnabled, "mtls", envOr("SANDBOXD_MTLS", "") == "1",
+		"Enable SPIFFE mTLS for the router->operator /resume hop (requires the SPIRE Workload API socket).")
+	flag.StringVar(&spiffeSocket, "spiffe-socket", envOr("SPIFFE_ENDPOINT_SOCKET", ""),
+		"SPIRE Workload API socket (default unix:///spiffe-workload-api/spire-agent.sock).")
+	flag.StringVar(&spiffeOperatorID, "spiffe-operator-id", envOr("SANDBOXD_SPIFFE_OPERATOR_ID", "spiffe://sandboxd/operator"),
+		"SPIFFE ID the router authorizes when calling the operator /resume.")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
+	// Build the operator-authorizing mTLS client for /resume when enabled; nil keeps
+	// the plain-HTTP fallback.
+	var resumeHC *http.Client
+	if mtlsEnabled {
+		src, err := spiffemtls.New(context.Background(), spiffeSocket, 30*time.Second)
+		if err != nil {
+			log.Error("failed to init SPIFFE mTLS source", "err", err)
+			os.Exit(1)
+		}
+		defer src.Close()
+		if resumeHC, err = src.HTTPClient(spiffeOperatorID, 0); err != nil {
+			log.Error("failed to build router->operator mTLS client", "err", err)
+			os.Exit(1)
+		}
+		log.Info("SPIFFE mTLS enabled for router->operator", "id", src.ID(), "authorize", spiffeOperatorID)
+	}
 
 	kv := assign.New(kvAddr)
 	defer kv.Close()
@@ -68,9 +95,9 @@ func main() {
 
 	rt := router.New(
 		kv,
-		router.NewResumeClient(resumeURL, nil), // P1: plain HTTP; P1.5 mTLS transport
-		router.NewHeaderResolver(),             // P1: header identity; JWT at broker cutover (O4)
-		http.DefaultTransport,                  // P1.5: SPIRE mTLS transport
+		router.NewResumeClient(resumeURL, resumeHC), // P1.5: mTLS client (authorizes operator) when enabled, else plain
+		router.NewHeaderResolver(),                  // P1: header identity; JWT at broker cutover (O4)
+		http.DefaultTransport,                       // router->worker proxy: plain (data-plane hop deferred to pass 2)
 		router.Options{WorkerPort: workerPort, ResumeDeadline: time.Duration(resumeDeadlineSec) * time.Second},
 	)
 

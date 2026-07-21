@@ -1,0 +1,49 @@
+# SPIFFE mTLS enablement overlay for the STATIC control-plane deploys (operator +
+# router). mTLS is OPT-IN (plain HTTP is the default in deploy/smoke/controlplane.yaml);
+# this overlay adds the SPIRE Workload API socket + --mtls to turn it on, so the
+# base manifest stays mode-agnostic.
+#
+# Prereqs: SPIRE installed (deploy/spire/values.yaml) and the ClusterSPIFFEIDs applied
+# (deploy/spire/clusterspiffeids.yaml) so operator/router/worker have SVIDs. See
+# docs/sandboxd/security-spiffe-spire.md.
+#
+# Apply as strategic-merge patches (the operator provisions worker-pod mTLS itself
+# once it runs with --mtls — no worker manifest edit needed):
+#   kubectl patch deploy sandboxd-operator -n sandboxd-controlplane-system \
+#     --patch-file deploy/spire/controlplane-mtls-patch.yaml
+#   kubectl patch deploy sandboxd-router   -n sandboxd-controlplane-system \
+#     --patch-file deploy/spire/router-mtls-patch.yaml
+#
+# NOTE: this file patches the OPERATOR. The router patch is router-mtls-patch.yaml
+# (its resume-url must flip to https://). Kept as two files because a single
+# strategic-merge patch targets one Deployment's container list by name.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandboxd-operator
+  namespace: sandboxd-controlplane-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: operator
+          args:
+            - --leader-elect
+            - --health-probe-bind-address=:8081
+            - --kv-addr=valkey:6379
+            - --resume-addr=:8082
+            - --resume-namespace=default
+            - --worker-sa=sandboxd-worker
+            - --worker-bucket=aio-checkpoint-spike-820537372947-us-west-2
+            - --worker-region=us-west-2
+            - --cred-token-secret=sandboxd-cred-token
+            - --mtls
+          volumeMounts:
+            - name: spiffe-workload-api
+              mountPath: /spiffe-workload-api
+              readOnly: true
+      volumes:
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
