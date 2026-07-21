@@ -3,6 +3,16 @@
 How a Claude Code user gets an authenticated, per-user AIO sandbox over MCP,
 and how authentication and authorization work at each hop.
 
+> **Scope.** This document covers the **auth front door** — the path from a
+> Claude Code user through agentgateway and the broker to a sandbox pod. It does
+> **not** describe the session‑teleport control plane (`sandboxd`) on the
+> `checkpoint-restore` branch: the operator, session‑aware router, workers running
+> nested gVisor sandboxes, checkpoint/restore to S3, the CRDs, and control‑hop
+> mTLS. For that design — and how the front door here fits in front of it — read
+> **[docs/sandboxd/](./docs/sandboxd/README.md)** (start with
+> [architecture-sandboxd.md](./docs/sandboxd/architecture-sandboxd.md) and
+> [architecture-broker.md](./docs/sandboxd/architecture-broker.md)).
+
 ## Components and trust boundaries
 
 ```

@@ -1,0 +1,41 @@
+# Minimal SPIRE for securing the sandboxd control plane (P1.5).
+# Trust domain 'sandboxd'; k8s Workload Attestation; EBS-backed server datastore.
+# Install: helm install spire-crds spiffe/spire-crds --version 0.5.0 -n spire-system --create-namespace
+#          helm install spire     spiffe/spire      --version 0.29.0 -n spire-system -f values.yaml
+global:
+  spire:
+    trustDomain: sandboxd
+    clusterName: EKSClusterStack-cluster
+
+spire-server:
+  replicaCount: 1
+  persistence:
+    enabled: true
+    storageClass: ebs-sc
+    size: 1Gi
+  controllerManager:
+    enabled: true   # ClusterSPIFFEID CRDs for declarative registration
+
+spiffe-csi-driver:
+  enabled: true     # mounts the Workload API socket into workload pods
+  # Tolerate the gVisor node taint so the CSI driver (and thus the socket mount)
+  # runs on worker nodes too. Without this, worker pods on tainted gVisor nodes fail
+  # to mount the Workload API socket ("driver csi.spiffe.io not found").
+  tolerations:
+    - key: sandbox
+      operator: Equal
+      value: gvisor
+      effect: NoSchedule
+
+spire-agent:
+  # The agent DaemonSet must run on the gVisor worker nodes too (it attests pods +
+  # serves the Workload API socket); tolerate the taint or workers get no SVID.
+  tolerations:
+    - key: sandbox
+      operator: Equal
+      value: gvisor
+      effect: NoSchedule
+
+# Not needed for internal control-plane mTLS (federation/OIDC only).
+spire-spiffe-oidc-discovery-provider:
+  enabled: false

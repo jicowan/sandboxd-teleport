@@ -23,6 +23,17 @@ for how to filter which tools each user can use and how to configure quotas. See
 **[docs/POSTMORTEM-agentcore-vs-agentgateway.md](./docs/POSTMORTEM-agentcore-vs-agentgateway.md)**
 for why this uses agentgateway rather than AWS Bedrock AgentCore Gateway.
 
+> **Looking for the session‑teleport control plane (`sandboxd`)?** The
+> `checkpoint-restore` branch extends this into a full control plane: warm pools
+> of privileged workers run OCI images as **nested gVisor sandboxes**, and a
+> session's RAM + filesystem state is checkpointed to S3 and restored
+> ("teleported") onto a different worker or node — surviving suspend/resume,
+> scale‑in, and eviction. It adds an operator, a session‑aware router, and CRDs
+> (`SandboxTemplate`, `WarmPool`, `Session`, `ForkSet`, `BaseSnapshot`), plus
+> optional SPIFFE/SPIRE mTLS on the control hops. All of that is documented under
+> **[docs/sandboxd/](./docs/sandboxd/README.md)** — start there for install order,
+> architecture, CRD reference, the reproduction runbook, and the security guide.
+
 ## Components
 
 | Component | What it is |

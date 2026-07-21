@@ -1,0 +1,32 @@
+# A "worker" pod for proving NESTED gVisor: a NORMAL runc pod (NOT
+# runtimeClassName: gvisor) that runs `runsc` INSIDE its own container to launch,
+# checkpoint, and restore a nested busybox sandbox. kubelet/containerd manage only
+# this worker pod; they are blind to the nested runsc sandbox.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: worker-nested-b
+  namespace: default
+  annotations:
+    karpenter.sh/do-not-disrupt: "true"
+spec:
+  # scheduled to the gvisor node only so the host runsc binary is available to mount
+  # (the worker itself is plain runc, privileged — NOT a gvisor pod)
+  nodeSelector:
+    sandbox: gvisor
+  tolerations:
+    - key: sandbox
+      operator: Equal
+      value: gvisor
+      effect: NoSchedule
+  restartPolicy: Never
+  containers:
+    - name: worker
+      image: debian:12-slim          # has bash, tar, coreutils for building a bundle
+      command: ["sleep", "infinity"]
+      securityContext:
+        privileged: true             # gVisor-in-a-container needs privilege (platform/seccomp)
+      volumeMounts:
+        - { name: runsc, mountPath: /usr/local/bin/runsc, subPath: runsc }
+  volumes:
+    - { name: runsc, hostPath: { path: /usr/local/bin } }   # node's runsc binary

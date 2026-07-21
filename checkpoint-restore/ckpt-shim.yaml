@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ckpt-shim2
+  namespace: default
+  annotations:
+    karpenter.sh/do-not-disrupt: "true"
+spec:
+  serviceAccountName: ckpt-spike        # Pod Identity -> aio-checkpoint-spike-role (S3)
+  nodeSelector:
+    sandbox: gvisor
+  tolerations:
+    - key: sandbox
+      operator: Equal
+      value: gvisor
+      effect: NoSchedule
+  hostPID: true
+  restartPolicy: Never
+  containers:
+    - name: shim
+      image: amazon/aws-cli:latest
+      command: ["sleep", "infinity"]
+      env:
+        - name: BUCKET
+          value: aio-checkpoint-spike-820537372947-us-west-2
+      securityContext:
+        privileged: true
+      volumeMounts:
+        - { name: host, mountPath: /host }
+        - { name: hostbin, mountPath: /usr/local/bin/runsc, subPath: runsc }
+  volumes:
+    - { name: host, hostPath: { path: / } }
+    - { name: hostbin, hostPath: { path: /usr/local/bin } }

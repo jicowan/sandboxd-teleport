@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aio-sandbox-broker-sandboxd
+  namespace: default
+  labels: { app: aio-sandbox-broker-sandboxd }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: aio-sandbox-broker-sandboxd }
+  template:
+    metadata:
+      labels: { app: aio-sandbox-broker-sandboxd }
+    spec:
+      containers:
+        - name: broker
+          image: 820537372947.dkr.ecr.us-west-2.amazonaws.com/aio-sandbox-broker-sandboxd:v1
+          env:
+            - { name: SANDBOXD_POOL, value: aio-pool }
+            - { name: SANDBOXD_ROUTER_URL, value: "http://sandboxd-router.sandboxd-controlplane-system.svc.cluster.local:8080" }
+          ports: [{ containerPort: 8080, name: http }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 5

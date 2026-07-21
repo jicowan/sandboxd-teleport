@@ -1,0 +1,60 @@
+# NetworkPolicy — lock sandboxd worker ingress to the control plane only (P1.5).
+#
+# ============================ OPT-IN — NOT APPLIED BY DEFAULT ============================
+# This is an OPTIONAL hardening artifact for admins to apply deliberately. It is NOT part
+# of the default install, because it only takes effect once network-policy ENFORCEMENT is
+# turned on cluster-wide (see prerequisite) — and doing that activates EVERY NetworkPolicy
+# in the cluster at once, which is a decision an admin must own. See
+# docs/sandboxd/security-spiffe-spire.md ("Optional: restrict worker ingress").
+# ========================================================================================
+#
+# Companion to the control-hop mTLS: mTLS authenticates the operator->worker control
+# call, but the router->worker DATA hop is intentionally plain (the router proxies to
+# the arbitrary nested workload; we don't make the agent a TLS reverse proxy). This
+# policy provides the network-layer control for that hop instead — restricting who can
+# reach a worker at all: only the operator (control API :8090) and the router (data
+# proxy to the workload port). Everything else in the cluster is denied ingress.
+#
+# PREREQUISITE — cluster-wide enforcement must be ON. This object is INERT (silently
+# allows all) unless the VPC CNI network-policy agent is enforcing:
+#   aws eks update-addon --cluster-name <c> --addon-name vpc-cni --region <r> \
+#     --configuration-values '{"enableNetworkPolicy":"true"}'
+# On the reference cluster it is currently OFF (--enable-network-policy=false), so
+# applying this alone does nothing. Enabling it also activates any OTHER NetworkPolicies
+# already in the cluster (e.g. keycloak) — review those first (blast radius).
+#
+# kubelet health probes (worker :8092) come from the NODE, not a pod: the VPC CNI
+# automatically allows local-node probe traffic to the pod, so readiness/liveness keep
+# working without an explicit rule here. (Verify after applying: pods should stay Ready.)
+#
+# Namespace note: worker pods live in the pool namespace (default). This policy targets
+# that namespace; apply one per worker namespace if pools span namespaces later.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandboxd-worker-ingress
+  namespace: default
+spec:
+  # Target all sandboxd worker pods.
+  podSelector:
+    matchLabels:
+      sandboxd.io/app: worker
+  policyTypes:
+    - Ingress
+  ingress:
+    # Only the operator (control API) and router (data proxy), both in the
+    # control-plane namespace, may reach a worker. Ports are intentionally not pinned
+    # (the workload port varies per pool); the control is "who", not "which port".
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: sandboxd-controlplane-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sandboxd-operator
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: sandboxd-controlplane-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sandboxd-router

@@ -1,0 +1,9 @@
+apiVersion: core.sandboxd.io/v1alpha1
+kind: Session
+metadata:
+  labels:
+    app.kubernetes.io/name: sandboxd-controlplane
+    app.kubernetes.io/managed-by: kustomize
+  name: session-sample
+spec:
+  # TODO(user): Add fields here

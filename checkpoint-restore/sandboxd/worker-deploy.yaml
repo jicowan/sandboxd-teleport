@@ -1,0 +1,57 @@
+# sandboxd worker pods: minimal privileged pods (distroless + sandboxd + pinned
+# runsc) that run/checkpoint/restore arbitrary nested gVisor sandboxes and
+# teleport state via S3. Two replicas so we can prove worker A -> worker B.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandboxd-worker
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: sandboxd-worker }
+  template:
+    metadata:
+      labels: { app: sandboxd-worker }
+      annotations:
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      serviceAccountName: sandboxd-worker     # Pod Identity -> S3 (role sandboxd-worker-checkpoint)
+      # Give the control plane time to checkpoint-on-terminate (checkpoint + S3
+      # upload) before kubelet SIGKILLs a busy worker. The worker's own drain
+      # deadline (SANDBOXD_DRAIN_DEADLINE, default 100s) stays under this.
+      terminationGracePeriodSeconds: 120
+      nodeSelector: { sandbox: gvisor }
+      tolerations:
+        - { key: sandbox, operator: Equal, value: gvisor, effect: NoSchedule }
+      containers:
+        - name: sandboxd
+          image: 820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v40
+          env:
+            - { name: SANDBOXD_BUCKET, value: aio-checkpoint-spike-820537372947-us-west-2 }
+            - { name: AWS_REGION, value: us-west-2 }
+            # runsc --debug per-syscall trace: floods stdout + adds overhead. Off by
+            # default; flip to "1" only when diagnosing a nested-gVisor issue.
+            - { name: SANDBOXD_DEBUG, value: "0" }
+            - name: SANDBOXD_POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+          ports:
+            - { containerPort: 8090, name: http }
+          securityContext:
+            privileged: true                   # required for nested gVisor (DinD)
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8090 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          volumeMounts:
+            # Reuse the NODE's containerd image cache: the socket to drive pulls,
+            # and the containerd data dir so the overlay snapshot lowerdirs/upperdir
+            # the snapshot mounts reference are visible in the worker. Bidirectional
+            # so runsc sees the snapshot mount sandboxd creates at the bundle rootfs.
+            - { name: containerd-sock, mountPath: /run/containerd/containerd.sock }
+            - { name: containerd-data, mountPath: /var/lib/containerd, mountPropagation: Bidirectional }
+      volumes:
+        - name: containerd-sock
+          hostPath: { path: /run/containerd/containerd.sock, type: Socket }
+        - name: containerd-data
+          hostPath: { path: /var/lib/containerd, type: Directory }

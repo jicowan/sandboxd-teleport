@@ -1,0 +1,183 @@
+# Self-contained P0+P1 smoke deploy for EKSClusterStack-cluster.
+# Plain HTTP, header identity (X-Session-ID) — NOT the secured path (that's P1.5).
+# Namespace, SA, RBAC binding, Valkey, operator, router. CRDs + the manager-role
+# ClusterRole are applied separately from config/ (see runbook in the deploy cmd).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandboxd-controlplane-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandboxd-operator
+  namespace: sandboxd-controlplane-system
+---
+# Bind the controller-gen manager-role (applied from config/rbac) to our operator SA.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sandboxd-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: manager-role
+subjects:
+  - kind: ServiceAccount
+    name: sandboxd-operator
+    namespace: sandboxd-controlplane-system
+---
+# Operator also needs to create Deployments + read pods cluster-wide (already in
+# manager-role via kubebuilder markers) and manage its own leader-election lease.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandboxd-operator-leaderelection
+  namespace: sandboxd-controlplane-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sandboxd-operator-leaderelection
+  namespace: sandboxd-controlplane-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandboxd-operator-leaderelection
+subjects:
+  - kind: ServiceAccount
+    name: sandboxd-operator
+    namespace: sandboxd-controlplane-system
+---
+# Valkey assignment table (in-cluster; TDD §4).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valkey
+  namespace: sandboxd-controlplane-system
+  labels: { app.kubernetes.io/name: valkey }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: valkey }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: valkey }
+    spec:
+      containers:
+        - name: valkey
+          image: valkey/valkey:8-alpine
+          args: ["--save", "", "--appendonly", "no", "--maxmemory-policy", "noeviction"]
+          ports: [{ containerPort: 6379, name: valkey }]
+          readinessProbe:
+            tcpSocket: { port: 6379 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey
+  namespace: sandboxd-controlplane-system
+spec:
+  selector: { app.kubernetes.io/name: valkey }
+  ports: [{ port: 6379, targetPort: 6379 }]
+---
+# Operator (WarmPool controller + worker discovery + /resume endpoint).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandboxd-operator
+  namespace: sandboxd-controlplane-system
+  labels: { app.kubernetes.io/name: sandboxd-operator }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: sandboxd-operator }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: sandboxd-operator }
+    spec:
+      serviceAccountName: sandboxd-operator
+      containers:
+        - name: operator
+          image: 820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd-operator:v1
+          args:
+            - --leader-elect
+            - --health-probe-bind-address=:8081
+            - --kv-addr=valkey:6379
+            - --resume-addr=:8082
+            # WarmPool/Template/Session live in default (reuses the sandboxd-worker
+            # Pod Identity for S3, and the default-ns gvisor toleration/nodeselector).
+            - --resume-namespace=default
+            - --worker-sa=sandboxd-worker
+            - --worker-bucket=aio-checkpoint-spike-820537372947-us-west-2
+            - --worker-region=us-west-2
+          ports:
+            - { containerPort: 8081, name: health }
+            - { containerPort: 8082, name: resume }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8081 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8081 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandboxd-operator
+  namespace: sandboxd-controlplane-system
+spec:
+  selector: { app.kubernetes.io/name: sandboxd-operator }
+  ports:
+    - { port: 8082, targetPort: 8082, name: resume }
+---
+# Router (data-plane proxy).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandboxd-router
+  namespace: sandboxd-controlplane-system
+  labels: { app.kubernetes.io/name: sandboxd-router }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: sandboxd-router }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: sandboxd-router }
+    spec:
+      containers:
+        - name: router
+          image: 820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd-router:v1
+          args:
+            - --listen=:8080
+            - --kv-addr=valkey:6379
+            - --resume-url=http://sandboxd-operator:8082/resume
+            - --worker-port=8090
+          ports: [{ containerPort: 8080, name: http }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandboxd-router
+  namespace: sandboxd-controlplane-system
+spec:
+  selector: { app.kubernetes.io/name: sandboxd-router }
+  ports:
+    - { port: 8080, targetPort: 8080, name: http }

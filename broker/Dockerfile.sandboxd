@@ -1,0 +1,9 @@
+FROM python:3.13-slim
+WORKDIR /app
+RUN pip install --no-cache-dir --upgrade pip
+COPY requirements-sandboxd.txt .
+RUN pip install --no-cache-dir -r requirements-sandboxd.txt
+COPY broker_sandboxd.py /app/
+RUN chmod 0644 /app/broker_sandboxd.py
+EXPOSE 8080
+ENTRYPOINT ["uvicorn", "broker_sandboxd:app", "--host", "0.0.0.0", "--port", "8080"]
