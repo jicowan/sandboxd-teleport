@@ -368,11 +368,16 @@ longer keeping up. Full analysis + remaining options:
   unauthenticated‑`/resume` gap. kubelet probes stay on plain ports (worker `:8092`,
   operator `:8081`), off the mTLS ports. See
   [security-spiffe-spire.md](security-spiffe-spire.md).
-- **Still to do (data‑plane pass):** the **broker → router** and **router → worker**
-  hops are not yet mTLS'd (the router still **trusts the `X-Session-ID` header** from
-  the broker; only the broker can reach it in‑cluster). A second pass extends mTLS to
-  those hops (the router's inbound `:8080` will then need a plain health port too) plus
-  a NetworkPolicy locking workers to router/operator‑only ingress.
+- **router → worker data hop:** intentionally **not** mTLS'd (the router proxies to the
+  arbitrary nested workload; the agent is deliberately not a TLS reverse proxy). The
+  network‑layer control for it is an **opt‑in NetworkPolicy** locking worker ingress to
+  operator + router only (`controlplane/deploy/spire/worker-networkpolicy.yaml`);
+  effective once cluster‑wide NetworkPolicy enforcement is enabled. See
+  [security-spiffe-spire.md](security-spiffe-spire.md) §8b.
+- **Still to do (data‑plane pass):** the **broker → router** hop is not yet mTLS'd (the
+  router still **trusts the `X-Session-ID` header** from the broker; only the broker can
+  reach it in‑cluster). A second pass would extend mTLS there (the router's inbound
+  `:8080` would then need a plain health port too).
 - **Single worker namespace:** the operator assumes one namespace
   (`--resume-namespace`) for templates/pools/sessions and worker‑pod prune, and KV
   keys carry no namespace. Multi‑namespace (per‑tenant) workers are a known future

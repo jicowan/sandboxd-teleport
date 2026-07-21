@@ -230,6 +230,49 @@ it's inert to components that don't request an SVID.
 
 ---
 
+## 8b. Optional: restrict worker ingress (NetworkPolicy)
+
+The **router→worker data hop is intentionally plain** (the router proxies to the
+arbitrary nested workload; we don't turn the agent into a TLS reverse proxy — see §9).
+The network‑layer control for that hop is a **NetworkPolicy** that restricts *who* can
+reach a worker at all: only the **operator** (control API `:8090`) and the **router**
+(data proxy). This is **opt‑in** — an admin decision, not part of the default install —
+and ships as `controlplane/deploy/spire/worker-networkpolicy.yaml`.
+
+**Prerequisite (cluster‑wide): NetworkPolicy enforcement must be ON.** The manifest is
+**inert** unless the CNI enforces policies. On the VPC CNI it's a cluster addon toggle:
+
+```sh
+aws eks update-addon --cluster-name <cluster> --addon-name vpc-cni --region <region> \
+  --configuration-values '{"enableNetworkPolicy":"true"}'
+```
+
+> **Blast radius — read before enabling.** This switch is **cluster‑wide**: turning it
+> on activates **every** `NetworkPolicy` already in the cluster simultaneously, not just
+> this one. Audit existing policies first (`kubectl get netpol -A`) — e.g. a Keycloak or
+> other addon policy that has been sitting inert will start enforcing, which can cut off
+> traffic that currently flows. There is no policy‑scoped or log‑only mode in the VPC
+> CNI, so you cannot dry‑run just this policy on a shared cluster; validate on a
+> throwaway/test cluster first if unsure.
+
+**Apply + verify (once enforcement is on):**
+
+```sh
+kubectl apply -f controlplane/deploy/spire/worker-networkpolicy.yaml
+# workers stay Ready (kubelet node probes to :8092 are auto-allowed by the CNI):
+kubectl get pods -n default -l sandboxd.io/app=worker
+# a session still works (operator + router reach workers) — drive one through the router.
+# a random pod is now BLOCKED from a worker (this should TIME OUT):
+kubectl run t --rm -it --image=curlimages/curl -n default -- \
+  curl -m 6 http://<worker-pod-ip>:8092/healthz    # -> timeout / no route
+```
+
+**Without enforcement** the policy is safe to leave applied (it just does nothing); it
+becomes protective the moment enforcement is enabled. Rollback: `kubectl delete -f …`
+and/or set `enableNetworkPolicy:false` on the addon.
+
+---
+
 ## 9. Notes / future
 
 - **Identity source is swappable.** The mTLS wiring is behind a small helper

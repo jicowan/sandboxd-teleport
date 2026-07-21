@@ -13,6 +13,7 @@ by default. Full guide: [../../../../docs/sandboxd/security-spiffe-spire.md](../
 | `clusterspiffeids.yaml` | `ClusterSPIFFEID` CRs minting `spiffe://sandboxd/{operator,router,worker}` by pod label / SA + namespace. |
 | `controlplane-mtls-patch.yaml` | Strategic-merge patch that turns on mTLS for the **operator** (adds `--mtls` + SPIRE CSI socket). |
 | `router-mtls-patch.yaml` | Same for the **router** (adds `--mtls` + CSI socket, flips `--resume-url` to `https://`). |
+| `worker-networkpolicy.yaml` | **Opt-in** NetworkPolicy restricting worker ingress to operator + router only (the network-layer control for the plain router→worker data hop). Requires cluster-wide NetworkPolicy enforcement — see the security guide §8b. Not applied by default. |
 
 Worker-pod mTLS is **not** a manifest here — the operator's `WarmPool` reconciler
 provisions it automatically once the operator runs with `--mtls` (SPIRE CSI socket,
