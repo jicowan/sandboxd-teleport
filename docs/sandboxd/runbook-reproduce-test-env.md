@@ -195,6 +195,32 @@ kubectl get wp -n default
 kubectl get pods -n default -l sandboxd.io/pool=aio-pool
 ```
 
+### B1.5. (Optional) Secure the control plane with SPIFFE/SPIRE mTLS
+
+By default the control-plane hops are plain HTTP (in-cluster reachability only). To
+mutually authenticate the **router→operator** and **operator→worker** hops with SPIFFE
+mTLS — so only the workload with the expected SPIFFE ID can call each — install SPIRE
+and enable mTLS **before** running sessions. This is opt-in; skip it to run plain.
+
+```sh
+helm repo add spiffe https://spiffe.github.io/helm-charts-hardened/ && helm repo update spiffe
+helm install spire-crds spiffe/spire-crds --version 0.5.0 -n spire-system --create-namespace
+helm install spire      spiffe/spire      --version 0.29.0 -n spire-system \
+  -f checkpoint-restore/controlplane/deploy/spire/values.yaml
+kubectl apply -f checkpoint-restore/controlplane/deploy/spire/clusterspiffeids.yaml
+
+# enable mTLS on the operator + router, then roll the pool to get mTLS workers
+kubectl patch deploy sandboxd-operator -n sandboxd-controlplane-system \
+  --patch-file checkpoint-restore/controlplane/deploy/spire/controlplane-mtls-patch.yaml
+kubectl patch deploy sandboxd-router -n sandboxd-controlplane-system \
+  --patch-file checkpoint-restore/controlplane/deploy/spire/router-mtls-patch.yaml
+kubectl annotate warmpool aio-pool -n default sandboxd.io/nudge="$(date +%s)" --overwrite
+```
+
+Full guide (registration, verification, troubleshooting, rollback):
+[security-spiffe-spire.md](security-spiffe-spire.md). The rest of Part B works
+identically with mTLS on.
+
 ### B2. Warm a session through the router
 
 `/_warm` is the protocol‑agnostic primitive the broker uses on `initialize`. It

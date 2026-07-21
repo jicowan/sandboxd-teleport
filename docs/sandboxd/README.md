@@ -25,6 +25,30 @@ describes the live reference cluster it says so explicitly.
 | 8 | [api-reference-sandboxd-worker.md](api-reference-sandboxd-worker.md) | Operators / integrators | HTTP API surface of the sandboxd worker agent (`:8090`). |
 | 9 | [security-spiffe-spire.md](security-spiffe-spire.md) | Platform admins / security | Secure the control‑plane hops (router→operator, operator→worker) with SPIFFE/SPIRE mTLS: install, register identities, enable, verify. |
 
+## New here? Order of operations
+
+To stand the whole solution up in your own cluster, follow this sequence — each step
+names the doc with the exact commands. (Manifests live in two trees: front‑door/auth
+stack in the repo‑root `deploy/`, control‑plane internals in
+`checkpoint-restore/controlplane/deploy/`. The docs give the paths; you don't need to
+memorize the split.)
+
+1. **Control plane** — CRDs, RBAC, Valkey, operator, router, a worker pool:
+   [install-guide-sandboxd.md](install-guide-sandboxd.md) (or the condensed
+   [runbook Part B](runbook-reproduce-test-env.md#b1-install-the-control-plane)).
+2. **(Optional) mTLS** — SPIRE + secure the control‑plane hops, *before* running
+   sessions: [security-spiffe-spire.md](security-spiffe-spire.md) (runbook step B1.5).
+3. **Auth front door** — Keycloak realm, broker SA/RBAC, broker, agentgateway, ingress
+   (repo‑root `deploy/00…40`): [admin-guide-broker.md](admin-guide-broker.md).
+4. **Connect a client** — point Claude / an MCP client at the broker and authenticate:
+   [end-user-guide-broker.md](end-user-guide-broker.md).
+
+The [runbook](runbook-reproduce-test-env.md) walks the whole thing end‑to‑end
+(direct‑worker path → control plane → front door) as one script; the guides above are
+the reference for each layer. For *how it all fits*, read
+[architecture-sandboxd.md](architecture-sandboxd.md) and
+[architecture-broker.md](architecture-broker.md) first.
+
 ## Proposals (not yet scheduled)
 
 | Document | Status | What it covers |
