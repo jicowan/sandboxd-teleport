@@ -129,6 +129,36 @@ func (s *Suspender) SweepOnce(ctx context.Context) (int, error) {
 	return acted, nil
 }
 
+// SuspendNow performs an on-demand checkpoint+suspend of a single session
+// (docs/PRD-on-demand-suspend.md): checkpoint -> S3 -> mark Suspended -> free the
+// worker, using the exact same path the idle sweeper uses (suspendOne with
+// action=suspend). It is the exported, request-driven entry point the
+// SessionReconciler calls when it observes a new spec.suspendRequest.
+//
+// Idempotent by state: if the session is not currently Running (already Suspended/
+// Suspending/Absent, or no live worker), there is nothing to checkpoint and it
+// returns nil — the caller treats the request as already satisfied and advances the
+// watermark. Any real checkpoint error is returned so the caller can leave the
+// watermark unchanged and retry.
+func (s *Suspender) SuspendNow(ctx context.Context, sid string) error {
+	e, err := s.kv.GetSession(ctx, sid)
+	if err != nil {
+		if errors.Is(err, assign.ErrNotFound) {
+			return nil // no such session in KV -> nothing to suspend
+		}
+		return err
+	}
+	if e.State != resumeapi.StateRunning || e.WorkerPodIP == "" {
+		return nil // not Running -> already at/below the requested state
+	}
+	if err := s.suspendOne(ctx, e, "suspend"); err != nil {
+		metrics.SuspendsTotal.WithLabelValues("suspend", metrics.OutcomeError).Inc()
+		return err
+	}
+	metrics.SuspendsTotal.WithLabelValues("suspend", metrics.OutcomeSuccess).Inc()
+	return nil
+}
+
 // suspendOne checkpoints (action=suspend) or discards (action=reset) one idle
 // session and returns its worker to the idle pool.
 func (s *Suspender) suspendOne(ctx context.Context, e *resumeapi.SessionEntry, action string) error {

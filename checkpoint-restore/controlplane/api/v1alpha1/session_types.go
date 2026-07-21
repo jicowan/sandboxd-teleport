@@ -70,6 +70,17 @@ type SessionSpec struct {
 	// (docs/PRD-snapshot-fork.md §5.4).
 	// +optional
 	ForkFrom *ForkProvenance `json:"forkFrom,omitempty"`
+
+	// suspendRequest is an EDGE-TRIGGERED, one-shot request to checkpoint+suspend
+	// this session now (docs/PRD-on-demand-suspend.md). Set it to a fresh OPAQUE
+	// token (uuid/timestamp/etc.); when it differs from status.lastSuspendHandled the
+	// operator performs exactly one checkpoint->S3->Suspended->free-worker, then sets
+	// the watermark equal. It is NOT a level-triggered desired-state: reactive resume
+	// (a request to the router) may bring the session back to Running afterward and
+	// will NOT be re-suspended, because the token is already handled. Empty = no
+	// request.
+	// +optional
+	SuspendRequest string `json:"suspendRequest,omitempty"`
 }
 
 // ForkProvenance records a fork child's origin (docs/PRD-snapshot-fork.md §5.5).
@@ -153,6 +164,15 @@ type SessionStatus struct {
 	// coarsely (on transitions, not every request) to avoid write amplification.
 	// +optional
 	LastActiveAt *metav1.Time `json:"lastActiveAt,omitempty"`
+
+	// lastSuspendHandled is the watermark for the on-demand suspend request
+	// (docs/PRD-on-demand-suspend.md): the spec.suspendRequest token the operator
+	// most recently COMPLETED — set only after the checkpoint is durably in S3 and
+	// the session is Suspended. A requester waits for
+	// status.lastSuspendHandled == spec.suspendRequest (&& snapshotURI != "") to know
+	// the snapshot is safe to promote/fork. Equal ⇒ done; differing ⇒ pending.
+	// +optional
+	LastSuspendHandled string `json:"lastSuspendHandled,omitempty"`
 
 	// conditions represent the current state of the Session resource.
 	// +listType=map

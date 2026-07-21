@@ -391,6 +391,19 @@ func main() {
 	// once the manager starts.
 	discovery.TerminateSuspender = suspender
 
+	// On-demand suspend (docs/PRD-on-demand-suspend.md): a SessionReconciler watches
+	// Session.spec.suspendRequest and, on a new edge-triggered token, drives the same
+	// suspender to checkpoint+suspend once, then advances status.lastSuspendHandled.
+	// This is the trigger the example broker's fork_session composes.
+	if err := (&controller.SessionReconciler{
+		Client:  mgr.GetClient(),
+		Scheme:  mgr.GetScheme(),
+		Suspend: suspender,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "session")
+		os.Exit(1)
+	}
+
 	// Periodic background checkpoints (P5, opt-in per template): checkpoint
 	// long-lived Running sessions in place so a worker crash loses at most the
 	// interval, not everything since the last idle-suspend.
