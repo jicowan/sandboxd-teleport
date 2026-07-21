@@ -105,13 +105,21 @@ var (
 		Name: "sandboxd_gc_candidates",
 		Help: "Reapable items identified on the last GC pass, by class (ttl|abandoned|orphan-cr|orphan-s3).",
 	}, []string{"class"})
+
+	// WorkerReclaimedTotal counts stuck-busy worker bindings returned to the idle
+	// pool by the reclaim sweep, by reason (no-sid|orphan|suspended|rebound). See
+	// docs/DESIGN-worker-binding-reclaim.md.
+	WorkerReclaimedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "sandboxd_worker_reclaimed_total",
+		Help: "Stuck-busy worker bindings reclaimed to idle, by reason (no-sid|orphan|suspended|rebound).",
+	}, []string{"reason"})
 )
 
 // register wires everything into the controller-runtime registry exactly once.
 func init() {
 	ctrlmetrics.Registry.MustRegister(
 		PoolWorkers, ResumesTotal, ResumeDuration, SuspendsTotal, CheckpointsTotal,
-		SweepDuration, SweepDue, GCReapedTotal, GCCandidates,
+		SweepDuration, SweepDue, GCReapedTotal, GCCandidates, WorkerReclaimedTotal,
 	)
 }
 

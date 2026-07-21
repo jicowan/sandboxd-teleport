@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -29,6 +30,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/jicowan/aio-sandbox/controlplane/internal/assign"
+	"github.com/jicowan/aio-sandbox/controlplane/internal/metrics"
 	"github.com/jicowan/aio-sandbox/shared/resumeapi"
 )
 
@@ -52,6 +54,35 @@ type WorkerDiscoveryReconciler struct {
 	// session teleport-resumes losslessly (checkpoint-on-terminate). Optional
 	// (nil disables the behavior — falls back to just removing the KV entry).
 	TerminateSuspender TerminateSuspender
+
+	// Notify, if set, is nudged after a reclaim returns a worker to idle so the
+	// WarmPool status refreshes immediately (busy->idle). Optional.
+	Notify assign.PoolNotifier
+	// ReclaimGrace is how long a worker's busy binding must remain ANOMALOUS
+	// (orphaned / bound to a Suspended or rebound session) before the reclaim
+	// sweep returns it to the idle pool. It MUST exceed the resume deadline so an
+	// in-flight claim->bind (worker marked busy before its session entry exists)
+	// is never mistaken for a leak. 0 disables reclaim. See
+	// docs/DESIGN-worker-binding-reclaim.md.
+	ReclaimGrace time.Duration
+	// Now is the clock (injectable for tests); defaults to time.Now.
+	Now func() time.Time
+
+	// anomalous tracks, per busy pod, when its binding was first seen anomalous and
+	// the worker Version observed then. A binding is only reclaimed once it has been
+	// anomalous across at least two sweeps AND its version is unchanged AND the grace
+	// has elapsed — so a legitimate claim (which bumps Version within the resume
+	// deadline) can never be reclaimed. Cleared when a pod goes healthy/idle/gone.
+	// Reconcile runs single-threaded per informer, and the sweep loop is the only
+	// other reader/writer; access is serialized by the manager's runnable scheduling.
+	anomalous map[string]anomalyMark
+}
+
+// anomalyMark records the first-seen time and worker version of an anomalous busy
+// binding, for the two-strike + version-stable reclaim gate.
+type anomalyMark struct {
+	firstSeen time.Time
+	version   int64
 }
 
 // TerminateSuspender checkpoints a session on a terminating worker. Implemented
@@ -191,10 +222,114 @@ func (r *WorkerDiscoveryReconciler) PruneStaleWorkers(ctx context.Context) (int,
 	return pruned, nil
 }
 
-// StartPruneLoop runs PruneStaleWorkers periodically (manager Runnable).
+// reclaimReason classifies why a busy binding is anomalous, or "" if it is healthy
+// (its session is live and bound to THIS pod). The pod is assumed to exist + be
+// Ready (dead pods are handled by PruneStaleWorkers). See the reclaim rule in
+// docs/DESIGN-worker-binding-reclaim.md §4.1.
+func (r *WorkerDiscoveryReconciler) reclaimReason(ctx context.Context, w *resumeapi.WorkerEntry) string {
+	if w.SID == "" {
+		return "no-sid" // busy with no session id at all — never a valid claim
+	}
+	se, err := r.KV.GetSession(ctx, w.SID)
+	if errors.Is(err, assign.ErrNotFound) {
+		return "orphan" // session entry gone (deleted/GC'd without releasing the worker)
+	}
+	if err != nil {
+		return "" // transient KV error: don't act this pass
+	}
+	switch {
+	case se.State == resumeapi.StateSuspended:
+		// A Suspended session holds no worker; the binding leaked (ReleaseWorker lost).
+		return "suspended"
+	case se.WorkerPod != "" && se.WorkerPod != w.Pod:
+		// The session rebound to another pod; this pod's binding is a leftover.
+		return "rebound"
+	default:
+		return "" // Running/Resuming/Suspending bound here (or not yet bound): keep.
+	}
+}
+
+// ReclaimOrphanBindings returns busy workers whose binding is provably orphaned
+// (no session), points at a Suspended session, or is a leftover of a rebind — but
+// only after the anomaly has persisted past ReclaimGrace with an unchanged worker
+// version (so an in-flight claim->bind is never reclaimed). It moves such workers
+// busy->idle via ReleaseWorker. Returns the number reclaimed. No-op if
+// ReclaimGrace <= 0. See docs/DESIGN-worker-binding-reclaim.md.
+func (r *WorkerDiscoveryReconciler) ReclaimOrphanBindings(ctx context.Context) (int, error) {
+	if r.ReclaimGrace <= 0 {
+		return 0, nil
+	}
+	now := r.now()
+	log := logf.FromContext(ctx).WithName("worker-reclaim")
+
+	pods, err := r.KV.ListWorkerPods(ctx)
+	if err != nil {
+		return 0, err
+	}
+	seen := make(map[string]bool, len(pods))
+	reclaimed := 0
+	for _, pod := range pods {
+		w, gerr := r.KV.GetWorker(ctx, pod)
+		if gerr != nil || w.State != resumeapi.WorkerBusy {
+			continue // idle or gone: not our concern (idle self-heals via the informer)
+		}
+		reason := r.reclaimReason(ctx, w)
+		if reason == "" {
+			delete(r.anomalous, pod) // healthy now: disarm
+			continue
+		}
+		seen[pod] = true
+
+		// Two-strike + version-stable gate: arm on first observation, act only once
+		// the anomaly has survived a prior sweep, the version is unchanged, and the
+		// grace has elapsed.
+		mark, armed := r.anomalous[pod]
+		if !armed || mark.version != w.Version {
+			r.anomalous[pod] = anomalyMark{firstSeen: now, version: w.Version}
+			continue
+		}
+		if now.Sub(mark.firstSeen) < r.ReclaimGrace {
+			continue // still within grace
+		}
+
+		if err := r.KV.ReleaseWorker(ctx, w.Pod, w.Pool); err != nil {
+			log.Error(err, "reclaim: release worker", "pod", w.Pod, "pool", w.Pool)
+			continue // retry next sweep
+		}
+		delete(r.anomalous, pod)
+		if r.Notify != nil {
+			r.Notify.PoolChanged(w.Pool) // busy->idle: refresh WarmPool status now
+		}
+		metrics.WorkerReclaimedTotal.WithLabelValues(reason).Inc()
+		log.Info("reclaimed orphaned worker binding", "pod", w.Pod, "pool", w.Pool,
+			"sid", w.SID, "reason", reason, "agedSec", int(now.Sub(mark.firstSeen).Seconds()))
+		reclaimed++
+	}
+	// Forget marks for pods no longer busy/anomalous so the map can't grow unbounded.
+	for pod := range r.anomalous {
+		if !seen[pod] {
+			delete(r.anomalous, pod)
+		}
+	}
+	return reclaimed, nil
+}
+
+func (r *WorkerDiscoveryReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
+
+// StartPruneLoop runs the level-triggered KV self-heal sweeps periodically (manager
+// Runnable): PruneStaleWorkers (drop entries for dead pods) and ReclaimOrphanBindings
+// (return stuck-busy workers to idle). Both are leader-gated with the reconciler.
 func (r *WorkerDiscoveryReconciler) StartPruneLoop(ctx context.Context, interval time.Duration) error {
 	if interval == 0 {
 		interval = 30 * time.Second
+	}
+	if r.anomalous == nil {
+		r.anomalous = map[string]anomalyMark{}
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -208,6 +343,11 @@ func (r *WorkerDiscoveryReconciler) StartPruneLoop(ctx context.Context, interval
 				log.Error(err, "prune stale workers")
 			} else if n > 0 {
 				log.Info("pruned stale worker entries", "count", n)
+			}
+			if n, err := r.ReclaimOrphanBindings(ctx); err != nil {
+				log.Error(err, "reclaim orphaned worker bindings")
+			} else if n > 0 {
+				log.Info("reclaimed orphaned worker bindings", "count", n)
 			}
 		}
 	}

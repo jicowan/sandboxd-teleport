@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"time"
 
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
 	"github.com/jicowan/aio-sandbox/controlplane/internal/assign"
 	"github.com/jicowan/aio-sandbox/controlplane/internal/metrics"
 	"github.com/jicowan/aio-sandbox/shared/resumeapi"
@@ -106,6 +108,7 @@ func (s *Suspender) SweepOnce(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	metrics.SweepDue.WithLabelValues("suspend").Set(float64(len(sessions)))
+	log := logf.FromContext(ctx).WithName("suspend-sweeper")
 	acted := 0
 	for _, e := range sessions {
 		if e.State != resumeapi.StateRunning || e.WorkerPodIP == "" {
@@ -118,8 +121,13 @@ func (s *Suspender) SweepOnce(ctx context.Context) (int, error) {
 			continue
 		}
 		if err := s.suspendOne(ctx, e, pol.Action); err != nil {
-			// non-fatal: log-and-continue is the caller's job; surface via return only
-			// if nothing else acted. Keep sweeping other sessions.
+			// Non-fatal: keep sweeping other sessions. Log it — previously this was
+			// counted only in a metric and otherwise silent, so a session whose worker
+			// /suspend fails forever (e.g. the sandbox died) looked like nothing was
+			// happening while it also shielded the session from GC. The worker-binding
+			// reclaim sweep is the backstop that eventually frees such a worker.
+			log.Error(err, "idle-suspend failed for session", "sid", e.SID,
+				"action", pol.Action, "workerPod", e.WorkerPod)
 			metrics.SuspendsTotal.WithLabelValues(pol.Action, metrics.OutcomeError).Inc()
 			continue
 		}

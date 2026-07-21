@@ -128,6 +128,9 @@ func main() {
 		"sandboxd worker image (overrides the built-in default).")
 	flag.StringVar(&credTokenSecret, "cred-token-secret", envOr("SANDBOXD_CRED_TOKEN_SECRET", ""),
 		"Secret name (key 'token') holding the fleet HMAC key for the per-session IAM credential vendor; empty disables it.")
+	var workerReclaimGraceSec int
+	flag.IntVar(&workerReclaimGraceSec, "worker-reclaim-grace-seconds", envInt("SANDBOXD_WORKER_RECLAIM_GRACE_SECONDS", 300),
+		"How long a busy worker binding must stay orphaned (no live session / Suspended / rebound) before the reclaim sweep returns it to idle. Must exceed --resume-deadline-seconds; 0 disables reclaim.")
 	var maxConcurrentResumes int
 	flag.IntVar(&maxConcurrentResumes, "max-concurrent-resumes", envInt("SANDBOXD_MAX_CONCURRENT_RESUMES", 0),
 		"Cap on in-flight resumes (backpressure); 0 = unlimited (default).")
@@ -336,10 +339,12 @@ func main() {
 		os.Exit(1)
 	}
 	discovery := &controller.WorkerDiscoveryReconciler{
-		Client:    mgr.GetClient(),
-		Scheme:    mgr.GetScheme(),
-		KV:        kv,
-		Namespace: resumeNamespace,
+		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
+		KV:           kv,
+		Namespace:    resumeNamespace,
+		Notify:       poolNotifier,
+		ReclaimGrace: time.Duration(workerReclaimGraceSec) * time.Second,
 	}
 	if err := discovery.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "worker-discovery")
