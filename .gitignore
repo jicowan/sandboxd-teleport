@@ -2,8 +2,22 @@
 __pycache__/
 *.pyc
 .env
+.env.*
 *.bak
 .DS_Store
 dist/
 *.egg-info/
 .vscode/
+
+# Credentials / secrets — never commit these
+*.pem
+*.key
+*.p12
+*.pfx
+*_rsa
+*_rsa.pub
+kubeconfig
+*.kubeconfig
+credentials
+*.tfstate
+*.tfstate.*

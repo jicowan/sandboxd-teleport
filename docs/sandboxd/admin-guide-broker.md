@@ -26,7 +26,7 @@ registry.
 ## 1. Keycloak
 
 You need a running Keycloak reachable at a stable HTTPS hostname
-(`keycloak.jicomusic.com` in the reference env) — typically the Keycloak operator
+(`keycloak.example.com` in the reference env) — typically the Keycloak operator
 in the `keycloak` namespace fronted by its own Ingress. Installing Keycloak
 itself is out of scope here; this section covers the **realm** the platform needs.
 
@@ -50,8 +50,8 @@ This creates `KeycloakRealmImport/sandbox-realm`, which provisions realm
 Issuer / JWKS that everything downstream validates against:
 
 ```
-issuer: https://keycloak.jicomusic.com/realms/sandbox
-jwks:   https://keycloak.jicomusic.com/realms/sandbox/protocol/openid-connect/certs
+issuer: https://keycloak.example.com/realms/sandbox
+jwks:   https://keycloak.example.com/realms/sandbox/protocol/openid-connect/certs
 ```
 
 ### Create the power‑user group (manual)
@@ -97,7 +97,7 @@ kubectl apply -f deploy/40-agentgateway-ingress.yaml # ALB Ingress (TLS)
   from the ConfigMap.
 - **Service** `agentgateway-svc`: ClusterIP `:3000`.
 - **Ingress** `agentgateway`: `alb`, **internet‑facing**, TLS 443 → `:3000`,
-  host `agentgateway.jicomusic.com`, health‑check path `/mcp` (success codes
+  host `agentgateway.example.com`, health‑check path `/mcp` (success codes
   `200,400,401,406`). Requires an ACM cert ARN in the annotation — replace with
   your own.
 
@@ -111,15 +111,15 @@ three policies. Edit the ConfigMap to change behavior; the key knobs:
 ```yaml
 mcpAuthentication:
   mode: strict
-  issuer: https://keycloak.jicomusic.com/realms/sandbox
+  issuer: https://keycloak.example.com/realms/sandbox
   audiences: [sandbox-router]
   jwks:
-    url: https://keycloak.jicomusic.com/realms/sandbox/protocol/openid-connect/certs
+    url: https://keycloak.example.com/realms/sandbox/protocol/openid-connect/certs
   provider: { keycloak: {} }
   resourceMetadata:
-    resource: https://agentgateway.jicomusic.com/mcp
+    resource: https://agentgateway.example.com/mcp
     authorization_servers:
-      - https://keycloak.jicomusic.com/realms/sandbox
+      - https://keycloak.example.com/realms/sandbox
     scopesSupported: [openid, sandbox]
     bearerMethodsSupported: [header]
 ```
@@ -210,7 +210,7 @@ code, so you can run with almost none set.
 |---------|---------|---------|
 | `SANDBOXD_POOL` | `aio-pool` | Value sent as `X-Session-Pool`; selects the pool/template a new session uses. |
 | `SANDBOXD_ROUTER_URL` | `http://sandboxd-router.sandboxd-controlplane-system.svc.cluster.local:8080` | Router base URL; broker POSTs `/mcp` and `/_warm` here. Trailing slash stripped. |
-| `AIO_OIDC_ISSUER` | `https://keycloak.jicomusic.com/realms/sandbox` | Required JWT issuer; also derives the JWKS URL (`{issuer}/protocol/openid-connect/certs`). |
+| `AIO_OIDC_ISSUER` | `https://keycloak.example.com/realms/sandbox` | Required JWT issuer; also derives the JWKS URL (`{issuer}/protocol/openid-connect/certs`). |
 | `AIO_EXPECTED_AUDIENCE` | `sandbox-router` | Required JWT `aud`. |
 | `AIO_GATEWAY_AZP` | `aio-sandbox-client` | Required JWT `azp` (proves the token came via the gateway client). |
 | `AIO_REQUIRED_GROUP` | `sandbox-users` | Group the JWT `groups` claim must contain. |
@@ -252,9 +252,9 @@ kubectl patch svc aio-sandbox-broker-svc -n default --type=merge \
 
 Clients need no change — same endpoint, same OAuth.
 
-> The primary internet‑facing path is `agentgateway.jicomusic.com/mcp` (through
+> The primary internet‑facing path is `agentgateway.example.com/mcp` (through
 > agentgateway, with the tool allowlist). There is also an internal ALB
-> `broker.jicomusic.com` that reaches the broker directly (JWT still enforced by
+> `broker.example.com` that reaches the broker directly (JWT still enforced by
 > the broker, but **no** tool allowlist). The internal ingress currently has no
 > manifest under `deploy/`; if you rely on it, add it to IaC.
 
@@ -265,7 +265,7 @@ Clients need no change — same endpoint, same OAuth.
 1. **Front door reachable + demands auth:**
 
    ```sh
-   curl -s -o /dev/null -w '%{http_code}\n' https://agentgateway.jicomusic.com/mcp
+   curl -s -o /dev/null -w '%{http_code}\n' https://agentgateway.example.com/mcp
    # expect 401 (unauthenticated) — proves the edge is up and enforcing
    ```
 
@@ -278,7 +278,7 @@ Clients need no change — same endpoint, same OAuth.
    ```
 
 3. **Full path with a real client:** connect Claude Code to
-   `https://agentgateway.jicomusic.com/mcp` (see
+   `https://agentgateway.example.com/mcp` (see
    [end-user-guide-broker.md](end-user-guide-broker.md)), authenticate, and confirm
    tools appear. A `sandbox-users` account should NOT see
    `sandbox_execute_bash`/`sandbox_execute_code`; a `sandbox-power` account should.

@@ -67,7 +67,7 @@ So: **static schema + AUTHORIZATION_CODE (3LO)** is the route.
    versioned artifact in the repo (e.g. `deploy/aio-tool-schema.json`) so the
    static schema is reproducible.
 5. **Create the static-schema 3LO target** on the new gateway:
-   `mcpServer.endpoint = https://broker.jicomusic.com`,
+   `mcpServer.endpoint = https://broker.example.com`,
    `mcpServer.mcpToolSchema.inlinePayload = <json string>`,
    outbound `grantType: AUTHORIZATION_CODE`, the authcode provider ARN,
    private endpoint VPC config.

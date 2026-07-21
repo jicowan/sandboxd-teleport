@@ -28,7 +28,7 @@ state exists only in S3 at the hand-off. This is the substrate "teleport" model.
 - **Node command execution via AWS SSM Run Command** (NOT `kubectl node-shell`).
   node-shell wedges when `runsc restore` backgrounds and truncates output; SSM is
   async and captures stdout/stderr reliably. Instance i-000d00ffa9964e5b3.
-- **S3 bucket + Pod Identity:** `aio-checkpoint-spike-820537372947-us-west-2`;
+- **S3 bucket + Pod Identity:** `aio-checkpoint-spike-111122223333-us-west-2`;
   IAM role `aio-checkpoint-spike-role` (trust `pods.eks.amazonaws.com`), scoped
   to the bucket; ServiceAccount `default/ckpt-spike`.
 - **A privileged helper pod** (`ckpt-shim2`, SA `ckpt-spike`) on the same node
@@ -108,7 +108,7 @@ All `runsc` on the node via SSM. `S=/var/lib/teleport`.
    ```sh
    # kubectl exec ckpt-shim2 -n default -- sh -c '...'
    aws s3 cp --recursive /host/var/lib/teleport/img/ \
-       s3://aio-checkpoint-spike-820537372947-us-west-2/teleport/img/
+       s3://aio-checkpoint-spike-111122223333-us-west-2/teleport/img/
    ```
    Only the small checkpoint travels (base rootfs stays node-local / comes from
    the image on each node).
@@ -134,7 +134,7 @@ All `runsc` on the node via SSM. `S=/var/lib/teleport`.
    # kubectl exec ckpt-shim2 ...
    mkdir -p /host/var/lib/teleport/img-b
    aws s3 cp --recursive \
-       s3://aio-checkpoint-spike-820537372947-us-west-2/teleport/img/ \
+       s3://aio-checkpoint-spike-111122223333-us-west-2/teleport/img/ \
        /host/var/lib/teleport/img-b/
    ```
 8. Give worker B its **own** rootfs (a separate snapshot) and an **identical**

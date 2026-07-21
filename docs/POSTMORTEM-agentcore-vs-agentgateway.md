@@ -78,7 +78,7 @@ single documented policy:
 ```yaml
 policies:
   mcpAuthentication:        # validate the inbound Keycloak JWT (+ serve OAuth metadata)
-    issuer: https://keycloak.jicomusic.com/realms/sandbox
+    issuer: https://keycloak.example.com/realms/sandbox
     jwks: { url: .../protocol/openid-connect/certs }
     provider: { keycloak: {} }
   backendAuth:

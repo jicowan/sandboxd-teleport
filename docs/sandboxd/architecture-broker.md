@@ -37,7 +37,7 @@ workers), see [architecture-sandboxd.md](architecture-sandboxd.md).
 MCP client (Claude)
   │  Authorization: Bearer <user JWT>   (aud=sandbox-router, azp=aio-sandbox-client, groups=[sandbox-users|sandbox-power])
   ▼
-https://agentgateway.jicomusic.com/mcp
+https://agentgateway.example.com/mcp
   │  ALB Ingress "agentgateway" (internet-facing, TLS 443 → :3000)
   ▼
 Service agentgateway-svc:3000  →  agentgateway pod
@@ -55,11 +55,11 @@ http://aio-sandbox-broker-svc.default.svc.cluster.local:8080/   (Service → bro
 sandboxd router (control plane)  →  resume/route → sandbox
 ```
 
-There is also a secondary **internal** ALB (`broker.jicomusic.com`) that reaches
+There is also a secondary **internal** ALB (`broker.example.com`) that reaches
 the broker Service directly, bypassing agentgateway's edge check. The broker's
 own JWT re‑validation still applies, so this path is authenticated — but it does
 **not** apply agentgateway's tool allowlist. Treat it as an internal/testing
-door; the primary, tool‑authorized path is `agentgateway.jicomusic.com/mcp`.
+door; the primary, tool‑authorized path is `agentgateway.example.com/mcp`.
 
 ## Keycloak (identity)
 
@@ -67,8 +67,8 @@ Defined by `deploy/00-keycloak-realm.yaml` (a `KeycloakRealmImport` CR in the
 `keycloak` namespace).
 
 - **Realm:** `sandbox` (display name "AIO Sandbox"), access‑token lifespan 3600s.
-- **Issuer:** `https://keycloak.jicomusic.com/realms/sandbox`
-- **JWKS:** `https://keycloak.jicomusic.com/realms/sandbox/protocol/openid-connect/certs`
+- **Issuer:** `https://keycloak.example.com/realms/sandbox`
+- **JWKS:** `https://keycloak.example.com/realms/sandbox/protocol/openid-connect/certs`
 - **Client:** `aio-sandbox-client` — a **public** client (no secret), PKCE (S256),
   standard authorization‑code flow + device grant. Redirect URIs are loopback
   (`http://localhost`/`127.0.0.1` wildcards) so desktop/CLI MCP clients can
@@ -95,13 +95,13 @@ Three policies apply to the route:
 
 Verifies the bearer JWT before anything else:
 
-- `issuer: https://keycloak.jicomusic.com/realms/sandbox`
+- `issuer: https://keycloak.example.com/realms/sandbox`
 - `audiences: [sandbox-router]`
 - `jwks.url: …/protocol/openid-connect/certs`
 - `provider: keycloak: {}`
 - `resourceMetadata` publishes RFC 9728 protected‑resource metadata pointing
   clients at Keycloak as the authorization server (`authorization_servers:
-  [https://keycloak.jicomusic.com/realms/sandbox]`), with `scopesSupported:
+  [https://keycloak.example.com/realms/sandbox]`), with `scopesSupported:
   [openid, sandbox]` and `bearerMethodsSupported: [header]`. This is what lets a
   client like Claude Code discover where to log in with no manual OAuth config.
 
@@ -148,7 +148,7 @@ did:
 2. Fetch the RS256 signing key from Keycloak JWKS (with retry to tolerate flaky
    DNS).
 3. `jwt.decode(..., algorithms=["RS256"], audience="sandbox-router",
-   issuer="https://keycloak.jicomusic.com/realms/sandbox",
+   issuer="https://keycloak.example.com/realms/sandbox",
    require=[exp, iss, aud])`.
 4. `azp` must equal `aio-sandbox-client`, else `403` ("not via the Gateway").
 5. If a required group is configured (`sandbox-users`), it must be in the
@@ -238,7 +238,7 @@ worth knowing when you operate it:
   `aio-sandbox-broker-svc` selector was cut over to `app:
   aio-sandbox-broker-sandboxd` (the sandboxd broker). The cutover/rollback is a
   Service‑selector patch — see the admin guide.
-- **`broker.jicomusic.com` ingress** (internal ALB) exists in the cluster but has
+- **`broker.example.com` ingress** (internal ALB) exists in the cluster but has
   no manifest under `deploy/`; it's referenced only in docs. Reconcile it into IaC
   or treat it as a manually‑applied internal door.
 - **`sandbox-power` group** is not in the realm import — create it in Keycloak by

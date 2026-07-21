@@ -157,7 +157,7 @@ End-to-end teleport of an ARBITRARY image works through the sandboxd HTTP API:
   checkpoint from S3, restored → `status=running` in ~420ms; counter continued
   (43→48…), NOT reset. Memory + filesystem teleported A → S3 → B.
 
-Bugs found + fixed on the way (all in sandboxd, ECR 820537372947/sandboxd v1→v9):
+Bugs found + fixed on the way (all in sandboxd, ECR 111122223333/sandboxd v1→v9):
 1. `runsc start` blocks (foreground) → use `run -detach`.
 2. detached run/restore inherits stdio → cmd.Run() hangs on pipes; use /dev/null
    stdio + rely on `--debug-log` files.

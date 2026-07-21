@@ -7,7 +7,7 @@ front (see [admin-guide-broker.md](admin-guide-broker.md)).
 
 Read [architecture-sandboxd.md](architecture-sandboxd.md) for what these
 components do. All commands use the reference environment
-(`EKSClusterStack-cluster`, `us-west-2`, account `820537372947`) — substitute your
+(`EKSClusterStack-cluster`, `us-west-2`, account `111122223333`) — substitute your
 own cluster, registry, bucket, and IAM ARNs.
 
 Paths are relative to `checkpoint-restore/controlplane/` unless noted.
@@ -39,7 +39,7 @@ Paths are relative to `checkpoint-restore/controlplane/` unless noted.
 
   ```sh
   kubectl config current-context
-  # arn:aws:eks:us-west-2:820537372947:cluster/EKSClusterStack-cluster
+  # arn:aws:eks:us-west-2:111122223333:cluster/EKSClusterStack-cluster
   ```
 
 - Go 1.26+, Docker (buildx, linux/amd64), `aws` CLI, and — for the operator/router
@@ -58,14 +58,14 @@ Checkpoints live in S3; the worker reads/writes them via EKS Pod Identity.
 1. **Create the bucket** (private):
 
    ```sh
-   aws s3 mb s3://aio-checkpoint-spike-820537372947-us-west-2 --region us-west-2
+   aws s3 mb s3://aio-checkpoint-spike-111122223333-us-west-2 --region us-west-2
    ```
 
 2. **Create the worker IAM role** `sandboxd-worker-checkpoint`:
    - Trust policy: principal `pods.eks.amazonaws.com`, actions `sts:AssumeRole` +
      `sts:TagSession`.
    - Inline policy `s3-checkpoints` (least privilege, scoped to the one bucket):
-     - `s3:ListBucket` on `arn:aws:s3:::aio-checkpoint-spike-820537372947-us-west-2`
+     - `s3:ListBucket` on `arn:aws:s3:::aio-checkpoint-spike-111122223333-us-west-2`
      - `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` on `…/*`
 
    > The worker keeps read/write; it does **not** need delete for normal operation
@@ -86,7 +86,7 @@ Checkpoints live in S3; the worker reads/writes them via EKS Pod Identity.
    aws eks create-pod-identity-association \
      --cluster-name EKSClusterStack-cluster \
      --namespace default --service-account sandboxd-worker \
-     --role-arn arn:aws:iam::820537372947:role/sandboxd-worker-checkpoint \
+     --role-arn arn:aws:iam::111122223333:role/sandboxd-worker-checkpoint \
      --region us-west-2
    ```
 
@@ -185,7 +185,7 @@ your bucket/region/SA/namespace):
 --resume-addr=:8082
 --resume-namespace=default
 --worker-sa=sandboxd-worker
---worker-bucket=aio-checkpoint-spike-820537372947-us-west-2
+--worker-bucket=aio-checkpoint-spike-111122223333-us-west-2
 --worker-region=us-west-2
 ```
 

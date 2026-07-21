@@ -57,6 +57,11 @@ func TestControllers(t *testing.T) {
 var _ = BeforeSuite(func() {
 	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
 
+	// Supply a worker image the way the operator does at startup (--worker-image /
+	// SANDBOXD_WORKER_IMAGE). There is no hardcoded default, so specs that create
+	// pools without a per-template workerImage rely on this global being set.
+	WorkerImage = "example.com/sandboxd:test"
+
 	ctx, cancel = context.WithCancel(context.TODO())
 
 	var err error

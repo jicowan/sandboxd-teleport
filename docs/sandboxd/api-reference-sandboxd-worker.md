@@ -329,7 +329,7 @@ Liveness probe. Returns the literal text `ok` with `200`.
 **Response `200`**
 
 ```json
-{ "runsc": "runsc version release-20260622.0\n…", "bucket": "aio-checkpoint-spike-820537372947-us-west-2" }
+{ "runsc": "runsc version release-20260622.0\n…", "bucket": "aio-checkpoint-spike-111122223333-us-west-2" }
 ```
 
 ---

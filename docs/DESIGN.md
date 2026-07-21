@@ -119,7 +119,7 @@ for MCP forwarding; the proxy now claims via the broker instead of reading a
 
 Status: code + manifests built and import/dry-run validated. Not yet
 deployed end-to-end (needs broker image build/push, ACM cert for
-`broker.jicomusic.com`, R53 record).
+`broker.example.com`, R53 record).
 
 **Known gotcha — principal identity:** the test user `jicowan` has no `email`
 claim in its token, so oauth2-proxy's `X-Auth-Request-Email` is empty and the
@@ -135,7 +135,7 @@ itself, and advertise OAuth resource metadata so a remote MCP client can
 authenticate directly. Then the client registration collapses to:
 
 ```
-claude mcp add --transport http aio-sandbox https://sandbox-router.jicomusic.com/mcp
+claude mcp add --transport http aio-sandbox https://sandbox-router.example.com/mcp
 ```
 
 The local proxy container, `aio_login.py`, the device flow, the `oidc.json`

@@ -109,12 +109,13 @@ spec:
           - offline_access
 
     users:
-      - username: jicowan
-        email: jicowan@proton.me
+      # Example seed user — replace with your own before applying.
+      - username: demo-user
+        email: demo-user@example.com
         enabled: true
         emailVerified: true
-        firstName: Jeremy
-        lastName: Cowan
+        firstName: Demo
+        lastName: User
         credentials:
           # Placeholder — set a real value before applying, or create/reset the
           # user's password out of band (Keycloak admin UI / API). Temporary:

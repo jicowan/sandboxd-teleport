@@ -49,12 +49,12 @@ for why this uses agentgateway rather than AWS Bedrock AgentCore Gateway.
 - EKS cluster with the AWS Load Balancer Controller, an `agent-sandbox`
   controller, and a `SandboxTemplate` + `SandboxWarmPool` (`aio-sandbox-template` /
   `aio-sandbox-warmpool`).
-- Keycloak reachable at `keycloak.jicomusic.com` with the `sandbox` realm
+- Keycloak reachable at `keycloak.example.com` with the `sandbox` realm
   (public `aio-sandbox-client`; `sandbox-users` group gates access and
   `sandbox-power` grants the exec tools; the scope mappers in `docs/` —
   `sub`, `preferred_username`, `groups`, `aud=sandbox-router`).
 - Route 53 zone for the public hostname + an ACM cert for
-  `agentgateway.jicomusic.com`.
+  `agentgateway.example.com`.
 - `kubectl`, `docker buildx`, `aws` CLI, and `claude` (Claude Code).
 
 ## Get it running
@@ -81,7 +81,7 @@ kubectl apply -f 30-agentgateway.yaml          # agentgateway (ConfigMap + Deplo
 ### 3. Expose agentgateway publicly
 
 ```bash
-# Ensure an ACM cert for agentgateway.jicomusic.com exists; put its ARN in
+# Ensure an ACM cert for agentgateway.example.com exists; put its ARN in
 # deploy/40-agentgateway-ingress.yaml, then:
 kubectl apply -f 40-agentgateway-ingress.yaml
 
@@ -90,7 +90,7 @@ ALB=$(kubectl get ingress -n default agentgateway \
   -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
 aws route53 change-resource-record-sets --hosted-zone-id <ZONE_ID> \
   --change-batch "{\"Changes\":[{\"Action\":\"UPSERT\",\"ResourceRecordSet\":{
-    \"Name\":\"agentgateway.jicomusic.com\",\"Type\":\"A\",
+    \"Name\":\"agentgateway.example.com\",\"Type\":\"A\",
     \"AliasTarget\":{\"HostedZoneId\":\"Z1H1FL5HABSF5\",\"DNSName\":\"${ALB}\",
       \"EvaluateTargetHealth\":false}}}]}"
 ```
@@ -98,8 +98,8 @@ aws route53 change-resource-record-sets --hosted-zone-id <ZONE_ID> \
 Verify the OAuth discovery doc points at Keycloak:
 
 ```bash
-curl -s https://agentgateway.jicomusic.com/.well-known/oauth-protected-resource/mcp | jq
-# authorization_servers should be ["https://keycloak.jicomusic.com/realms/sandbox"]
+curl -s https://agentgateway.example.com/.well-known/oauth-protected-resource/mcp | jq
+# authorization_servers should be ["https://keycloak.example.com/realms/sandbox"]
 ```
 
 ### 4. Register in Claude Code & authenticate
@@ -108,7 +108,7 @@ curl -s https://agentgateway.jicomusic.com/.well-known/oauth-protected-resource/
 claude mcp add aio-sandbox \
   --scope user --transport http \
   --client-id aio-sandbox-client \
-  https://agentgateway.jicomusic.com/mcp
+  https://agentgateway.example.com/mcp
 ```
 
 Start a **new** Claude Code session, run `/mcp` → **aio-sandbox** →

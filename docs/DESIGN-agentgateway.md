@@ -92,13 +92,13 @@ sandbox — that constraint is gone.
 
 1. **Public endpoint**: agentgateway is ClusterIP-only. Claude Code (on a
    laptop) needs a public, TLS-terminated endpoint — internet-facing ALB
-   Ingress + ACM cert for `agentgateway.jicomusic.com` + Route53 alias
+   Ingress + ACM cert for `agentgateway.example.com` + Route53 alias
    (mirror the pattern previously used for the router/broker).
 2. **Align audience/resource**: confirm `mcpAuthentication.audiences` and
    `resourceMetadata.resource` match what Claude Code's OAuth discovery
    expects for the public hostname.
 3. **Register in Claude Code**: `claude mcp add --transport http aio-sandbox
-   https://agentgateway.jicomusic.com/mcp --client-id aio-sandbox-client`,
+   https://agentgateway.example.com/mcp --client-id aio-sandbox-client`,
    then verify the native browser OAuth flow end-to-end from the client.
 4. **Reap stale claims** proactively (readiness check on reuse, or a sweeper).
 5. **Per-user quota** policy if/when needed.

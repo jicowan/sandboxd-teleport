@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: broker
-          image: 820537372947.dkr.ecr.us-west-2.amazonaws.com/aio-sandbox-broker-sandboxd:v1
+          image: 111122223333.dkr.ecr.us-west-2.amazonaws.com/aio-sandbox-broker-sandboxd:v1
           env:
             - { name: SANDBOXD_POOL, value: aio-pool }
             - { name: SANDBOXD_ROUTER_URL, value: "http://sandboxd-router.sandboxd-controlplane-system.svc.cluster.local:8080" }

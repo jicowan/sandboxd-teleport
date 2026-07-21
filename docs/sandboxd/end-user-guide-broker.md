@@ -26,7 +26,7 @@ you get the same working directory and state back when you reconnect.
    deployment this is:
 
    ```
-   https://agentgateway.jicomusic.com/mcp
+   https://agentgateway.example.com/mcp
    ```
 
 2. **A user account in the identity provider (Keycloak)** that is a member of the
@@ -52,7 +52,7 @@ Add the server, **pinning the pre‑registered client id** (`aio-sandbox-client`
 
 ```sh
 claude mcp add --transport http --client-id aio-sandbox-client \
-  aio-sandbox https://agentgateway.jicomusic.com/mcp
+  aio-sandbox https://agentgateway.example.com/mcp
 ```
 
 > **Do not omit `--client-id`.** Without it, Claude Code tries to *dynamically
@@ -88,7 +88,7 @@ A healthy server shows as `connected` with a non‑empty tool list.
 Add an MCP server of type **HTTP / streamable HTTP** (not stdio) pointing at the
 endpoint:
 
-- **URL:** `https://agentgateway.jicomusic.com/mcp`
+- **URL:** `https://agentgateway.example.com/mcp`
 - **Auth:** OAuth (the app will open a browser to Keycloak on first connect)
 
 The exact menu path varies by app version (typically *Settings → Connectors /
@@ -99,14 +99,14 @@ HTTP transport with OAuth. When prompted, log in through the browser window.
 
 Any client that supports **streamable‑HTTP MCP with OAuth 2.0** works. Configure:
 
-- **Endpoint:** `https://agentgateway.jicomusic.com/mcp`
+- **Endpoint:** `https://agentgateway.example.com/mcp`
 - **Transport:** streamable HTTP (HTTP POST to the endpoint; server may reply with
   Server‑Sent Events for streaming responses).
 - **Authorization:** OAuth 2.0 authorization‑code + PKCE. The server publishes its
   OAuth metadata (RFC 9728 protected‑resource metadata), so a compliant client can
   discover the Keycloak authorization server on its own. If your client needs
   values entered manually, ask your admin for:
-  - Authorization server / issuer: `https://keycloak.jicomusic.com/realms/sandbox`
+  - Authorization server / issuer: `https://keycloak.example.com/realms/sandbox`
   - Client ID: `aio-sandbox-client` (a public client; no secret)
   - Scopes: `openid sandbox`
 
@@ -137,7 +137,7 @@ check never runs. Re‑add the server with `--client-id`:
 ```sh
 claude mcp remove aio-sandbox
 claude mcp add --transport http --client-id aio-sandbox-client \
-  aio-sandbox https://agentgateway.jicomusic.com/mcp
+  aio-sandbox https://agentgateway.example.com/mcp
 ```
 
 That produces this entry in `~/.claude.json` (you can also hand‑edit it):
@@ -145,7 +145,7 @@ That produces this entry in `~/.claude.json` (you can also hand‑edit it):
 ```json
 "aio-sandbox": {
   "type": "http",
-  "url": "https://agentgateway.jicomusic.com/mcp",
+  "url": "https://agentgateway.example.com/mcp",
   "oauth": { "clientId": "aio-sandbox-client" }
 }
 ```

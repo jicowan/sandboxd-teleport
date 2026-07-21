@@ -17,10 +17,10 @@ minimal worker agent (distroless + one Go binary + pinned runsc) built in
 - **EKS cluster** with a gVisor node group: nodes labeled `sandbox=gvisor` + taint
   `sandbox=gvisor:NoSchedule`, `runsc` (release-20260622.0) on-node, 100Gi root
   disk (AIO's flattened rootfs is ~8.9GB + a 790MB checkpoint).
-- **S3 + Pod Identity**: bucket `aio-checkpoint-spike-820537372947-us-west-2`;
+- **S3 + Pod Identity**: bucket `aio-checkpoint-spike-111122223333-us-west-2`;
   IAM role `aio-checkpoint-spike-role` (trust `pods.eks.amazonaws.com`, scoped to
   the bucket); ServiceAccount `default/ckpt-spike` associated to that role.
-- **ECR repo** `820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd`.
+- **ECR repo** `111122223333.dkr.ecr.us-west-2.amazonaws.com/sandboxd`.
 - Tools locally: `go` (1.25), `docker` (buildx, linux/amd64), `kubectl`, `aws`.
 - `runsc` binary pinned in the image MUST match the node's runsc version
   (gVisor hard-errors on restore mismatch).
@@ -36,10 +36,10 @@ curl -sSL -o runsc \
   https://storage.googleapis.com/gvisor/releases/release/20260622.0/x86_64/runsc
 chmod +x sandboxd runsc
 aws ecr get-login-password --region us-west-2 | \
-  docker login --username AWS --password-stdin 820537372947.dkr.ecr.us-west-2.amazonaws.com
+  docker login --username AWS --password-stdin 111122223333.dkr.ecr.us-west-2.amazonaws.com
 docker build --platform linux/amd64 \
-  -t 820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v24 .
-docker push 820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v24
+  -t 111122223333.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v24 .
+docker push 111122223333.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v24
 rm -f sandboxd runsc   # don't commit the 130MB binaries
 ```
 
@@ -122,7 +122,7 @@ curl -s -X POST http://localhost:18090/checkpoint -H 'Content-Type: application/
 - Save the returned snapshot path:
   ```sh
   SNAP=sandboxes/aio/snap-…        # from the response
-  aws s3 ls s3://aio-checkpoint-spike-820537372947-us-west-2/$SNAP/
+  aws s3 ls s3://aio-checkpoint-spike-111122223333-us-west-2/$SNAP/
   # checkpoint.img  config.json  pages.img  pages_meta.img
   ```
 

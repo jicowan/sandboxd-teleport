@@ -39,7 +39,7 @@ kubectl apply -f broker-sandboxd.yaml
 
 ## Cut traffic over to this broker
 
-The public front door is an ALB Ingress (`broker.jicomusic.com`) → Service
+The public front door is an ALB Ingress (`broker.example.com`) → Service
 `aio-sandbox-broker-svc` → broker pods (by label). Flip the Service selector:
 
 ```sh

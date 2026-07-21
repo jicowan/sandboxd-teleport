@@ -11,7 +11,7 @@ This is the "does it all actually work" runbook. For conceptual background see
 [api-reference-sandboxd-worker.md](api-reference-sandboxd-worker.md).
 
 Reference environment: cluster `EKSClusterStack-cluster`, `us-west-2`, account
-`820537372947`, bucket `aio-checkpoint-spike-820537372947-us-west-2`. Substitute
+`111122223333`, bucket `aio-checkpoint-spike-111122223333-us-west-2`. Substitute
 your own.
 
 ---
@@ -22,13 +22,13 @@ The single most important habit — everything below targets a specific cluster:
 
 ```sh
 kubectl config current-context
-# arn:aws:eks:us-west-2:820537372947:cluster/EKSClusterStack-cluster
+# arn:aws:eks:us-west-2:111122223333:cluster/EKSClusterStack-cluster
 ```
 
 If it's not the sandboxd cluster, switch before doing anything:
 
 ```sh
-kubectl config use-context arn:aws:eks:us-west-2:820537372947:cluster/EKSClusterStack-cluster
+kubectl config use-context arn:aws:eks:us-west-2:111122223333:cluster/EKSClusterStack-cluster
 ```
 
 ## 1. Prerequisites checklist
@@ -66,9 +66,9 @@ curl -fsSL -o runsc \
   https://storage.googleapis.com/gvisor/releases/release/20260622.0/x86_64/runsc
 chmod +x runsc
 aws ecr get-login-password --region us-west-2 | \
-  docker login --username AWS --password-stdin 820537372947.dkr.ecr.us-west-2.amazonaws.com
-docker build --platform=linux/amd64 -t 820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd:test .
-docker push 820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd:test
+  docker login --username AWS --password-stdin 111122223333.dkr.ecr.us-west-2.amazonaws.com
+docker build --platform=linux/amd64 -t 111122223333.dkr.ecr.us-west-2.amazonaws.com/sandboxd:test .
+docker push 111122223333.dkr.ecr.us-west-2.amazonaws.com/sandboxd:test
 rm -f sandboxd runsc   # don't commit the ~130MB binaries
 ```
 

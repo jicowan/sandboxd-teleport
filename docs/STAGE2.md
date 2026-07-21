@@ -183,7 +183,7 @@ identity.
 - **Broker**: served by an **internal** ALB (not internet-facing). AgentCore
   Gateway reaches it privately via the MCPServer `privateEndpoint`
   (VPC/subnets/SG), matching the reference alphavantage target. TLS still
-  terminates at the ALB. `broker.jicomusic.com` resolves to the internal ALB.
+  terminates at the ALB. `broker.example.com` resolves to the internal ALB.
 - **Broker auth**: the broker validates the inbound OBO JWT itself (JWKS) —
   no oauth2-proxy sidecar. Verified: `/healthz` 200, unauthenticated `/mcp`
   returns 401.

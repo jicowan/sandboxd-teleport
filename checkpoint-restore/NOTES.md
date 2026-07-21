@@ -114,7 +114,7 @@ are identical c7a, so the CPU-match precondition already holds.)
 
 ### S3 + Pod Identity foundation: DONE ✅ (2026-07-01)
 
-- **Bucket:** `aio-checkpoint-spike-820537372947-us-west-2` (us-west-2, private
+- **Bucket:** `aio-checkpoint-spike-111122223333-us-west-2` (us-west-2, private
   / public-access-block on, versioning on).
 - **IAM role:** `aio-checkpoint-spike-role` — trust `pods.eks.amazonaws.com`
   (`sts:AssumeRole`+`sts:TagSession`); inline policy `s3-checkpoints`:
@@ -317,7 +317,7 @@ bundle detour is unnecessary for the checkpoint half; focus shifts to restore.
 - `ckpt-shim2` pod (SA `ckpt-spike`, Pod Identity→S3, has
   `karpenter.sh/do-not-disrupt`) still running on `ip-10-0-5-90`; `/host/work/`
   has the working bundle + w2 scripts.
-- S3 bucket `aio-checkpoint-spike-820537372947-us-west-2`; IAM role
+- S3 bucket `aio-checkpoint-spike-111122223333-us-west-2`; IAM role
   `aio-checkpoint-spike-role`; SA `default/ckpt-spike`.
 
 **CORRECTION — earlier "can't checkpoint containerd-managed pods" was WRONG.**

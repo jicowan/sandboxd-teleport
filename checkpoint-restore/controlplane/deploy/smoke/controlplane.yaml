@@ -109,7 +109,7 @@ spec:
       serviceAccountName: sandboxd-operator
       containers:
         - name: operator
-          image: 820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd-operator:v1
+          image: 111122223333.dkr.ecr.us-west-2.amazonaws.com/sandboxd-operator:v1
           args:
             - --leader-elect
             - --health-probe-bind-address=:8081
@@ -119,7 +119,7 @@ spec:
             # Pod Identity for S3, and the default-ns gvisor toleration/nodeselector).
             - --resume-namespace=default
             - --worker-sa=sandboxd-worker
-            - --worker-bucket=aio-checkpoint-spike-820537372947-us-west-2
+            - --worker-bucket=aio-checkpoint-spike-111122223333-us-west-2
             - --worker-region=us-west-2
           ports:
             - { containerPort: 8081, name: health }
@@ -160,7 +160,7 @@ spec:
     spec:
       containers:
         - name: router
-          image: 820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd-router:v1
+          image: 111122223333.dkr.ecr.us-west-2.amazonaws.com/sandboxd-router:v1
           args:
             - --listen=:8080
             - --kv-addr=valkey:6379

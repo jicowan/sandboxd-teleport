@@ -15,7 +15,7 @@ The cluster runs the `mcp-gateway-operator` (`mcpgateway.bedrock.aws/v1alpha1`,
   vault `oauthProviderArn`).
 
 Two live instances exist on this cluster (`alphavantage-stocks`,
-`mcp-jicomusic`), wired to the Keycloak `agentcore` realm's inbound/outbound
+`mcp-example`), wired to the Keycloak `agentcore` realm's inbound/outbound
 clients.
 
 The question was whether to put the AIO sandbox behind the Gateway as part of

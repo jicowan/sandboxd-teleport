@@ -62,7 +62,7 @@ AIO_CONTAINER_PORT = 8080
 ROUTER_URL = os.environ.get("AIO_ROUTER_URL", "http://sandbox-router-svc.default.svc.cluster.local:8080").rstrip("/")
 
 # OAuth2 resource-server validation of the inbound OBO token.
-OIDC_ISSUER = os.environ.get("AIO_OIDC_ISSUER", "https://keycloak.jicomusic.com/realms/sandbox").rstrip("/")
+OIDC_ISSUER = os.environ.get("AIO_OIDC_ISSUER", "https://keycloak.example.com/realms/sandbox").rstrip("/")
 # The audience the token must carry (the router resource).
 EXPECTED_AUDIENCE = os.environ.get("AIO_EXPECTED_AUDIENCE", "sandbox-router")
 # With agentgateway passthrough the token is the user's own token, minted by

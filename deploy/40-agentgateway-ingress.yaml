@@ -1,8 +1,8 @@
 # Public, internet-facing ALB for agentgateway so Claude Code (on a laptop)
 # can reach the MCP endpoint. TLS terminates at the ALB.
 #
-# After apply, point a Route53 alias agentgateway.jicomusic.com -> the ALB.
-# Claude Code reaches: https://agentgateway.jicomusic.com/mcp
+# After apply, point a Route53 alias agentgateway.example.com -> the ALB.
+# Claude Code reaches: https://agentgateway.example.com/mcp
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -14,7 +14,8 @@ metadata:
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
     alb.ingress.kubernetes.io/ssl-redirect: "443"
     alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
-    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-west-2:820537372947:certificate/5a5ac800-cc01-422b-a414-186ae5875188
+    # Replace with your own ACM certificate ARN for the public hostname.
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-west-2:111122223333:certificate/REPLACE_WITH_YOUR_CERT_ID
     # agentgateway serves MCP at /mcp; the broker health path differs, so
     # health-check the agentgateway readiness port (15021) is internal — use
     # the MCP listener port and a path that returns quickly.
@@ -25,7 +26,7 @@ metadata:
 spec:
   ingressClassName: alb
   rules:
-    - host: agentgateway.jicomusic.com
+    - host: agentgateway.example.com
       http:
         paths:
           - path: /

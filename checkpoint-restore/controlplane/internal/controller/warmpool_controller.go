@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -84,8 +85,12 @@ const (
 
 // WorkerImage is the sandboxd worker image the pool provisions. Workers are
 // generic: the sandbox image is supplied per-session at /run time, not here.
-// Configurable so we don't hardcode a registry in code.
-var WorkerImage = "820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v40"
+// There is intentionally NO built-in default (no registry is hardcoded in the
+// binary): the image must be supplied via the operator's --worker-image flag
+// (env SANDBOXD_WORKER_IMAGE) or per-pool via SandboxTemplate.spec.workerImage.
+// A pool whose template omits workerImage while this is empty fails to render a
+// Deployment (see desiredDeployment) rather than pulling a surprise default.
+var WorkerImage = ""
 
 // WorkerTerminationGracePeriodSeconds is the pod termination grace period for
 // worker pods. It must exceed the worst-case checkpoint-on-terminate time
@@ -228,6 +233,17 @@ func (r *WarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 				effReplicas = want
 			}
 		}
+	}
+
+	// A worker image must be resolvable: either the operator's global default
+	// (--worker-image / SANDBOXD_WORKER_IMAGE) or the template's per-pool override.
+	// There is no hardcoded fallback, so refuse to render a Deployment with an
+	// empty image (which would only produce ErrImagePull pods). Requeue so the
+	// pool recovers once an image is configured.
+	if WorkerImage == "" && tmpl.Spec.WorkerImage == "" {
+		log.Error(nil, "no worker image configured; set --worker-image (SANDBOXD_WORKER_IMAGE) or SandboxTemplate.spec.workerImage",
+			"pool", pool.Name, "template", tmpl.Name)
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
 	// Desired worker Deployment for this pool (scheduling comes from the template).

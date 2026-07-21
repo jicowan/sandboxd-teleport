@@ -26,9 +26,9 @@ spec:
         - { key: sandbox, operator: Equal, value: gvisor, effect: NoSchedule }
       containers:
         - name: sandboxd
-          image: 820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v40
+          image: 111122223333.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v40
           env:
-            - { name: SANDBOXD_BUCKET, value: aio-checkpoint-spike-820537372947-us-west-2 }
+            - { name: SANDBOXD_BUCKET, value: aio-checkpoint-spike-111122223333-us-west-2 }
             - { name: AWS_REGION, value: us-west-2 }
             # runsc --debug per-syscall trace: floods stdout + adds overhead. Off by
             # default; flip to "1" only when diagnosing a nested-gVisor issue.

@@ -22,7 +22,7 @@ spec:
       command: ["sleep", "infinity"]
       env:
         - name: BUCKET
-          value: aio-checkpoint-spike-820537372947-us-west-2
+          value: aio-checkpoint-spike-111122223333-us-west-2
       securityContext:
         privileged: true
       volumeMounts:

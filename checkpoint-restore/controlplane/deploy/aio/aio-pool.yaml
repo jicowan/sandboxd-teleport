@@ -15,7 +15,7 @@ spec:
   # Per-pool worker-image override (canary). The worker image carries the pinned
   # runsc that checkpoint/restore depends on; keep it aligned across pools you
   # teleport between. Omit to use the operator's global --worker-image default.
-  workerImage: 820537372947.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v42
+  workerImage: 111122223333.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v42
   resources:
     requests: { cpu: "500m", memory: "1Gi" }
   scheduling:

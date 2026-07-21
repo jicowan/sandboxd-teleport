@@ -95,11 +95,11 @@ the reference for each layer. For *how it all fits*, read
 
 The live examples throughout these docs use the reference environment:
 
-- EKS cluster `EKSClusterStack-cluster`, region `us-west-2`, account `820537372947`.
+- EKS cluster `EKSClusterStack-cluster`, region `us-west-2`, account `111122223333`.
 - gVisor nodes labeled `sandbox=gvisor` with taint `sandbox=gvisor:NoSchedule`.
 - Control plane in namespace `sandboxd-controlplane-system`; pools/sessions/workers
   in namespace `default`.
-- S3 bucket `aio-checkpoint-spike-820537372947-us-west-2`.
-- Public front door `agentgateway.jicomusic.com`; identity provider `keycloak.jicomusic.com`.
+- S3 bucket `aio-checkpoint-spike-111122223333-us-west-2`.
+- Public front door `agentgateway.example.com`; identity provider `keycloak.example.com`.
 
 Substitute your own account, cluster, DNS, and bucket where you deploy.

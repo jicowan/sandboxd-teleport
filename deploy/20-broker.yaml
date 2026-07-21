@@ -22,7 +22,7 @@ data:
   # In-cluster router (ClusterIP-only, no sidecar).
   AIO_ROUTER_URL: "http://sandbox-router-svc.default.svc.cluster.local.:8080"
   # OAuth2 resource-server validation of the passed-through user JWT.
-  AIO_OIDC_ISSUER: "https://keycloak.jicomusic.com/realms/sandbox"
+  AIO_OIDC_ISSUER: "https://keycloak.example.com/realms/sandbox"
   AIO_EXPECTED_AUDIENCE: "sandbox-router"
   # agentgateway passthrough: the token is the user's own, minted by the
   # public login client. Per-user identity + group gate enforced here.
@@ -59,7 +59,8 @@ spec:
           - { name: ndots, value: "3" }
       containers:
         - name: broker
-          image: jicowan/aio-sandbox-broker:0.4.1
+          # Replace with your own registry/namespace (see README "Build & push the broker image").
+          image: your-registry/aio-sandbox-broker:0.4.1
           envFrom:
             - configMapRef:
                 name: aio-sandbox-broker-config

@@ -34,7 +34,7 @@ spec:
             - --resume-addr=:8082
             - --resume-namespace=default
             - --worker-sa=sandboxd-worker
-            - --worker-bucket=aio-checkpoint-spike-820537372947-us-west-2
+            - --worker-bucket=aio-checkpoint-spike-111122223333-us-west-2
             - --worker-region=us-west-2
             - --cred-token-secret=sandboxd-cred-token
             - --mtls
