@@ -51,6 +51,22 @@ from jwt import PyJWKClient
 # Session CR on first contact (no k8s client in the broker).
 POOL = os.environ.get("SANDBOXD_POOL", "aio-pool")
 
+# The AppTemplate to run on a GENERIC pool (sent as X-Session-App). Empty ⇒ the pool
+# is DEDICATED and supplies its own image (classic behavior). Set this when SANDBOXD_POOL
+# is a generic pool. See docs/PRD-arbitrary-image-sessions.md §13.
+APP = os.environ.get("SANDBOXD_APP", "")
+
+
+def _session_headers(sid: str) -> dict:
+    """Routing headers the broker sends to the sandboxd router: session id, the
+    pool (capacity), and — on a generic pool — the AppTemplate (workload). The
+    control plane uses pool+app only to lazily create the Session CR on first
+    contact; both are ignored once the session exists."""
+    h = {"X-Session-ID": sid, "X-Session-Pool": POOL}
+    if APP:
+        h["X-Session-App"] = APP
+    return h
+
 # The sandboxd router Service. Broker forwards MCP here with X-Session-ID.
 ROUTER_URL = os.environ.get(
     "SANDBOXD_ROUTER_URL",
@@ -229,7 +245,7 @@ async def _warm(sid: str) -> None:
         async with httpx.AsyncClient(timeout=httpx.Timeout(300.0)) as client:
             await client.post(
                 f"{ROUTER_URL}/_warm",
-                headers={"X-Session-ID": sid, "X-Session-Pool": POOL},
+                headers=_session_headers(sid),
             )
     except Exception:
         pass
@@ -240,11 +256,8 @@ async def _forward(body: bytes, sid: str, content_type: str, accept: str):
     X-Session-ID -> worker (cold start / restore-on-connect via the control
     plane) and streams the response back. X-Session-Pool tells the control plane
     which pool to place a brand-new session in."""
-    headers = {
-        "X-Session-ID": sid,
-        "X-Session-Pool": POOL,
-        "Content-Type": content_type or "application/json",
-    }
+    headers = _session_headers(sid)
+    headers["Content-Type"] = content_type or "application/json"
     if accept:
         headers["Accept"] = accept
     rewrite = _is_initialize(body)

@@ -74,7 +74,7 @@ type fakeResumer struct {
 	err   error
 }
 
-func (r *fakeResumer) Resume(_ context.Context, _, _, _ string) (string, error) {
+func (r *fakeResumer) Resume(_ context.Context, _, _, _, _ string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++
@@ -369,5 +369,27 @@ func TestWarmNoCapacity(t *testing.T) {
 	rt.ServeHTTP(rr, r)
 	if rr.Code != http.StatusServiceUnavailable || rr.Header().Get("Retry-After") == "" {
 		t.Fatalf("want 503+Retry-After, got %d", rr.Code)
+	}
+}
+
+func TestHeaderResolverParsesAppHint(t *testing.T) {
+	h := NewHeaderResolver()
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	r.Header.Set("X-Session-ID", "s1")
+	r.Header.Set("X-Session-Pool", "generic-pool")
+	r.Header.Set("X-Session-App", "aio-app")
+	id, err := h.Resolve(r)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if id.PoolHint != "generic-pool" || id.AppHint != "aio-app" {
+		t.Fatalf("want pool=generic-pool app=aio-app, got pool=%q app=%q", id.PoolHint, id.AppHint)
+	}
+	// Absent app header => empty AppHint (dedicated-pool path unaffected).
+	r2 := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	r2.Header.Set("X-Session-ID", "s2")
+	id2, _ := h.Resolve(r2)
+	if id2.AppHint != "" {
+		t.Fatalf("want empty AppHint when header absent, got %q", id2.AppHint)
 	}
 }

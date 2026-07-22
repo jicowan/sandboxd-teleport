@@ -58,7 +58,7 @@ func clientForStub(srv *httptest.Server) WorkerClientFactory {
 }
 
 func planTemplate(pool, tmpl string) PlanFunc {
-	return func(context.Context, string, string, string) (*SessionPlan, error) {
+	return func(context.Context, string, string, string, string) (*SessionPlan, error) {
 		return &SessionPlan{Pool: pool, TemplateName: tmpl}, nil
 	}
 }
@@ -80,7 +80,7 @@ func TestResumeColdStart(t *testing.T) {
 	wf := New(kv, lookupImage("python:3.12"), clientForStub(srv), planTemplate("p", "tmpl"),
 		Options{ResumeDeadline: 3 * time.Second, PollInterval: 5 * time.Millisecond})
 
-	ip, err := wf.Resume(ctx, "s1", "alice", "")
+	ip, err := wf.Resume(ctx, "s1", "alice", "", "")
 	if err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestResumeNoCapacity(t *testing.T) {
 	kv := testKV(t)
 	srv := stubWorker(t, 1)
 	wf := New(kv, lookupImage("x"), clientForStub(srv), planTemplate("p", "tmpl"), Options{})
-	_, err := wf.Resume(ctx, "s1", "alice", "")
+	_, err := wf.Resume(ctx, "s1", "alice", "", "")
 	if err != assign.ErrNoCapacity {
 		t.Fatalf("want ErrNoCapacity, got %v", err)
 	}
@@ -123,7 +123,7 @@ func TestResumeReleasesWorkerOnRunFailure(t *testing.T) {
 
 	wf := New(kv, lookupImage("x"), clientForStub(srv), planTemplate("p", "tmpl"),
 		Options{ResumeDeadline: time.Second, PollInterval: 5 * time.Millisecond})
-	if _, err := wf.Resume(ctx, "s1", "alice", ""); err == nil {
+	if _, err := wf.Resume(ctx, "s1", "alice", "", ""); err == nil {
 		t.Fatal("expected error")
 	}
 	// worker released back to idle
@@ -172,13 +172,13 @@ func TestResumeFromSnapshot(t *testing.T) {
 	var gotRestore bool
 	srv := stubWorkerRestore(t, &gotRestore)
 	// planFor should NOT be consulted on the restore path; make it fail if called.
-	plan := func(context.Context, string, string, string) (*SessionPlan, error) {
+	plan := func(context.Context, string, string, string, string) (*SessionPlan, error) {
 		return nil, fmt.Errorf("planFor must not be called on restore")
 	}
 	wf := New(kv, lookupImage("SHOULD-NOT-BE-USED"), clientForStub(srv), plan,
 		Options{ResumeDeadline: 3 * time.Second, PollInterval: 5 * time.Millisecond})
 
-	ip, err := wf.Resume(ctx, "s1", "alice", "")
+	ip, err := wf.Resume(ctx, "s1", "alice", "", "")
 	if err != nil {
 		t.Fatalf("Resume(restore): %v", err)
 	}
@@ -201,7 +201,7 @@ func TestResumeIdempotentWhenRunning(t *testing.T) {
 	kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{SID: "s1", State: resumeapi.StateRunning, WorkerPod: "w1", WorkerPodIP: "10.9.9.9"})
 	kv.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w1", Pool: "p", PodIP: "10.9.9.9", State: resumeapi.WorkerBusy, SID: "s1"})
 	wf := New(kv, lookupImage("x"), clientForStub(stubWorker(t, 1)), planTemplate("p", "tmpl"), Options{})
-	ip, err := wf.Resume(ctx, "s1", "alice", "")
+	ip, err := wf.Resume(ctx, "s1", "alice", "", "")
 	if err != nil || ip != "10.9.9.9" {
 		t.Fatalf("idempotent resume failed: ip=%q err=%v", ip, err)
 	}
@@ -227,11 +227,11 @@ func TestFencingStaleRunningRestores(t *testing.T) {
 	var gotRestore bool
 	srv := stubWorkerRestore(t, &gotRestore)
 	wf := New(kv, lookupImage("unused"), clientForStub(srv),
-		func(context.Context, string, string, string) (*SessionPlan, error) {
+		func(context.Context, string, string, string, string) (*SessionPlan, error) {
 			return nil, fmt.Errorf("planFor must not be called; should restore")
 		}, Options{ResumeDeadline: 3 * time.Second, PollInterval: 5 * time.Millisecond})
 
-	ip, err := wf.Resume(ctx, "s1", "alice", "")
+	ip, err := wf.Resume(ctx, "s1", "alice", "", "")
 	if err != nil {
 		t.Fatalf("fenced resume: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestBackpressureCapReturnsNoCapacity(t *testing.T) {
 	// Holder: long deadline so it keeps the single slot for the whole test.
 	holder := New(kv, lookupImage("img"), clientForStub(srv), planTemplate("p", "tmpl"),
 		Options{ResumeDeadline: 10 * time.Second, PollInterval: 5 * time.Millisecond, MaxConcurrentResumes: 1})
-	go holder.Resume(ctx, "s1", "alice", "")
+	go holder.Resume(ctx, "s1", "alice", "", "")
 	<-inWait // holder is now blocked in WaitReady, slot held
 
 	// Contender shares the SAME workflow (same semaphore). Give it a short caller
@@ -274,7 +274,7 @@ func TestBackpressureCapReturnsNoCapacity(t *testing.T) {
 	// deadline from the passed ctx).
 	cctx, ccancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer ccancel()
-	_, err := holder.Resume(cctx, "s2", "bob", "")
+	_, err := holder.Resume(cctx, "s2", "bob", "", "")
 	if err != assign.ErrNoCapacity {
 		t.Fatalf("want ErrNoCapacity from backpressure, got %v", err)
 	}

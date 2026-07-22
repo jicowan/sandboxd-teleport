@@ -58,7 +58,7 @@ func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, h
 		return appSpecFromCRD(&a), nil
 	}
 
-	planFor := func(ctx context.Context, sid, subject, poolHint string) (*resume.SessionPlan, error) {
+	planFor := func(ctx context.Context, sid, subject, poolHint, appHint string) (*resume.SessionPlan, error) {
 		// Resolve the plan from the Session CR. If none exists yet, lazily create
 		// one from the broker's pool hint (option b: the broker passes only a
 		// session id + X-Sandbox-Pool header and stays free of our CRDs). Creating
@@ -84,6 +84,11 @@ func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, h
 					PoolRef: &corev1alpha1.LocalRef{Name: poolHint},
 					Subject: subject,
 				},
+			}
+			// App hint (X-Session-App): run this AppTemplate's workload on the pool
+			// (generic-pool front-door contract). Empty ⇒ classic dedicated-pool image.
+			if appHint != "" {
+				s.Spec.AppRef = &corev1alpha1.LocalRef{Name: appHint}
 			}
 			if cerr := c.Create(ctx, &s); cerr != nil && !apierrors.IsAlreadyExists(cerr) {
 				return nil, fmt.Errorf("create session %q from pool hint %q: %w", sid, poolHint, cerr)

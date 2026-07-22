@@ -24,11 +24,13 @@ import (
 
 // Identity is the resolved caller: a stable session id and the subject it came
 // from (for authz / logging). Derived from the request per O4. PoolHint carries
-// the broker's requested pool (X-Session-Pool) for lazy Session creation.
+// the broker's requested pool (X-Session-Pool) and AppHint the requested
+// AppTemplate (X-Session-App), both for lazy Session creation (capacity + workload).
 type Identity struct {
 	SID      string
 	Subject  string
 	PoolHint string
+	AppHint  string
 }
 
 // ErrUnauthenticated is returned when a request carries no usable identity.
@@ -50,11 +52,12 @@ type HeaderResolver struct {
 	SessionHeader string // default "X-Session-ID"
 	SubjectHeader string // default "X-Session-Subject"
 	PoolHeader    string // default "X-Session-Pool"
+	AppHeader     string // default "X-Session-App"
 }
 
 // NewHeaderResolver returns a HeaderResolver with default header names.
 func NewHeaderResolver() *HeaderResolver {
-	return &HeaderResolver{SessionHeader: "X-Session-ID", SubjectHeader: "X-Session-Subject", PoolHeader: "X-Session-Pool"}
+	return &HeaderResolver{SessionHeader: "X-Session-ID", SubjectHeader: "X-Session-Subject", PoolHeader: "X-Session-Pool", AppHeader: "X-Session-App"}
 }
 
 func (h *HeaderResolver) Resolve(r *http.Request) (Identity, error) {
@@ -67,5 +70,6 @@ func (h *HeaderResolver) Resolve(r *http.Request) (Identity, error) {
 		subj = sid
 	}
 	pool := strings.TrimSpace(r.Header.Get(h.PoolHeader))
-	return Identity{SID: sid, Subject: subj, PoolHint: pool}, nil
+	app := strings.TrimSpace(r.Header.Get(h.AppHeader))
+	return Identity{SID: sid, Subject: subj, PoolHint: pool, AppHint: app}, nil
 }

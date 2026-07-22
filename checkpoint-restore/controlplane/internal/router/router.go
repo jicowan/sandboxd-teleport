@@ -53,10 +53,10 @@ type KVReader interface {
 const maxBufferBody = 1 << 20 // 1 MiB
 
 // Resumer triggers a resume on a KV miss (implemented by ResumeClient). poolHint
-// (from the broker's X-Sandbox-Pool header) lets the operator lazily create a
-// Session CR when none exists yet.
+// (X-Session-Pool) and appHint (X-Session-App) let the operator lazily create a
+// Session CR when none exists yet — capacity and workload respectively.
 type Resumer interface {
-	Resume(ctx context.Context, sid, subject, poolHint string) (string, error)
+	Resume(ctx context.Context, sid, subject, poolHint, appHint string) (string, error)
 }
 
 // Options configure the Router.
@@ -212,7 +212,7 @@ func (rt *Router) ensureRunning(reqCtx context.Context, id Identity) (string, in
 	ctx, cancel := context.WithTimeout(reqCtx, rt.opts.ResumeDeadline)
 	defer cancel()
 	v, err, _ := rt.single.Do(id.SID, func() (any, error) {
-		return rt.resumer.Resume(ctx, id.SID, id.Subject, id.PoolHint)
+		return rt.resumer.Resume(ctx, id.SID, id.Subject, id.PoolHint, id.AppHint)
 	})
 	if err != nil {
 		return "", 0, err

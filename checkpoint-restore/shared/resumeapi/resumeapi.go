@@ -63,10 +63,16 @@ type WorkerEntry struct {
 type ResumeRequest struct {
 	SID     string `json:"sid"`
 	Subject string `json:"subject,omitempty"`
-	// Pool is an optional hint (from the broker's X-Sandbox-Pool header): when the
+	// Pool is an optional hint (from the broker's X-Session-Pool header): when the
 	// session has no Session CR yet, the operator lazily creates one referencing
 	// this pool. Ignored once the session exists.
 	Pool string `json:"pool,omitempty"`
+	// App is an optional hint (from the broker's X-Session-App header): the
+	// AppTemplate to run on a GENERIC pool. When set on lazy Session creation, the
+	// operator sets Spec.AppRef so the workload comes from that AppTemplate (the pool
+	// supplies only capacity). Empty ⇒ classic behavior (a dedicated pool's own image).
+	// Ignored once the session exists. See docs/PRD-arbitrary-image-sessions.md §13.
+	App string `json:"app,omitempty"`
 }
 
 // ResumeResponse is a successful POST /resume body.

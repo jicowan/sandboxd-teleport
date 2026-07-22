@@ -388,7 +388,9 @@ func main() {
 		Scheme: mgr.GetScheme(),
 		KV:     kv,
 		Materialize: func(ctx context.Context, sid, subject, pool string) error {
-			_, err := resumeWF.Resume(ctx, sid, subject, pool)
+			// The fork child Session CR already exists (with poolRef/appRef set), so
+			// the resume reads it — the lazy-create hints are unused here (empty app).
+			_, err := resumeWF.Resume(ctx, sid, subject, pool, "")
 			return err
 		},
 	}).SetupWithManager(mgr); err != nil {

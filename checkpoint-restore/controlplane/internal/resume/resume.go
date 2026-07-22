@@ -91,10 +91,12 @@ type Options struct {
 	MaxConcurrentResumes int
 }
 
-// PlanFunc resolves a session id (+subject, +optional pool hint) to what should
-// run. The pool hint comes from the broker (X-Sandbox-Pool) and lets the operator
-// lazily create a Session CR on first contact when none exists yet.
-type PlanFunc func(ctx context.Context, sid, subject, poolHint string) (*SessionPlan, error)
+// PlanFunc resolves a session id (+subject, +optional pool/app hints) to what
+// should run. The hints come from the broker (X-Session-Pool / X-Session-App) and
+// let the operator lazily create a Session CR on first contact when none exists yet:
+// poolHint → Spec.PoolRef (capacity), appHint → Spec.AppRef (workload on a generic
+// pool). Both ignored once the Session exists.
+type PlanFunc func(ctx context.Context, sid, subject, poolHint, appHint string) (*SessionPlan, error)
 
 // SessionMirror durably mirrors a session's authoritative state to Kubernetes
 // (Session.status in etcd) after each KV write, so the Valkey cache can be rebuilt
@@ -193,9 +195,9 @@ func (wf *Workflow) WithMirror(m SessionMirror) *Workflow {
 // capacity it returns assign.ErrNoCapacity (the handler maps that to 503).
 // This is a thin instrumented wrapper around resume() (metrics: kind, outcome,
 // duration).
-func (wf *Workflow) Resume(ctx context.Context, sid, subject, poolHint string) (string, error) {
+func (wf *Workflow) Resume(ctx context.Context, sid, subject, poolHint, appHint string) (string, error) {
 	start := time.Now()
-	ip, kind, fast, err := wf.resume(ctx, sid, subject, poolHint)
+	ip, kind, fast, err := wf.resume(ctx, sid, subject, poolHint, appHint)
 	if fast {
 		return ip, err // continuation fast path: not a resume, don't record
 	}
@@ -231,7 +233,7 @@ func (wf *Workflow) workerHolds(ctx context.Context, pod, sid string) bool {
 
 // resume returns (ip, kind, fastPath, err). kind is cold_start|restore; fastPath
 // is true when the session was already Running (no resume performed).
-func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint string) (string, string, bool, error) {
+func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint, appHint string) (string, string, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, wf.opts.ResumeDeadline)
 	defer cancel()
 
@@ -281,7 +283,7 @@ func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint string) (
 	}
 
 	// COLD START branch (P1): ABSENT / no checkpoint -> /run from the plan.
-	plan, err := wf.planFor(ctx, sid, subject, poolHint)
+	plan, err := wf.planFor(ctx, sid, subject, poolHint, appHint)
 	if err != nil {
 		return "", metrics.KindColdStart, false, fmt.Errorf("resolve session plan: %w", err)
 	}
