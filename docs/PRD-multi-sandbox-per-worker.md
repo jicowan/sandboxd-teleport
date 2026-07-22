@@ -149,8 +149,35 @@ them in the OCI spec's `Linux.Resources`.
 5. **Is it worth it vs. just smaller workers?** Quantify: what density/cost win over
    "run more, smaller worker pods and keep 1:1"? (The 1:1 model with right-sized workers
    may capture much of the benefit with none of 3.1–3.4's risk — this must be justified.)
-6. **Relationship to Substrate** — this is essentially Substrate's multiplexing bet on
-   EKS; worth revisiting what they learned.
+6. **Relationship to Substrate** — see §6a: this is NOT Substrate's bet; it's a
+   *different, additional* lever.
+
+## 6a. Substrate does NOT do this (spatial packing is novel)
+
+Verified against Substrate's own `docs/architecture.md` (2026-07-22): a Substrate worker
+is strictly **IDLE or BUSY** and tracks *"the Actor it is currently hosting (if any)"*
+(singular); the model is `Actor 0..1 → 0..1 Worker`. Its 30x+ oversubscription is
+**TEMPORAL** ("actors being multiplexed onto and off of workers all the time") — most
+actors are suspended to storage and a small worker pool rotates through the active ones;
+at any instant one running actor has a worker to itself. **Substrate does NOT run
+multiple sandboxes on a worker simultaneously.**
+
+Two consequences for this PRD:
+
+- **sandboxd already matches Substrate's density model.** Teleport (checkpoint→S3→resume
+  on any warm worker) IS temporal multiplexing — many sessions, few workers, idle ones
+  parked in S3. So Phases 1–3 are **not** needed to "catch up to Substrate"; that box is
+  already checked.
+- **Spatial packing (N *running* sandboxes co-resident on one worker) is novel** —
+  neither Substrate nor sandboxd does it. It only pays off for workloads with many
+  **concurrently ACTIVE, small** sandboxes — precisely the case temporal multiplexing
+  *cannot* help (if they're all active, none can be suspended to free a worker). For
+  bursty/mostly-idle agent sessions (Substrate's target, and likely ours), temporal
+  multiplexing already captures the win and Phases 1–3 aren't justified.
+
+**Sharpened Q5:** does our workload have many *concurrently active* small sandboxes? If
+yes → spatial packing adds value temporal can't. If sessions are bursty/mostly-idle →
+existing teleport suffices; do Phase 0 only.
 
 ## 7. Recommendation
 
