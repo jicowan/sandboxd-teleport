@@ -20,6 +20,7 @@ import (
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/image-spec/identity"
@@ -66,10 +67,22 @@ func prepareRootfsContainerd(ref, destRootfs, snapKey string) (*imageConfig, err
 	}
 	defer cl.Close()
 
-	img, err := cl.Pull(ctx, ref,
+	// Authenticate the pull for private registries. containerd's default resolver
+	// is anonymous (fine for public ghcr/docker-hub images, and for cache hits on
+	// images the kubelet already pulled), but a cache MISS on a private ECR image
+	// 401s. Pass a resolver whose Hosts authenticate ECR endpoints with a token
+	// fetched via the worker's AWS identity (Pod Identity); non-ECR hosts stay
+	// anonymous. See ecrauth.go.
+	pullOpts := []containerd.RemoteOpt{
 		containerd.WithPullUnpack,
 		containerd.WithPullSnapshotter(snapshotter),
-	)
+	}
+	if isECRHost(registryHost(ref)) {
+		pullOpts = append(pullOpts, containerd.WithResolver(
+			docker.NewResolver(docker.ResolverOptions{Hosts: ecrRegistryHosts(ctx)}),
+		))
+	}
+	img, err := cl.Pull(ctx, ref, pullOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("containerd pull %q: %w", ref, err)
 	}
