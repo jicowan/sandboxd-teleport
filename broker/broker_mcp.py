@@ -62,6 +62,9 @@ AIO_CONTAINER_PORT = 8080
 ROUTER_URL = os.environ.get("AIO_ROUTER_URL", "http://sandbox-router-svc.default.svc.cluster.local:8080").rstrip("/")
 
 # OAuth2 resource-server validation of the inbound OBO token.
+# NOTE: this default is a non-functional PLACEHOLDER (keycloak.example.com). It MUST be
+# overridden via AIO_OIDC_ISSUER to your real Keycloak realm issuer (the deploy ConfigMap
+# does this), or every token is rejected. Do not rely on the default.
 OIDC_ISSUER = os.environ.get("AIO_OIDC_ISSUER", "https://keycloak.example.com/realms/sandbox").rstrip("/")
 # The audience the token must carry (the router resource).
 EXPECTED_AUDIENCE = os.environ.get("AIO_EXPECTED_AUDIENCE", "sandbox-router")

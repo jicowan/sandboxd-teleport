@@ -74,6 +74,11 @@ ROUTER_URL = os.environ.get(
 ).rstrip("/")
 
 # OAuth2 resource-server validation of the inbound OBO token (same as broker_mcp).
+# NOTE: AIO_OIDC_ISSUER's default is a non-functional PLACEHOLDER (keycloak.example.com,
+# from the public-repo scrub). It MUST be overridden via env to your real Keycloak realm
+# issuer, or EVERY token is rejected (issuer mismatch + JWKS unreachable). The deploy
+# manifest (controlplane/deploy/aio/broker-sandboxd.yaml) sets it explicitly — do not
+# rely on this default.
 OIDC_ISSUER = os.environ.get("AIO_OIDC_ISSUER", "https://keycloak.example.com/realms/sandbox").rstrip("/")
 EXPECTED_AUDIENCE = os.environ.get("AIO_EXPECTED_AUDIENCE", "sandbox-router")
 GATEWAY_AZP = os.environ.get("AIO_GATEWAY_AZP", "aio-sandbox-client")

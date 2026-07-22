@@ -16,8 +16,23 @@ spec:
         - name: broker
           image: 111122223333.dkr.ecr.us-west-2.amazonaws.com/aio-sandbox-broker-sandboxd:v1
           env:
+            # --- Pool / workload ---
+            # A DEDICATED pool (its SandboxTemplate pins an image): set SANDBOXD_POOL only.
+            # A GENERIC pool (image-less template): set SANDBOXD_POOL to the generic pool
+            # AND SANDBOXD_APP to the AppTemplate to run on it (sent as X-Session-App).
+            # See docs/PRD-arbitrary-image-sessions.md §13.
             - { name: SANDBOXD_POOL, value: aio-pool }
+            # - { name: SANDBOXD_APP, value: aio-app }   # uncomment for a generic pool
             - { name: SANDBOXD_ROUTER_URL, value: "http://sandboxd-router.sandboxd-controlplane-system.svc.cluster.local:8080" }
+            # --- OIDC (MUST be set explicitly) ---
+            # The broker validates the passed-through Keycloak JWT as a resource server.
+            # These have safe placeholder DEFAULTS in code (keycloak.example.com) that will
+            # REJECT every real token, so they MUST be set here to your environment — do NOT
+            # rely on the code default. Issuer must match agentgateway's issuer exactly.
+            - { name: AIO_OIDC_ISSUER, value: "https://keycloak.example.com/realms/sandbox" }   # REPLACE with your Keycloak realm issuer
+            - { name: AIO_EXPECTED_AUDIENCE, value: "sandbox-router" }
+            - { name: AIO_GATEWAY_AZP, value: "aio-sandbox-client" }
+            - { name: AIO_REQUIRED_GROUP, value: "sandbox-users" }
           ports: [{ containerPort: 8080, name: http }]
           readinessProbe:
             httpGet: { path: /healthz, port: 8080 }
