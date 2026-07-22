@@ -14,7 +14,8 @@ What's the SAME as broker_mcp.py (the front-door half — auth is identical):
   2. Identity + group-gate: read the principal + groups; require REQUIRED_GROUP.
   3. Per-user quota: cap concurrent sessions per principal (broker is the only
      place sessions originate, so the cap can't be bypassed).
-  4. Answer MCP `initialize` locally; transparent SSE/JSON passthrough.
+  4. TRANSPARENT MCP proxy: forward every method (incl. initialize) to the
+     sandbox's own MCP server, relaying its Mcp-Session-Id (supports stateful servers).
 
 What's DIFFERENT (the backend half — no claim):
   - No SandboxClaim / no k8s client. sandboxd state is portable, so ANY worker in
@@ -131,7 +132,6 @@ REQUIRED_GROUP = os.environ.get("AIO_REQUIRED_GROUP", "sandbox-users")
 MAX_SESSIONS_PER_USER = int(os.environ.get("SANDBOXD_MAX_SESSIONS_PER_USER", "1"))
 
 JWKS_URL = f"{OIDC_ISSUER}/protocol/openid-connect/certs"
-SESSION_HEADER = "mcp-session-id"
 ADVERTISED_PROTOCOL_VERSION = os.environ.get("AIO_MCP_PROTOCOL_VERSION", "2025-11-25")
 
 app = FastAPI(title="aio-sandbox-broker-sandboxd", version="0.1.0")
@@ -251,18 +251,6 @@ def _is_initialize(body: bytes) -> bool:
     return _mcp_method(body) == "initialize"
 
 
-def _synthetic_initialize(req_id) -> dict:
-    return {
-        "jsonrpc": "2.0",
-        "id": req_id,
-        "result": {
-            "protocolVersion": ADVERTISED_PROTOCOL_VERSION,
-            "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "aio-sandbox-broker-sandboxd", "version": "0.1.0"},
-        },
-    }
-
-
 def _rewrite_init_version(payload: bytes) -> bytes:
     text = payload.decode("utf-8", errors="replace")
 
@@ -307,20 +295,38 @@ async def _warm(sid: str, pool: str, app_template: str) -> None:
         pass
 
 
-async def _forward(body: bytes, sid: str, pool: str, app_template: str, content_type: str, accept: str):
-    """Forward the MCP request to the sandboxd router. The router resolves
-    X-Session-ID -> worker (cold start / restore-on-connect via the control
-    plane) and streams the response back. X-Session-Pool tells the control plane
-    which pool to place a brand-new session in."""
+async def _forward(method: str, body: bytes, sid: str, pool: str, app_template: str,
+                   content_type: str, accept: str, client_mcp_session: Optional[str] = None):
+    """TRANSPARENTLY proxy an MCP request to the sandboxd router → the sandbox's own
+    MCP server. The router resolves X-Session-ID → worker (cold start / restore via
+    the control plane). This is a full proxy (not a synthesized handshake), so it
+    supports ANY MCP server — including STATEFUL ones (e.g. the everything reference
+    server) that issue and require their own Mcp-Session-Id:
+
+      - the CLIENT's Mcp-Session-Id (if any) is passed THROUGH to the sandbox, so the
+        sandbox's MCP server keeps its protocol session across calls;
+      - the SANDBOX's Mcp-Session-Id response header is relayed BACK to the client
+        unchanged (we do NOT overwrite it — that was the bug that broke stateful
+        servers). X-Session-ID (routing) and Mcp-Session-Id (MCP protocol session)
+        are orthogonal: the former is broker-derived per user+app, the latter is the
+        sandbox MCP server's own.
+
+    method is GET (SSE server→client stream) or POST (requests/notifications)."""
     headers = _session_headers(sid, pool, app_template)
-    headers["Content-Type"] = content_type or "application/json"
+    if content_type:
+        headers["Content-Type"] = content_type
     if accept:
         headers["Accept"] = accept
-    rewrite = _is_initialize(body)
+    if client_mcp_session:
+        headers["Mcp-Session-Id"] = client_mcp_session
+    rewrite = method == "POST" and _is_initialize(body)
     client = httpx.AsyncClient(timeout=httpx.Timeout(300.0))
-    req = client.build_request("POST", f"{ROUTER_URL}/mcp", content=body, headers=headers)
+    req = client.build_request(method, f"{ROUTER_URL}/mcp",
+                               content=body if method == "POST" else None, headers=headers)
     resp = await client.send(req, stream=True)
 
+    # Relay ALL response headers except hop-by-hop — crucially KEEP the sandbox's
+    # Mcp-Session-Id so a stateful server's session round-trips to the client.
     relay_headers = {
         k: v for k, v in resp.headers.items()
         if k.lower() not in ("content-length", "transfer-encoding", "connection")
@@ -363,40 +369,46 @@ async def mcp(
     body = await request.body()
     content_type = request.headers.get("content-type", "application/json")
     accept = request.headers.get("accept", "application/json, text/event-stream")
-    method = _mcp_method(body)
-
-    mcp_sess = mcp_session_id or uuid.uuid4().hex
 
     # Resolve the selected app (multi-app mode) → (app_key, pool, AppTemplate),
     # enforcing the app's required group. Legacy single-app mode returns
     # ("", POOL, APP) and ignores the header. Raises 400/403/404 on a bad/unentitled
-    # app. app_key folds into the session id so a user's apps don't collide.
+    # app. app_key folds into the durable X-Session-ID so a user's apps don't collide.
     app_key, pool, app_template = _resolve_app(sandbox_app, auth.groups)
 
-    # Answer lifecycle locally (no backend round trip) — instant handshake — AND
-    # kick off a background warm of the session so it's Running before the first
-    # tool call (hides AIO's ~45s cold start; avoids the miss-path 503 herd, O8).
-    if method == "initialize":
-        sid = _sid_for(auth.principal, mcp_sess, app_key=app_key)
-        asyncio.create_task(_warm(sid, pool, app_template))
-        resp = Response(content=json.dumps(_synthetic_initialize(_msg_id(body))).encode(),
-                        media_type="application/json")
-        resp.headers[SESSION_HEADER] = mcp_sess
-        return resp
-    if method in ("notifications/initialized", "ping"):
-        resp = Response(status_code=202)
-        resp.headers[SESSION_HEADER] = mcp_sess
-        return resp
+    # X-Session-ID (control-plane routing) is derived per user+app and is STABLE
+    # (slot 0 = one durable session per user+app, teleport-safe across reconnects).
+    # It is INDEPENDENT of the MCP-protocol Mcp-Session-Id, which is owned by the
+    # sandbox's own MCP server and passed through transparently by _forward.
+    sid = _sid_for(auth.principal, mcp_session_id, app_key=app_key)
 
-    # Real work: derive the durable session id and forward. No claim — the
-    # control plane places/teleports the session. (Quota note: with
-    # principal-derived ids, one principal maps to MAX_SESSIONS_PER_USER distinct
-    # session ids; slot 0 is the default durable session. A future enhancement
-    # can map multiple MCP sessions to slots 1..N and enforce the cap here.)
-    sid = _sid_for(auth.principal, mcp_sess, app_key=app_key)
-    resp = await _forward(body, sid, pool, app_template, content_type, accept)
-    resp.headers[SESSION_HEADER] = mcp_sess
-    return resp
+    # TRANSPARENT PROXY: forward EVERY method (incl. initialize + notifications) to
+    # the sandbox's MCP server, so stateful servers keep their protocol session and
+    # any server (not just AIO) works. Forwarding initialize also warms the session
+    # (cold start / restore) — no separate synthetic handshake. The sandbox's
+    # Mcp-Session-Id round-trips via _forward's relayed headers; we do NOT overwrite
+    # it (overwriting it was what broke stateful servers like the everything server).
+    return await _forward(request.method, body, sid, pool, app_template,
+                          content_type, accept, client_mcp_session=mcp_session_id)
+
+
+@app.get("/")
+async def mcp_get(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+    mcp_session_id: Optional[str] = Header(default=None, alias="Mcp-Session-Id"),
+    sandbox_app: Optional[str] = Header(default=None, alias="X-Sandbox-App"),
+):
+    # Streamable-HTTP GET = the server→client SSE stream a stateful MCP server opens
+    # for async notifications. Proxy it through transparently (previously this 405'd
+    # because there was no GET route). No body; the sandbox's server decides whether
+    # it supports the stream (may itself 405, which is fine).
+    auth = await run_in_threadpool(_authenticate, authorization)
+    accept = request.headers.get("accept", "text/event-stream")
+    app_key, pool, app_template = _resolve_app(sandbox_app, auth.groups)
+    sid = _sid_for(auth.principal, mcp_session_id, app_key=app_key)
+    return await _forward("GET", b"", sid, pool, app_template, "", accept,
+                          client_mcp_session=mcp_session_id)
 
 
 @app.delete("/")
