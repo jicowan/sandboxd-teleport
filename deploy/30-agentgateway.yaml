@@ -24,7 +24,48 @@ data:
     - port: 3000
       listeners:
       - protocol: HTTP
+        # MULTI-APP (docs/PRD-broker-multi-app.md): one route PER APP. Each route
+        # matches a distinct path prefix, injects X-Sandbox-App via
+        # requestHeaderModifier (the broker maps that header -> AppTemplate + pool and
+        # enforces the app's group), and points at the SAME broker backend. Claude
+        # registers each app as a separate MCP server (…/everything/mcp, …/mcp). The
+        # more-specific /everything route MUST come before the catch-all "/".
         routes:
+        # --- App: everything (a distinct MCP-server sandbox) ---
+        - name: everything-route
+          matches:
+          - path: { pathPrefix: /everything }
+          policies:
+            mcpAuthentication:
+              mode: strict
+              issuer: https://keycloak.example.com/realms/sandbox
+              audiences: [sandbox-router]
+              jwks:
+                url: https://keycloak.example.com/realms/sandbox/protocol/openid-connect/certs
+              provider:
+                keycloak: {}
+              resourceMetadata:
+                resource: https://agentgateway.example.com/everything/mcp
+                authorization_servers:
+                  - https://keycloak.example.com/realms/sandbox
+                scopesSupported: [openid, sandbox]
+                bearerMethodsSupported: [header]
+            backendAuth:
+              passthrough: {}
+            requestHeaderModifier:
+              set:
+                X-Sandbox-App: everything
+            # everything's tools are not the AIO tool set; gate on group only.
+            mcpAuthorization:
+              rules:
+              - '"sandbox-power" in jwt.groups'
+          backends:
+          - mcp:
+              targets:
+              - name: aio-broker
+                mcp:
+                  host: http://aio-sandbox-broker-svc.default.svc.cluster.local.:8080/
+        # --- App: aio (default, catch-all) ---
         - name: mcp-route
           matches:
           - path: { pathPrefix: / }
@@ -49,6 +90,10 @@ data:
             # Forward the validated user JWT unchanged to the broker.
             backendAuth:
               passthrough: {}
+            # Select the AIO app explicitly (broker also defaults to aio).
+            requestHeaderModifier:
+              set:
+                X-Sandbox-App: aio
             # Tool-level authorization (tiered by Keycloak group claim in the
             # passed-through JWT). Rules are OR'd: a tool call is allowed if ANY
             # rule matches. Unauthorized tools are ALSO filtered out of the

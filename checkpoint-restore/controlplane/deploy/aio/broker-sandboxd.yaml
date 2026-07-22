@@ -17,12 +17,21 @@ spec:
           image: 111122223333.dkr.ecr.us-west-2.amazonaws.com/aio-sandbox-broker-sandboxd:v1
           env:
             # --- Pool / workload ---
-            # A DEDICATED pool (its SandboxTemplate pins an image): set SANDBOXD_POOL only.
-            # A GENERIC pool (image-less template): set SANDBOXD_POOL to the generic pool
-            # AND SANDBOXD_APP to the AppTemplate to run on it (sent as X-Session-App).
-            # See docs/PRD-arbitrary-image-sessions.md §13.
-            - { name: SANDBOXD_POOL, value: aio-pool }
-            # - { name: SANDBOXD_APP, value: aio-app }   # uncomment for a generic pool
+            # SINGLE-app modes:
+            #   DEDICATED pool (its SandboxTemplate pins an image): set SANDBOXD_POOL only.
+            #   GENERIC pool (image-less template): SANDBOXD_POOL=<generic> + SANDBOXD_APP=<AppTemplate>.
+            # MULTI-app mode (docs/PRD-broker-multi-app.md): set SANDBOXD_APPS, a JSON
+            #   registry of app-id -> {appTemplate, pool, group}. The app-id arrives per
+            #   request in X-Sandbox-App (injected by an agentgateway per-app route); the
+            #   broker maps it -> pool + AppTemplate and ENFORCES the app's group. When
+            #   SANDBOXD_APPS is set, SANDBOXD_POOL/SANDBOXD_APP are the legacy fallback
+            #   (ignored). SANDBOXD_DEFAULT_APP fills a missing X-Sandbox-App.
+            - { name: SANDBOXD_POOL, value: aio-generic-pool }
+            - name: SANDBOXD_APPS
+              value: |
+                {"aio":{"appTemplate":"aio-app","pool":"aio-generic-pool","group":"sandbox-users"},
+                 "everything":{"appTemplate":"everything-app","pool":"aio-generic-pool","group":"sandbox-power"}}
+            - { name: SANDBOXD_DEFAULT_APP, value: aio }
             - { name: SANDBOXD_ROUTER_URL, value: "http://sandboxd-router.sandboxd-controlplane-system.svc.cluster.local:8080" }
             # --- OIDC (MUST be set explicitly) ---
             # The broker validates the passed-through Keycloak JWT as a resource server.

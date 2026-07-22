@@ -1,0 +1,50 @@
+# Generic pool + AppTemplates for the multi-app front door
+# (docs/PRD-arbitrary-image-sessions.md §13, docs/PRD-broker-multi-app.md).
+#
+# The SandboxTemplate here carries ONLY worker-shape (scheduling/resources/
+# workerImage) and NO image -> a GENERIC pool. Sessions bring their workload via
+# spec.appRef (an AppTemplate), so many apps share this one pool's capacity. The
+# broker's SANDBOXD_APPS registry maps X-Sandbox-App -> AppTemplate + this pool.
+---
+apiVersion: core.sandboxd.io/v1alpha1
+kind: SandboxTemplate
+metadata: { name: aio-generic, namespace: default }
+spec:
+  # NO image => generic pool (worker-shape only). Only the WORKER image is set
+  # (still required; the workload image comes from the session's AppTemplate).
+  workerImage: 111122223333.dkr.ecr.us-west-2.amazonaws.com/sandboxd:v54
+  streamConsole: true
+  resources:
+    requests: { cpu: "500m", memory: "1Gi" }
+  scheduling:
+    nodeSelector: { sandbox: gvisor }
+    tolerations: [{ key: sandbox, operator: Equal, value: gvisor, effect: NoSchedule }]
+---
+apiVersion: core.sandboxd.io/v1alpha1
+kind: WarmPool
+metadata: { name: aio-generic-pool, namespace: default }
+spec: { templateRef: { name: aio-generic }, replicas: 2, minIdle: 1 }
+---
+# App 1: the AIO all-in-one sandbox (its built-in MCP hub on :8080/mcp).
+apiVersion: core.sandboxd.io/v1alpha1
+kind: AppTemplate
+metadata: { name: aio-app, namespace: default }
+spec:
+  image: ghcr.io/agent-infra/sandbox:latest
+  ports: [{ container: 8080, host: 8080 }]
+  health: { probe: http, probePort: 8080, probePath: /v1/health }
+  idle: { timeoutSeconds: 600, action: suspend }
+  iam: { roleArn: "arn:aws:iam::111122223333:role/sandbox-session-demo" }
+---
+# App 2: the MCP reference "everything" server in Streamable-HTTP mode
+# (serves POST /mcp on :8080). A distinct MCP server from a PRIVATE ECR image —
+# exercises the worker's ECR pull auth (Pod Identity) + the multi-app path.
+# Build: node image running `mcp-server-everything streamableHttp` (PORT=8080).
+apiVersion: core.sandboxd.io/v1alpha1
+kind: AppTemplate
+metadata: { name: everything-app, namespace: default }
+spec:
+  image: 111122223333.dkr.ecr.us-west-2.amazonaws.com/mcp-everything-app:v1
+  ports: [{ container: 8080, host: 8080 }]
+  health: { probe: tcp, probePort: 8080 }
+  idle: { timeoutSeconds: 600, action: suspend }
