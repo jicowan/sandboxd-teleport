@@ -64,9 +64,17 @@ table and does O(1) "pick any idle worker in the matching pool."
 
 ### CRDs
 
-`SandboxTemplate` (image + policy), `WarmPool` (capacity + `minIdle` warm headroom),
-`Session` (a teleporting session), `ForkSet` (fan out N sessions from one source),
-`BaseSnapshot` (a promoted golden checkpoint to fork from).
+`SandboxTemplate` (a pool's worker‑shape — scheduling/resources — plus an *optional*
+pinned image), `AppTemplate` (the scheduling‑free workload half: image + ports/health/
+idle/iam, run on a generic pool), `WarmPool` (capacity + `minIdle` warm headroom),
+`Session` (a teleporting session; `poolRef` = capacity, `appRef` = workload),
+`ForkSet` (fan out N sessions from one source), `BaseSnapshot` (a promoted golden
+checkpoint to fork from).
+
+A pool is **dedicated** (its `SandboxTemplate` pins one image) or **generic** (image
+empty — it runs whatever workload a Session brings via `appRef`), so one pool's
+capacity can host many workloads without a warm pool per image. See
+[PRD‑arbitrary‑image‑sessions §13](../PRD-arbitrary-image-sessions.md).
 
 ### Notable capabilities
 
@@ -190,7 +198,8 @@ platform.)
 | Target platform | **Amazon EKS** (runs today) | GKE / kind; **blocked on managed EKS** (§4) |
 | Snapshot store | **S3** (first‑class) | GCS first‑class; S3 in code |
 | Dynamic state | Valkey cache **+ etcd durability** (rebuilt on restart) | Redis/Valkey (no documented etcd/durability backing) |
-| CRDs | SandboxTemplate, WarmPool, Session, ForkSet, BaseSnapshot | ActorTemplate, WorkerPool (+ Atespaces) |
+| CRDs | SandboxTemplate (pool worker‑shape + optional image), AppTemplate (workload), WarmPool, Session, ForkSet, BaseSnapshot | ActorTemplate, WorkerPool (+ Atespaces) |
+| Pool ↔ workload | **generic** pool (image‑less template) runs any `AppTemplate` a session brings, or **dedicated** pool pins one image; placement is a pool property, workload can't set scheduling | one `ActorTemplate` per actor kind |
 | Routing | Router by `X‑Session‑ID` → assignment table (no per‑sandbox DNS) | `atenet`/Envoy by `Host` = per‑actor DNS name |
 | Streaming/session semantics | **Carries Streamable‑HTTP MCP** (SSE token‑by‑token, `FlushInterval:-1`) | "Session‑aware routing"; SSE/streaming preservation not documented |
 | Lifecycle API | HTTP `/resume`, `/_warm` + declarative CRDs | gRPC `ate-api-server` (`ResumeActor`/`SuspendActor`) |
@@ -233,8 +242,9 @@ it ships the layers Substrate leaves to the user (or hadn't built):
 
 - **Breadth / framework‑agnosticism** — Substrate is a general actor runtime for any
   containerized workload (ADK, LangChain, arbitrary servers), not specialized to MCP
-  sandbox sessions. sandboxd is deliberately narrow (BYOC arbitrary‑image sessions are
-  a proposed, not shipped, extension).
+  sandbox sessions. sandboxd is deliberately narrower. (It is closing part of this gap:
+  **generic pools + `AppTemplate`** let one pool run many admin‑authored workloads;
+  raw caller‑supplied *arbitrary* images remain a proposed, governed extension.)
 - **A pluggable isolation backend** — `ateom` abstracts the herder over **gVisor and
   microVMs** (`ateom-microvm`). sandboxd is committed to nested gVisor `runsc`.
 - **gRPC lifecycle API + `kubectl-ate` CLI** as a first‑class programmatic surface;

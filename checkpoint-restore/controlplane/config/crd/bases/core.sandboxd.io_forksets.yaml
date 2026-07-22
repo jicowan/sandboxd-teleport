@@ -60,11 +60,26 @@ spec:
                 - Eager
                 - Lazy
                 type: string
+              appRef:
+                description: |-
+                  appRef optionally names an AppTemplate the image-source children cold-start from,
+                  so a ForkSet can fan out onto a GENERIC pool (whose SandboxTemplate pins no
+                  image). Mutually exclusive with baseRef. When both baseRef and appRef are unset,
+                  this is an image-source ForkSet on a DEDICATED pool (children cold-start from the
+                  pool's own SandboxTemplate image). See docs/PRD-arbitrary-image-sessions.md §13.6.
+                properties:
+                  name:
+                    description: name of the referenced object.
+                    type: string
+                required:
+                - name
+                type: object
               baseRef:
                 description: |-
                   baseRef optionally selects the BaseSnapshot to fork from (snapshot source).
-                  When set, children are restored from the base's snapshot. When unset, this is
-                  an image-source ForkSet and children cold-start from pool's template image.
+                  When set, children are restored from the base's snapshot. It carries its own
+                  image, so a snapshot-source ForkSet works on any pool. Mutually exclusive with
+                  appRef.
                 properties:
                   name:
                     description: name of the referenced object.

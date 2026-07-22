@@ -252,4 +252,72 @@ var _ = Describe("ForkSet Controller (image source)", func() {
 			Expect(e.Image).To(Equal("ghcr.io/agent-infra/sandbox:latest"))
 		}
 	})
+
+	It("appRef source: stamps appRef onto image-source children (fan out onto a generic pool)", func() {
+		ctx := context.Background()
+		Expect(k8sClient.Create(ctx, &corev1alpha1.AppTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "fs-app", Namespace: ns},
+			Spec:       corev1alpha1.AppTemplateSpec{Image: "docker.io/library/redis:7-alpine"},
+		})).To(Succeed())
+		fs := &corev1alpha1.ForkSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "batch-app", Namespace: ns},
+			Spec: corev1alpha1.ForkSetSpec{
+				Count: 2, Pool: "generic-pool", NamePrefix: "app",
+				AppRef: &corev1alpha1.LocalRef{Name: "fs-app"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, fs)).To(Succeed())
+		mr, err := miniredis.Run()
+		Expect(err).NotTo(HaveOccurred())
+		defer mr.Close()
+		kv := assign.NewFromRedis(redis.NewClient(&redis.Options{Addr: mr.Addr()}))
+		r := &ForkSetReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), KV: kv}
+		_, err = reconcile(r, "batch-app")
+		Expect(err).NotTo(HaveOccurred())
+
+		for _, n := range []string{"sess-fork-app-0", "sess-fork-app-1"} {
+			var s corev1alpha1.Session
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: n}, &s)).To(Succeed())
+			Expect(s.Spec.AppRef).NotTo(BeNil(), "child must carry the ForkSet's appRef")
+			Expect(s.Spec.AppRef.Name).To(Equal("fs-app"))
+			Expect(s.Spec.PoolRef.Name).To(Equal("generic-pool"), "capacity from the pool")
+			Expect(s.Spec.ForkFrom).NotTo(BeNil())
+			Expect(s.Spec.ForkFrom.BaseRef).To(BeNil(), "appRef source has no base")
+		}
+	})
+
+	It("rejects a ForkSet that sets both baseRef and appRef (SourceConflict)", func() {
+		ctx := context.Background()
+		fs := &corev1alpha1.ForkSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "batch-conflict", Namespace: ns},
+			Spec: corev1alpha1.ForkSetSpec{
+				Count: 1, Pool: "generic-pool",
+				BaseRef: &corev1alpha1.LocalRef{Name: "some-base"},
+				AppRef:  &corev1alpha1.LocalRef{Name: "fs-app"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, fs)).To(Succeed())
+		mr, err := miniredis.Run()
+		Expect(err).NotTo(HaveOccurred())
+		defer mr.Close()
+		kv := assign.NewFromRedis(redis.NewClient(&redis.Options{Addr: mr.Addr()}))
+		r := &ForkSetReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), KV: kv}
+		_, err = reconcile(r, "batch-conflict")
+		Expect(err).NotTo(HaveOccurred()) // conflict is surfaced as a condition, not a hard error
+
+		var got corev1alpha1.ForkSet
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "batch-conflict"}, &got)).To(Succeed())
+		var ready *metav1.Condition
+		for i := range got.Status.Conditions {
+			if got.Status.Conditions[i].Type == "Ready" {
+				ready = &got.Status.Conditions[i]
+			}
+		}
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Reason).To(Equal("SourceConflict"))
+		// No children should have been created.
+		var s corev1alpha1.Session
+		err = k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "sess-fork-batch-conflict-0"}, &s)
+		Expect(apierrors.IsNotFound(err)).To(BeTrue())
+	})
 })

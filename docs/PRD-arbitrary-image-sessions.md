@@ -538,8 +538,15 @@ is dropped (it was new, optional, and never used in production).
     must exist, else the WarmPool reconcile refuses to render the Deployment (logs
     "no worker image configured" and requeues). The reference fleet sets `workerImage`
     per template (no global default), so a generic template must set it too.
-- **Stage 3:** `ForkSetSpec.appRef` — fan an AppTemplate onto a generic pool;
-  per‑fork routing verified.
+- **Stage 3 (done, live‑verified — operator v37):** `ForkSetSpec.appRef` — fan an
+  AppTemplate onto a generic pool. The controller stamps `appRef` onto each
+  image‑source child Session (so the child resolves + admits exactly like a standalone
+  appRef Session), validates `baseRef` XOR `appRef` (surfaced as a `SourceConflict`
+  condition), and fails fast if the AppTemplate is missing (`AppUnresolved`). Verified
+  live: a count‑2 appRef ForkSet fanned `redis` onto two distinct generic‑pool workers
+  (2/2 Ready), each child carried `appRef`+`poolRef`, each was independently routable
+  by its session id, and a both‑refs ForkSet was rejected with `SourceConflict`. Zero
+  operator errors; aio‑pool unaffected.
 
 ### 13.10 Summary of the delta
 

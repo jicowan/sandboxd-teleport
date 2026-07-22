@@ -77,6 +77,30 @@ func (r *ForkSetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// Source selection is baseRef XOR appRef XOR neither (dedicated-pool image).
+	if fs.Spec.BaseRef != nil && fs.Spec.AppRef != nil {
+		r.setReady(ctx, &fs, metav1.ConditionFalse, "SourceConflict",
+			"baseRef and appRef are mutually exclusive")
+		fs.Status.Phase = corev1alpha1.ForkSetProgressing
+		fs.Status.Desired = fs.Spec.Count
+		_ = r.Status().Update(ctx, &fs)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+	// appRef source: the AppTemplate must exist before we fan out (fail fast with a
+	// clear condition rather than N children erroring at resume). The child admission
+	// (resolveWorkloadSource) additionally enforces that the pool is generic.
+	if fs.Spec.AppRef != nil {
+		var app corev1alpha1.AppTemplate
+		if err := r.Get(ctx, types.NamespacedName{Namespace: fs.Namespace, Name: fs.Spec.AppRef.Name}, &app); err != nil {
+			r.setReady(ctx, &fs, metav1.ConditionFalse, "AppUnresolved",
+				fmt.Sprintf("appRef %q: %v", fs.Spec.AppRef.Name, err))
+			fs.Status.Phase = corev1alpha1.ForkSetProgressing
+			fs.Status.Desired = fs.Spec.Count
+			_ = r.Status().Update(ctx, &fs)
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+	}
+
 	// Resolve the source. baseRef set => snapshot source: the BaseSnapshot must be
 	// Ready before we can seed children from it. baseRef unset => image source.
 	var base *corev1alpha1.BaseSnapshot
@@ -212,6 +236,14 @@ func (r *ForkSetReconciler) ensureChild(ctx context.Context, fs *corev1alpha1.Fo
 		if base != nil {
 			labels[LabelForkBase] = base.Name // lets the base reaper derive refCount
 		}
+		// appRef source: stamp it onto the child so the resume path runs that
+		// AppTemplate on the (generic) pool — exactly like a standalone appRef Session.
+		// Only for the image path (base == nil); a snapshot child restores its image
+		// from the base and needs no appRef.
+		var appRef *corev1alpha1.LocalRef
+		if base == nil && fs.Spec.AppRef != nil {
+			appRef = &corev1alpha1.LocalRef{Name: fs.Spec.AppRef.Name}
+		}
 		child := &corev1alpha1.Session{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
@@ -220,6 +252,7 @@ func (r *ForkSetReconciler) ensureChild(ctx context.Context, fs *corev1alpha1.Fo
 			},
 			Spec: corev1alpha1.SessionSpec{
 				PoolRef:   &corev1alpha1.LocalRef{Name: fs.Spec.Pool},
+				AppRef:    appRef,
 				Subject:   fs.Spec.Subject,
 				IAM:       fs.Spec.IAM,
 				Lifecycle: fs.Spec.Lifecycle,

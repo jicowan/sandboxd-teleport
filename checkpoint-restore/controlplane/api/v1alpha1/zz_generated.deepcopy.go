@@ -342,6 +342,11 @@ func (in *ForkSetSpec) DeepCopyInto(out *ForkSetSpec) {
 		*out = new(LocalRef)
 		**out = **in
 	}
+	if in.AppRef != nil {
+		in, out := &in.AppRef, &out.AppRef
+		*out = new(LocalRef)
+		**out = **in
+	}
 	out.Lifecycle = in.Lifecycle
 	if in.IAM != nil {
 		in, out := &in.IAM, &out.IAM

@@ -282,12 +282,23 @@ Fans out **N independent child `Session`s from one common source** in a single
 declarative object (docs/PRD-snapshot-fork.md). A `ForkSet` is to forked Sessions what
 a `WarmPool` is to worker pods: the controller creates and owns N `Session` children
 (ownerRefs) and rolls their readiness up into `.status`. The **source** is selected by
-`baseRef`:
+`baseRef` / `appRef` (mutually exclusive):
 
 - **`baseRef` set → snapshot source.** Children restore (`/restore`) from a `BaseSnapshot`
   — identical RAM+FS state (the "branch from a common reached state" / RL rollout case).
-- **`baseRef` omitted → image source.** Children cold‑start (`/run`) from `pool`'s
-  template image — independent per‑boot init. No `BaseSnapshot` involved.
+  The base carries its own image, so this works on any pool.
+- **`appRef` set → app source.** Children cold‑start (`/run`) an [AppTemplate](#apptemplate-appt)
+  on a **generic** `pool` — the way to fan a workload onto generic capacity. The
+  controller stamps `appRef` onto each child (which then admits like a standalone appRef
+  Session — the pool must be generic).
+- **both omitted → image source.** Children cold‑start (`/run`) from a **dedicated**
+  `pool`'s own `SandboxTemplate` image — independent per‑boot init. No `BaseSnapshot`.
+
+Setting both `baseRef` and `appRef` is rejected (`SourceConflict` condition); a missing
+`appRef` AppTemplate fails fast (`AppUnresolved`). Fan‑out cold‑pull note: a large
+`appRef` ForkSet of a never‑seen image incurs up to N cold pulls — prefer the snapshot
+source for large fan‑outs. See
+[PRD‑arbitrary‑image‑sessions §13.6](../PRD-arbitrary-image-sessions.md).
 
 Has a `status` subresource. Printer columns: `Desired`, `Ready`, `Phase`.
 
@@ -295,10 +306,11 @@ Has a `status` subresource. Printer columns: `Desired`, `Ready`, `Phase`.
 
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
-| `baseRef` | LocalRef | No | The `BaseSnapshot` to fork from (snapshot source). Omit for image‑source fan‑out. |
+| `baseRef` | LocalRef | No | The `BaseSnapshot` to fork from (snapshot source). Mutually exclusive with `appRef`. |
+| `appRef` | LocalRef | No | An `AppTemplate` the children cold‑start (app source) — fan a workload onto a **generic** pool. Mutually exclusive with `baseRef`. Both omitted ⇒ image source from a dedicated pool's own template. |
 | `count` | int32 | **Yes** | Number of fork children (N) to create. **Range 1–256.** The maximum is a **hard, apiserver-enforced cap** baked into the CRD schema — see the box below. |
 | `namePrefix` | string | No | Deterministic child naming (`sess-fork-<prefix>-<n>`) so a harness can address a specific fork. Defaults to the ForkSet name. |
-| `pool` | string | **Yes** | Pool that places the forks; for the image source it also supplies the template image. Must be `runsc`‑compatible with the base (snapshot source). |
+| `pool` | string | **Yes** | Pool that places the forks (capacity). For the image source it also supplies the template image (dedicated pool); for the app source it must be a **generic** pool. Must be `runsc`‑compatible with the base (snapshot source). |
 | `activation` | string | No | `Eager` (materialize all N now) or `Lazy` (born Suspended/Absent, materialize on first contact). Default `Lazy`. |
 | `lifecycle` | SessionLifecycle | No | Per‑fork idle policy applied to every child — notably `idleAction: reset` for ephemeral rollouts (leaves no snapshot) vs `suspend` for durable branches. |
 | `subject` | string | No | Owner identity for attribution / fan‑out quota. |

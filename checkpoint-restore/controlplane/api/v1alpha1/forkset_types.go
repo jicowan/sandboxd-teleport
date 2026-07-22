@@ -22,10 +22,14 @@ import (
 )
 
 // ForkSetSpec fans out N independent Session children from ONE common source
-// (docs/PRD-snapshot-fork.md). The source is selected by baseRef:
-//   - baseRef SET   -> fork-from-snapshot: children restore from the BaseSnapshot.
-//   - baseRef UNSET -> fork-from-image:    children cold-start from pool's template
-//     image (no BaseSnapshot, no pinning).
+// (docs/PRD-snapshot-fork.md). The source is selected by baseRef / appRef:
+//   - baseRef SET          -> fork-from-snapshot: children restore from the
+//     BaseSnapshot (carries its own image; works on any pool).
+//   - appRef SET           -> fork-from-app: children cold-start an AppTemplate on a
+//     GENERIC pool (docs/PRD-arbitrary-image-sessions.md §13.6).
+//   - both UNSET           -> fork-from-image: children cold-start from a DEDICATED
+//     pool's own SandboxTemplate image (the original behavior).
+// baseRef and appRef are mutually exclusive.
 //
 // A ForkSet is to forked Sessions what a WarmPool is to worker pods: the
 // controller creates and owns N Session children (ownerRefs) and rolls their
@@ -33,10 +37,19 @@ import (
 // enforced.
 type ForkSetSpec struct {
 	// baseRef optionally selects the BaseSnapshot to fork from (snapshot source).
-	// When set, children are restored from the base's snapshot. When unset, this is
-	// an image-source ForkSet and children cold-start from pool's template image.
+	// When set, children are restored from the base's snapshot. It carries its own
+	// image, so a snapshot-source ForkSet works on any pool. Mutually exclusive with
+	// appRef.
 	// +optional
 	BaseRef *LocalRef `json:"baseRef,omitempty"`
+
+	// appRef optionally names an AppTemplate the image-source children cold-start from,
+	// so a ForkSet can fan out onto a GENERIC pool (whose SandboxTemplate pins no
+	// image). Mutually exclusive with baseRef. When both baseRef and appRef are unset,
+	// this is an image-source ForkSet on a DEDICATED pool (children cold-start from the
+	// pool's own SandboxTemplate image). See docs/PRD-arbitrary-image-sessions.md §13.6.
+	// +optional
+	AppRef *LocalRef `json:"appRef,omitempty"`
 
 	// count is the number of fork children (N) to create.
 	//
