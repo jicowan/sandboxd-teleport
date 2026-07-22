@@ -523,10 +523,21 @@ is dropped (it was new, optional, and never used in production).
   `SandboxTemplate.image` optional. *Live test: an `appRef` session (e.g. redis) runs
   on the aio‑pool with the AppTemplate's image/ports/idle; classic aio `poolRef`
   session unchanged; suspend + teleport intact.*
-- **Stage 2b:** stand up a true **generic pool** (image‑less `SandboxTemplate` with
-  its own scheduling) + admission: `appRef` requires a generic pool; `poolRef`‑only on
-  a generic pool is rejected; `appRef` on a dedicated pool is rejected. *Live test:
-  an `appRef` session lands on the generic pool's nodes; curated pools unaffected.*
+- **Stage 2b (done, live‑verified — operator v36):** stand up a true **generic pool**
+  (image‑less `SandboxTemplate` with its own scheduling) + admission enforced at the
+  operator's authoritative `planFor` chokepoint (`resolveWorkloadSource`): `appRef`
+  requires a generic pool; `poolRef`‑only on a generic pool is rejected ("nothing to
+  run"); `appRef`/inline‑image on a dedicated pool is rejected. Verified live: the
+  accept/reject matrix (4 cases) behaved exactly, rejects returned the admission
+  reason (e.g. *"pool X is generic … needs an appRef"*), an `appRef=redis` session ran
+  on a generic‑pool worker, and the curated aio‑pool was unaffected.
+  - **Gotcha (worker‑shape):** a generic pool's `SandboxTemplate` still needs a
+    resolvable **worker image** — either `spec.workerImage` on the template or the
+    operator's global `--worker-image`/`SANDBOXD_WORKER_IMAGE`. Only the *workload*
+    image is optional on a generic template; the *worker* image is worker‑shape and
+    must exist, else the WarmPool reconcile refuses to render the Deployment (logs
+    "no worker image configured" and requeues). The reference fleet sets `workerImage`
+    per template (no global default), so a generic template must set it too.
 - **Stage 3:** `ForkSetSpec.appRef` — fan an AppTemplate onto a generic pool;
   per‑fork routing verified.
 

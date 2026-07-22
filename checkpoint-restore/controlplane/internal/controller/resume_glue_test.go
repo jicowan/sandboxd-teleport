@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/jicowan/aio-sandbox/controlplane/api/v1alpha1"
+	"github.com/jicowan/aio-sandbox/controlplane/internal/resume"
 )
 
 // configPolicyForSession is the shared workload-config resolver used by the suspend
@@ -121,5 +122,118 @@ var _ = Describe("configPolicyForSession precedence", func() {
 		pol, err := configPolicyForSession(ctx, k8sClient, ns, s)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(pol).To(Equal(sessionConfigPolicy{}))
+	})
+})
+
+// resolveWorkloadSource enforces the generic/dedicated admission at the operator's
+// authoritative chokepoint (docs/PRD-arbitrary-image-sessions.md §13.3). These specs
+// pin the accept/reject matrix so a dedicated pool stays single-image and a generic
+// pool only runs foreign workloads — the Stage 2b guarantee.
+var _ = Describe("resolveWorkloadSource generic/dedicated admission", func() {
+	const ns = "default"
+
+	// dedicated pool: SandboxTemplate pins an image.
+	mkDedicated := func(ctx context.Context, pool, tmpl string) {
+		Expect(k8sClient.Create(ctx, &corev1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: tmpl, Namespace: ns},
+			Spec:       corev1alpha1.SandboxTemplateSpec{Image: "ghcr.io/example/dedicated:1"},
+		})).To(Succeed())
+		Expect(k8sClient.Create(ctx, &corev1alpha1.WarmPool{
+			ObjectMeta: metav1.ObjectMeta{Name: pool, Namespace: ns},
+			Spec:       corev1alpha1.WarmPoolSpec{TemplateRef: corev1alpha1.LocalRef{Name: tmpl}, Replicas: 1},
+		})).To(Succeed())
+	}
+	// generic pool: SandboxTemplate leaves image empty (worker-shape only).
+	mkGeneric := func(ctx context.Context, pool, tmpl string) {
+		Expect(k8sClient.Create(ctx, &corev1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: tmpl, Namespace: ns},
+			Spec:       corev1alpha1.SandboxTemplateSpec{}, // no image => generic
+		})).To(Succeed())
+		Expect(k8sClient.Create(ctx, &corev1alpha1.WarmPool{
+			ObjectMeta: metav1.ObjectMeta{Name: pool, Namespace: ns},
+			Spec:       corev1alpha1.WarmPoolSpec{TemplateRef: corev1alpha1.LocalRef{Name: tmpl}, Replicas: 1},
+		})).To(Succeed())
+	}
+	resolve := func(ctx context.Context, spec corev1alpha1.SessionSpec) (*resume.SessionPlan, error) {
+		s := &corev1alpha1.Session{ObjectMeta: metav1.ObjectMeta{Name: "sess-adm", Namespace: ns}, Spec: spec}
+		plan := &resume.SessionPlan{}
+		if spec.PoolRef != nil {
+			plan.Pool = spec.PoolRef.Name
+		}
+		err := resolveWorkloadSource(ctx, k8sClient, ns, s, plan)
+		return plan, err
+	}
+
+	It("ACCEPT: poolRef-only on a DEDICATED pool → runs the pool's image", func() {
+		ctx := context.Background()
+		mkDedicated(ctx, "adm-ded", "adm-ded-tmpl")
+		plan, err := resolve(ctx, corev1alpha1.SessionSpec{PoolRef: &corev1alpha1.LocalRef{Name: "adm-ded"}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(plan.TemplateName).To(Equal("adm-ded-tmpl"))
+		Expect(plan.AppName).To(BeEmpty())
+	})
+
+	It("REJECT: poolRef-only on a GENERIC pool → nothing to run", func() {
+		ctx := context.Background()
+		mkGeneric(ctx, "adm-gen1", "adm-gen1-tmpl")
+		_, err := resolve(ctx, corev1alpha1.SessionSpec{PoolRef: &corev1alpha1.LocalRef{Name: "adm-gen1"}})
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("generic"))
+	})
+
+	It("ACCEPT: appRef on a GENERIC pool", func() {
+		ctx := context.Background()
+		mkGeneric(ctx, "adm-gen2", "adm-gen2-tmpl")
+		Expect(k8sClient.Create(ctx, &corev1alpha1.AppTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "adm-app", Namespace: ns},
+			Spec:       corev1alpha1.AppTemplateSpec{Image: "docker.io/library/redis:7-alpine"},
+		})).To(Succeed())
+		plan, err := resolve(ctx, corev1alpha1.SessionSpec{
+			PoolRef: &corev1alpha1.LocalRef{Name: "adm-gen2"},
+			AppRef:  &corev1alpha1.LocalRef{Name: "adm-app"},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(plan.AppName).To(Equal("adm-app"))
+		Expect(plan.TemplateName).To(BeEmpty())
+	})
+
+	It("REJECT: appRef on a DEDICATED pool", func() {
+		ctx := context.Background()
+		mkDedicated(ctx, "adm-ded2", "adm-ded2-tmpl")
+		_, err := resolve(ctx, corev1alpha1.SessionSpec{
+			PoolRef: &corev1alpha1.LocalRef{Name: "adm-ded2"},
+			AppRef:  &corev1alpha1.LocalRef{Name: "adm-app"},
+		})
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("dedicated"))
+	})
+
+	It("REJECT: appRef without poolRef (no capacity)", func() {
+		ctx := context.Background()
+		_, err := resolve(ctx, corev1alpha1.SessionSpec{AppRef: &corev1alpha1.LocalRef{Name: "adm-app"}})
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("requires poolRef"))
+	})
+
+	It("REJECT: inline image on a DEDICATED pool", func() {
+		ctx := context.Background()
+		mkDedicated(ctx, "adm-ded3", "adm-ded3-tmpl")
+		_, err := resolve(ctx, corev1alpha1.SessionSpec{
+			PoolRef: &corev1alpha1.LocalRef{Name: "adm-ded3"},
+			Image:   "ghcr.io/example/inline@sha256:abc",
+		})
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("dedicated"))
+	})
+
+	It("ACCEPT: inline image on a GENERIC pool", func() {
+		ctx := context.Background()
+		mkGeneric(ctx, "adm-gen3", "adm-gen3-tmpl")
+		plan, err := resolve(ctx, corev1alpha1.SessionSpec{
+			PoolRef: &corev1alpha1.LocalRef{Name: "adm-gen3"},
+			Image:   "ghcr.io/example/inline@sha256:def",
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(plan.Image).To(Equal("ghcr.io/example/inline@sha256:def"))
 	})
 })

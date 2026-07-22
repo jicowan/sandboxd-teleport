@@ -105,25 +105,13 @@ func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, h
 		if s.Spec.IAM != nil {
 			plan.IAMRoleARN = s.Spec.IAM.RoleARN
 		}
-		// Capacity is always the pool. Workload source has a precedence
-		// (image > appRef > pool's own SandboxTemplate) resolved below
-		// (docs/PRD-arbitrary-image-sessions.md §13.3).
+		// Capacity is always the pool; the workload source (image / appRef / pool's
+		// own template) is resolved + admission-checked here.
 		if s.Spec.PoolRef != nil {
 			plan.Pool = s.Spec.PoolRef.Name
 		}
-		switch {
-		case s.Spec.Image != "": // inline arbitrary image (admin/kubectl escape hatch, §12).
-			plan.Image = s.Spec.Image
-		case s.Spec.AppRef != nil: // generic-pool workload from an AppTemplate, decoupled from the pool.
-			plan.AppName = s.Spec.AppRef.Name
-		case s.Spec.PoolRef != nil: // dedicated-pool mode: the pool's own SandboxTemplate supplies the image.
-			tmplName, err := templateForPool(ctx, c, namespace, s.Spec.PoolRef.Name)
-			if err != nil {
-				return nil, err
-			}
-			plan.TemplateName = tmplName
-		default:
-			return nil, fmt.Errorf("session %q has neither poolRef, appRef, nor image", sid)
+		if err := resolveWorkloadSource(ctx, c, namespace, &s, plan); err != nil {
+			return nil, err
 		}
 		if plan.Pool == "" {
 			return nil, fmt.Errorf("session %q resolves to no pool", sid)
@@ -289,6 +277,85 @@ func templateForPool(ctx context.Context, c client.Client, ns, pool string) (str
 		return "", fmt.Errorf("get warmpool %q: %w", pool, err)
 	}
 	return wp.Spec.TemplateRef.Name, nil
+}
+
+// poolTemplate fetches the SandboxTemplate a pool references (pool -> templateRef ->
+// SandboxTemplate) in one step.
+func poolTemplate(ctx context.Context, c client.Client, ns, pool string) (*corev1alpha1.SandboxTemplate, error) {
+	name, err := templateForPool(ctx, c, ns, pool)
+	if err != nil {
+		return nil, err
+	}
+	var t corev1alpha1.SandboxTemplate
+	if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &t); err != nil {
+		return nil, fmt.Errorf("get sandboxtemplate %q for pool %q: %w", name, pool, err)
+	}
+	return &t, nil
+}
+
+// poolIsGeneric reports whether a pool is GENERIC (its SandboxTemplate pins no image,
+// so it runs whatever workload a session brings) vs. DEDICATED (image set, single-image
+// only). See docs/PRD-arbitrary-image-sessions.md §13.
+func poolIsGeneric(ctx context.Context, c client.Client, ns, pool string) (bool, error) {
+	t, err := poolTemplate(ctx, c, ns, pool)
+	if err != nil {
+		return false, err
+	}
+	return t.Spec.Image == "", nil
+}
+
+// resolveWorkloadSource resolves a session's WORKLOAD source into the plan
+// (plan.Image / plan.AppName / plan.TemplateName) and enforces the generic/dedicated
+// admission rules (docs/PRD-arbitrary-image-sessions.md §13.3). This is the
+// authoritative chokepoint — the operator must resolve the workload before /run, so
+// these rules cannot be bypassed by any create path (broker, self-service, kubectl):
+//
+//   - inline image  → the pool (if any) must be GENERIC (a dedicated pool runs only
+//     its own pinned image).
+//   - appRef        → requires a poolRef, and that pool must be GENERIC.
+//   - poolRef only  → the pool must be DEDICATED (its SandboxTemplate pins an image);
+//     a generic pool has nothing to run without an appRef.
+//
+// Precedence when multiple are set: image > appRef > pool's own template.
+func resolveWorkloadSource(ctx context.Context, c client.Client, ns string, s *corev1alpha1.Session, plan *resume.SessionPlan) error {
+	sid := s.Name
+	switch {
+	case s.Spec.Image != "": // inline arbitrary image (admin/kubectl escape hatch).
+		if s.Spec.PoolRef != nil {
+			generic, err := poolIsGeneric(ctx, c, ns, s.Spec.PoolRef.Name)
+			if err != nil {
+				return err
+			}
+			if !generic {
+				return fmt.Errorf("session %q: inline image requires a generic pool; pool %q is dedicated to a single image", sid, s.Spec.PoolRef.Name)
+			}
+		}
+		plan.Image = s.Spec.Image
+	case s.Spec.AppRef != nil: // generic-pool workload from an AppTemplate.
+		if s.Spec.PoolRef == nil {
+			return fmt.Errorf("session %q: appRef requires poolRef (a pool for capacity)", sid)
+		}
+		generic, err := poolIsGeneric(ctx, c, ns, s.Spec.PoolRef.Name)
+		if err != nil {
+			return err
+		}
+		if !generic {
+			return fmt.Errorf("session %q: appRef requires a generic pool; pool %q is dedicated to a single image", sid, s.Spec.PoolRef.Name)
+		}
+		plan.AppName = s.Spec.AppRef.Name
+	case s.Spec.PoolRef != nil: // dedicated-pool mode: the pool's SandboxTemplate supplies the image.
+		t, err := poolTemplate(ctx, c, ns, s.Spec.PoolRef.Name)
+		if err != nil {
+			return err
+		}
+		if t.Spec.Image == "" {
+			return fmt.Errorf("session %q: pool %q is generic (its SandboxTemplate pins no image) and needs an appRef; a poolRef-only session has nothing to run", sid, s.Spec.PoolRef.Name)
+		}
+		plan.TemplateName = t.Name
+	default:
+		return fmt.Errorf("session %q has neither poolRef, appRef, nor image", sid)
+	}
+	return nil
 }
 
 // sessionConfigPolicy is the idle + periodic-checkpoint policy a session inherits

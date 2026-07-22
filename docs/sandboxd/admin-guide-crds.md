@@ -34,6 +34,14 @@ subresource; no printer columns.
 >   generic pool first; stand up a dedicated pool only when one image earns its own
 >   warm fleet or a distinct capacity class. See
 >   [PRD‑arbitrary‑image‑sessions §13](../PRD-arbitrary-image-sessions.md).
+>
+> Only the **workload** `image` is optional. A generic pool's template still needs a
+> resolvable **worker** image — set `workerImage` on the template (or an operator
+> global `--worker-image`), else the WarmPool won't render worker pods ("no worker
+> image configured"). The workload/pool admission is enforced at resume: a
+> `poolRef`‑only Session on a **generic** pool is **rejected** (nothing to run), and an
+> `appRef`/inline‑`image` Session on a **dedicated** pool is **rejected** (it runs only
+> its pinned image).
 
 ### `.spec`
 
