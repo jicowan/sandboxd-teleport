@@ -20,115 +20,102 @@ metadata:
 data:
   config.yaml: |
     # yaml-language-server: $schema=https://agentgateway.dev/schema/config
+    # MULTI-APP front door (docs/PRD-broker-multi-app.md). Per app: a data-path route
+    # (/aio/mcp, /everything/mcp) that injects X-Sandbox-App and proxies to the broker,
+    # PLUS an explicit well-known route so RFC 9728 OAuth discovery
+    # (/.well-known/oauth-protected-resource/<app>/mcp) returns THAT app's resource.
+    # There is no catch-all "/" route, so discovery is unambiguous per app.
     binds:
     - port: 3000
       listeners:
       - protocol: HTTP
-        # MULTI-APP (docs/PRD-broker-multi-app.md): one route PER APP. Each route
-        # matches a distinct path prefix, injects X-Sandbox-App via
-        # requestHeaderModifier (the broker maps that header -> AppTemplate + pool and
-        # enforces the app's group), and points at the SAME broker backend. Claude
-        # registers each app as a separate MCP server (…/everything/mcp, …/mcp). The
-        # more-specific /everything route MUST come before the catch-all "/".
         routes:
-        # --- App: everything (a distinct MCP-server sandbox) ---
-        - name: everything-route
-          matches:
-          - path: { pathPrefix: /everything }
+        # ---- OAuth protected-resource discovery, per app (must precede data routes) ----
+        - name: aio-wellknown
+          matches: [{ path: { pathPrefix: /.well-known/oauth-protected-resource/aio } }]
           policies:
             mcpAuthentication:
               mode: strict
               issuer: https://keycloak.example.com/realms/sandbox
               audiences: [sandbox-router]
-              jwks:
-                url: https://keycloak.example.com/realms/sandbox/protocol/openid-connect/certs
-              provider:
-                keycloak: {}
+              jwks: { url: https://keycloak.example.com/realms/sandbox/protocol/openid-connect/certs }
+              provider: { keycloak: {} }
+              resourceMetadata:
+                resource: https://agentgateway.example.com/aio/mcp
+                authorization_servers: [https://keycloak.example.com/realms/sandbox]
+                scopesSupported: [openid, sandbox]
+                bearerMethodsSupported: [header]
+            backendAuth: { passthrough: {} }
+          backends:
+          - mcp: { targets: [{ name: aio-broker, mcp: { host: http://aio-sandbox-broker-svc.default.svc.cluster.local.:8080/ } }] }
+        - name: everything-wellknown
+          matches: [{ path: { pathPrefix: /.well-known/oauth-protected-resource/everything } }]
+          policies:
+            mcpAuthentication:
+              mode: strict
+              issuer: https://keycloak.example.com/realms/sandbox
+              audiences: [sandbox-router]
+              jwks: { url: https://keycloak.example.com/realms/sandbox/protocol/openid-connect/certs }
+              provider: { keycloak: {} }
               resourceMetadata:
                 resource: https://agentgateway.example.com/everything/mcp
-                authorization_servers:
-                  - https://keycloak.example.com/realms/sandbox
+                authorization_servers: [https://keycloak.example.com/realms/sandbox]
                 scopesSupported: [openid, sandbox]
                 bearerMethodsSupported: [header]
-            backendAuth:
-              passthrough: {}
-            requestHeaderModifier:
-              set:
-                X-Sandbox-App: everything
-            # everything's tools are not the AIO tool set; gate on group only.
-            mcpAuthorization:
-              rules:
-              - '"sandbox-power" in jwt.groups'
+            backendAuth: { passthrough: {} }
           backends:
-          - mcp:
-              targets:
-              - name: aio-broker
-                mcp:
-                  host: http://aio-sandbox-broker-svc.default.svc.cluster.local.:8080/
-        # --- App: aio (default, catch-all) ---
-        - name: mcp-route
-          matches:
-          - path: { pathPrefix: / }
+          - mcp: { targets: [{ name: aio-broker, mcp: { host: http://aio-sandbox-broker-svc.default.svc.cluster.local.:8080/ } }] }
+        # ---- App: AIO (data path /aio/mcp) ----
+        - name: aio-route
+          matches: [{ path: { pathPrefix: /aio } }]
           policies:
             mcpAuthentication:
               mode: strict
               issuer: https://keycloak.example.com/realms/sandbox
               audiences: [sandbox-router]
-              jwks:
-                url: https://keycloak.example.com/realms/sandbox/protocol/openid-connect/certs
-              provider:
-                keycloak: {}
+              jwks: { url: https://keycloak.example.com/realms/sandbox/protocol/openid-connect/certs }
+              provider: { keycloak: {} }
               resourceMetadata:
-                resource: https://agentgateway.example.com/mcp
-                # Point clients at Keycloak as the OAuth authorization server
-                # (RFC 9728). Without this, agentgateway defaults authorization_servers
-                # to the resource URL, and Claude Code's discovery fails.
-                authorization_servers:
-                  - https://keycloak.example.com/realms/sandbox
+                resource: https://agentgateway.example.com/aio/mcp
+                authorization_servers: [https://keycloak.example.com/realms/sandbox]
                 scopesSupported: [openid, sandbox]
                 bearerMethodsSupported: [header]
-            # Forward the validated user JWT unchanged to the broker.
-            backendAuth:
-              passthrough: {}
-            # Select the AIO app explicitly (broker also defaults to aio).
-            requestHeaderModifier:
-              set:
-                X-Sandbox-App: aio
-            # Tool-level authorization (tiered by Keycloak group claim in the
-            # passed-through JWT). Rules are OR'd: a tool call is allowed if ANY
-            # rule matches. Unauthorized tools are ALSO filtered out of the
-            # tools/list response, so standard users never see exec tools.
-            #
-            # Tiers:
-            #   - sandbox-power : everything (incl. shell + code execution)
-            #   - sandbox-users : browser_* + non-exec sandbox_* (files, editor,
-            #                     markdown, context, packages, skill loader);
-            #                     NOT sandbox_execute_bash / sandbox_execute_code
-            #
-            # mcp.tool.name is the bare tool name (e.g. "sandbox_execute_bash")
-            # as published by the AIO hub and passed through by the broker.
+            backendAuth: { passthrough: {} }
+            requestHeaderModifier: { set: { X-Sandbox-App: aio } }
             mcpAuthorization:
               rules:
-              # Power users: any tool.
               - '"sandbox-power" in jwt.groups'
-              # Standard users: web browsing.
               - 'mcp.tool.name.startsWith("browser_")'
-              # Standard users: non-exec sandbox tools.
               - 'mcp.tool.name == "sandbox_file_operations"'
               - 'mcp.tool.name == "sandbox_str_replace_editor"'
               - 'mcp.tool.name == "sandbox_convert_to_markdown"'
               - 'mcp.tool.name == "sandbox_get_context"'
               - 'mcp.tool.name == "sandbox_get_packages"'
               - 'mcp.tool.name == "sandbox_load_skill"'
-              # NOTE: sandbox_execute_bash and sandbox_execute_code are
-              # intentionally NOT listed here, so only sandbox-power may call
-              # (or even see) them.
           backends:
-          - mcp:
-              targets:
-              - name: aio-broker
-                mcp:
-                  host: http://aio-sandbox-broker-svc.default.svc.cluster.local.:8080/
+          - mcp: { targets: [{ name: aio-broker, mcp: { host: http://aio-sandbox-broker-svc.default.svc.cluster.local.:8080/ } }] }
+        # ---- App: everything (data path /everything/mcp) ----
+        - name: everything-route
+          matches: [{ path: { pathPrefix: /everything } }]
+          policies:
+            mcpAuthentication:
+              mode: strict
+              issuer: https://keycloak.example.com/realms/sandbox
+              audiences: [sandbox-router]
+              jwks: { url: https://keycloak.example.com/realms/sandbox/protocol/openid-connect/certs }
+              provider: { keycloak: {} }
+              resourceMetadata:
+                resource: https://agentgateway.example.com/everything/mcp
+                authorization_servers: [https://keycloak.example.com/realms/sandbox]
+                scopesSupported: [openid, sandbox]
+                bearerMethodsSupported: [header]
+            backendAuth: { passthrough: {} }
+            requestHeaderModifier: { set: { X-Sandbox-App: everything } }
+            mcpAuthorization:
+              rules:
+              - '"sandbox-power" in jwt.groups'
+          backends:
+          - mcp: { targets: [{ name: aio-broker, mcp: { host: http://aio-sandbox-broker-svc.default.svc.cluster.local.:8080/ } }] }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -172,3 +159,4 @@ spec:
   selector: { app: agentgateway }
   ports:
     - { name: http, port: 3000, targetPort: 3000 }
+
