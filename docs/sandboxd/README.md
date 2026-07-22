@@ -15,6 +15,7 @@ describes the live reference cluster it says so explicitly.
 
 | # | Document | Audience | What it covers |
 |---|----------|----------|----------------|
+| 0 | [overview-and-vs-substrate.md](overview-and-vs-substrate.md) | Everyone / evaluators | What sandboxd is at a glance, and how it differs from [Agent Substrate](https://github.com/agent-substrate/substrate) (shared gVisor‑teleport idea; why sandboxd exists — Substrate is blocked on managed EKS). |
 | 1 | [end-user-guide-broker.md](end-user-guide-broker.md) | End users | Point Claude / an MCP client at the broker and authenticate. |
 | 2 | [admin-guide-broker.md](admin-guide-broker.md) | Platform admins | Install & configure the broker, agentgateway, and Keycloak. |
 | 3 | [architecture-broker.md](architecture-broker.md) | Architects / admins | How the broker, agentgateway, and Keycloak fit together (the auth front door). |
