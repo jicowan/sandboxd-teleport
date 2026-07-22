@@ -83,6 +83,13 @@ checkpoint, restore, suspend, and inspect nested gVisor sandboxes on a worker po
 Pull an image (via the node's containerd cache) and start it as a detached nested
 gVisor sandbox.
 
+> **Image pull auth.** The worker pulls the workload image directly via the node
+> containerd API. Public images (ghcr/Docker Hub) and already‑cached images pull
+> anonymously; **private ECR** images are authenticated with a token the worker
+> fetches via its EKS Pod Identity (only for `*.dkr.ecr.*` refs). A private ECR
+> image whose repo the worker role can't pull fails here with `502` (a containerd
+> `401 Unauthorized`). See the worker role's `ecr-pull` policy in the install guide.
+
 **Request**
 
 ```json

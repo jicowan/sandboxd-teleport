@@ -19,6 +19,7 @@ describes the live reference cluster it says so explicitly.
 | 1 | [end-user-guide-broker.md](end-user-guide-broker.md) | End users | Point Claude / an MCP client at the broker and authenticate. |
 | 2 | [admin-guide-broker.md](admin-guide-broker.md) | Platform admins | Install & configure the broker, agentgateway, and Keycloak. |
 | 3 | [architecture-broker.md](architecture-broker.md) | Architects / admins | How the broker, agentgateway, and Keycloak fit together (the auth front door). |
+| 3b | [howto-add-an-app.md](howto-add-an-app.md) | Platform admins | Add a new sandbox "app" (MCP server) to the front door: AppTemplate + broker registry + agentgateway routes + Keycloak group. |
 | 4 | [install-guide-sandboxd.md](install-guide-sandboxd.md) | Platform admins | Deploy the operator, router, Valkey, RBAC, Pod Identity, CRDs, and a pool. |
 | 5 | [admin-guide-crds.md](admin-guide-crds.md) | Platform admins | Reference for every CRD field (SandboxTemplate, AppTemplate, WarmPool, Session, ForkSet, BaseSnapshot). |
 | 6 | [architecture-sandboxd.md](architecture-sandboxd.md) | Architects / admins | How sandboxd, the router, the operator, Valkey, and workers relate. |
@@ -28,21 +29,25 @@ describes the live reference cluster it says so explicitly.
 
 ## New here? Order of operations
 
-To stand the whole solution up in your own cluster, follow this sequence — each step
-names the doc with the exact commands. (Manifests live in two trees: front‑door/auth
-stack in the repo‑root `deploy/`, control‑plane internals in
-`checkpoint-restore/controlplane/deploy/`. The docs give the paths; you don't need to
-memorize the split.)
+sandboxd itself (steps 1–2) is **standalone** — you can drive it directly via its
+CRDs + the router API, with no front door. The front door (steps 3–4) is an
+**optional reference** for giving users authenticated MCP access. Manifests live in
+two trees: the sandboxd control plane + pools under
+`checkpoint-restore/controlplane/deploy/`, and the shared front‑door infra (Keycloak
+realm, agentgateway + ingress) in the repo‑root `deploy/`. The docs give the paths.
 
-1. **Control plane** — CRDs, RBAC, Valkey, operator, router, a worker pool:
+1. **Control plane** — CRDs, RBAC, Valkey, operator, router, worker Pod Identity
+   (S3 + optional ECR pull), a worker pool:
    [install-guide-sandboxd.md](install-guide-sandboxd.md) (or the condensed
    [runbook Part B](runbook-reproduce-test-env.md#b1-install-the-control-plane)).
 2. **(Optional) mTLS** — SPIRE + secure the control‑plane hops, *before* running
    sessions: [security-spiffe-spire.md](security-spiffe-spire.md) (runbook step B1.5).
-3. **Auth front door** — Keycloak realm, broker SA/RBAC, broker, agentgateway, ingress
-   (repo‑root `deploy/00…40`): [admin-guide-broker.md](admin-guide-broker.md).
-4. **Connect a client** — point Claude / an MCP client at the broker and authenticate:
-   [end-user-guide-broker.md](end-user-guide-broker.md).
+3. **(Optional) reference front door** — Keycloak realm + agentgateway + ingress
+   (repo‑root `deploy/00`,`30`,`40`) and the sandboxd broker + generic pool/AppTemplates
+   (`checkpoint-restore/controlplane/deploy/aio/`):
+   [admin-guide-broker.md](admin-guide-broker.md).
+4. **Connect a client** — register each app's endpoint (`…/<app>/mcp`) in Claude and
+   authenticate: [end-user-guide-broker.md](end-user-guide-broker.md).
 
 The [runbook](runbook-reproduce-test-env.md) walks the whole thing end‑to‑end
 (direct‑worker path → control plane → front door) as one script; the guides above are

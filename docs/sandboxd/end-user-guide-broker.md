@@ -8,26 +8,37 @@ teleportable sandbox.
 
 ## What you're connecting to
 
-You connect to a single HTTPS MCP endpoint. Behind it:
+You connect to an HTTPS MCP endpoint. The reference front door can expose **one or
+more "apps"** — each is a different sandbox image (e.g. the all‑in‑one AIO sandbox,
+or another MCP server), reached at its **own endpoint path** (e.g. `/aio/mcp`,
+`/everything/mcp`). You register each app you want as a separate MCP server in your
+client. Behind each endpoint:
 
-- **agentgateway** verifies your identity token and filters which tools you may see.
-- **the broker** derives a durable session for you and forwards your calls.
+- **agentgateway** verifies your identity token, filters which tools you may see,
+  and routes the path to the right app.
+- **the broker** derives a durable session for you **per app** and transparently
+  proxies your MCP calls.
 - **sandboxd** runs the actual tools inside a gVisor sandbox and preserves your
   session's state across disconnects (it checkpoints to storage when idle and
   restores when you return).
 
-You don't need to know any of that to use it — you need the endpoint URL and a
-login. Your session is tied to *your identity*, not to a particular server, so
-you get the same working directory and state back when you reconnect.
+You don't need to know any of that to use it — you need the endpoint URL(s) and a
+login. Each app's session is tied to *your identity* (and that app), not to a
+particular server, so you get the same working directory and state back when you
+reconnect — and different apps are independent sandboxes that don't collide.
 
 ## Prerequisites
 
-1. **The MCP endpoint URL** from your administrator. For the reference
-   deployment this is:
+1. **The MCP endpoint URL(s)** from your administrator — one per app you want. For
+   the reference deployment:
 
    ```
-   https://agentgateway.example.com/mcp
+   https://agentgateway.example.com/aio/mcp          # the AIO all-in-one sandbox
+   https://agentgateway.example.com/everything/mcp   # the "everything" MCP server (example 2nd app)
    ```
+
+   (Each app may require a specific group — see below. Your admin lists the apps
+   you're entitled to.)
 
 2. **A user account in the identity provider (Keycloak)** that is a member of the
    required group. Membership determines what you can do:
@@ -48,12 +59,19 @@ You do **not** need a client secret, an API key, or any Kubernetes access.
 
 ## Connect with Claude Code (CLI)
 
-Add the server, **pinning the pre‑registered client id** (`aio-sandbox-client`):
+Add each app as its own server, **pinning the pre‑registered client id**
+(`aio-sandbox-client`). Register only the apps you use:
 
 ```sh
 claude mcp add --transport http --client-id aio-sandbox-client \
-  aio-sandbox https://agentgateway.example.com/mcp
+  aio https://agentgateway.example.com/aio/mcp
+
+claude mcp add --transport http --client-id aio-sandbox-client \
+  everything https://agentgateway.example.com/everything/mcp
 ```
+
+Each is a separate MCP server (its own name, its own OAuth auth, its own durable
+sandbox). Authenticate each once.
 
 > **Do not omit `--client-id`.** Without it, Claude Code tries to *dynamically
 > register* a new OAuth client against our identity host, which its "Trusted Hosts"
@@ -88,7 +106,7 @@ A healthy server shows as `connected` with a non‑empty tool list.
 Add an MCP server of type **HTTP / streamable HTTP** (not stdio) pointing at the
 endpoint:
 
-- **URL:** `https://agentgateway.example.com/mcp`
+- **URL:** `https://agentgateway.example.com/aio/mcp` (one per app)
 - **Auth:** OAuth (the app will open a browser to Keycloak on first connect)
 
 The exact menu path varies by app version (typically *Settings → Connectors /
@@ -99,7 +117,7 @@ HTTP transport with OAuth. When prompted, log in through the browser window.
 
 Any client that supports **streamable‑HTTP MCP with OAuth 2.0** works. Configure:
 
-- **Endpoint:** `https://agentgateway.example.com/mcp`
+- **Endpoint:** `https://agentgateway.example.com/aio/mcp` (one per app)
 - **Transport:** streamable HTTP (HTTP POST to the endpoint; server may reply with
   Server‑Sent Events for streaming responses).
 - **Authorization:** OAuth 2.0 authorization‑code + PKCE. The server publishes its
@@ -135,17 +153,17 @@ Claude Code to use it means there's **nothing to register** — the Trusted Host
 check never runs. Re‑add the server with `--client-id`:
 
 ```sh
-claude mcp remove aio-sandbox
+claude mcp remove aio
 claude mcp add --transport http --client-id aio-sandbox-client \
-  aio-sandbox https://agentgateway.example.com/mcp
+  aio https://agentgateway.example.com/aio/mcp
 ```
 
 That produces this entry in `~/.claude.json` (you can also hand‑edit it):
 
 ```json
-"aio-sandbox": {
+"aio": {
   "type": "http",
-  "url": "https://agentgateway.example.com/mcp",
+  "url": "https://agentgateway.example.com/aio/mcp",
   "oauth": { "clientId": "aio-sandbox-client" }
 }
 ```

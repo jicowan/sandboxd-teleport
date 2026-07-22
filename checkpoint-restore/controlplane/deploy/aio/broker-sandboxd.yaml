@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: broker
-          image: 111122223333.dkr.ecr.us-west-2.amazonaws.com/aio-sandbox-broker-sandboxd:v1
+          image: 111122223333.dkr.ecr.us-west-2.amazonaws.com/aio-sandbox-broker-sandboxd:v5
           env:
             # --- Pool / workload ---
             # SINGLE-app modes:

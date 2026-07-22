@@ -1,150 +1,88 @@
-# aio-sandbox
+# aio-sandbox / sandboxd
 
-Run per-session [AIO Agent Sandboxes](https://github.com/agent-infra/sandbox)
-on Kubernetes (via the [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
-framework) and expose them to **Claude Code** — or any MCP client — as a remote
-MCP server, with **no SDK, kubeconfig, or proxy on the client**. The client just
-authenticates with OAuth and calls tools.
+**sandboxd** is a **session‑teleport control plane on Amazon EKS**. Warm pools of
+privileged worker pods run arbitrary OCI images as **nested gVisor sandboxes**; a
+session's RAM + filesystem state is checkpointed to S3 and restored ("teleported")
+onto any interchangeable worker on any node — surviving suspend/resume, scale‑in,
+node drain, and eviction. Many mostly‑idle sessions share few workers (temporal
+oversubscription), and idle sessions park in S3.
+
+sandboxd is **standalone**: you install the operator, router, and workers and drive
+it directly through its **CRDs** (`SandboxTemplate`, `AppTemplate`, `WarmPool`,
+`Session`, `ForkSet`, `BaseSnapshot`) and the router's HTTP API. It does **not**
+require a broker, gateway, or identity provider.
 
 ```
-Claude Code ──HTTPS MCP + OAuth──▶ agentgateway ──▶ broker ──▶ sandbox-router ──▶ AIO pod
-              (browser login,        (validate JWT,   (claim a    (route to the
-               Keycloak)              passthrough)     sandbox)     sandbox pod)
+                          ┌──────────── sandboxd (the product) ─────────────┐
+   your client / harness  │  router ──resume──▶ operator ◀──▶ Valkey        │
+   ──X-Session-ID──▶ router│    │  (assignment + teleport workflow)          │
+                          │    ▼                                            │
+                          │  worker pod ──runsc──▶ nested gVisor sandbox    │
+                          │    │  checkpoint / restore                      │
+                          │    ▼                                            │
+                          │   S3  (per-session snapshots)                   │
+                          └─────────────────────────────────────────────────┘
 ```
 
-Per-user identity flows all the way to the broker (agentgateway forwards the
-user's Keycloak JWT unchanged), so each user gets their own sandbox and access
-is gated by Keycloak group membership.
+## Documentation
 
-See **[ARCHITECTURE.md](./ARCHITECTURE.md)** for the full design, auth/authz
-flow, and swim-lane diagram. See
-**[docs/HOWTO-tool-access-and-quotas.md](./docs/HOWTO-tool-access-and-quotas.md)**
-for how to filter which tools each user can use and how to configure quotas. See
-**[docs/POSTMORTEM-agentcore-vs-agentgateway.md](./docs/POSTMORTEM-agentcore-vs-agentgateway.md)**
-for why this uses agentgateway rather than AWS Bedrock AgentCore Gateway.
+**Start at [docs/sandboxd/](./docs/sandboxd/README.md)** — the source of truth:
+install order, architecture, the full CRD reference, the reproduction runbook, the
+worker API, and the SPIFFE/SPIRE security guide. See also
+[docs/sandboxd/overview-and-vs-substrate.md](./docs/sandboxd/overview-and-vs-substrate.md)
+for what sandboxd is and how it compares to Agent Substrate.
 
-> **Looking for the session‑teleport control plane (`sandboxd`)?** The
-> `checkpoint-restore` branch extends this into a full control plane: warm pools
-> of privileged workers run OCI images as **nested gVisor sandboxes**, and a
-> session's RAM + filesystem state is checkpointed to S3 and restored
-> ("teleported") onto a different worker or node — surviving suspend/resume,
-> scale‑in, and eviction. It adds an operator, a session‑aware router, and CRDs
-> (`SandboxTemplate`, `WarmPool`, `Session`, `ForkSet`, `BaseSnapshot`), plus
-> optional SPIFFE/SPIRE mTLS on the control hops. All of that is documented under
-> **[docs/sandboxd/](./docs/sandboxd/README.md)** — start there for install order,
-> architecture, CRD reference, the reproduction runbook, and the security guide.
+## A reference front door (optional)
 
-## Components
+sandboxd has no opinion about *who* may create a session. This repo also ships an
+**optional reference front door** showing one way to give end users an
+authenticated MCP interface to sandboxes running on sandboxd:
 
-| Component | What it is |
-|---|---|
-| **agentgateway** | OSS MCP gateway (standalone). Public front door. Validates the inbound Keycloak JWT, serves OAuth discovery metadata, forwards the user's token to the broker (`backendAuth: passthrough`), manages MCP sessions. |
-| **broker** (`broker/broker_mcp.py`) | In-cluster MCP server. Re-validates the JWT as a resource server, enforces the `sandbox-users` group, claims/reuses a sandbox per MCP session, forwards `tools/*` to the router. Holds the only RBAC to create `SandboxClaim`s. |
-| **sandbox-router** | Routes MCP requests to the addressed sandbox pod's headless Service (upstream agent-sandbox component; runs ClusterIP-only, no sidecar). |
-| **Keycloak** | OIDC provider (`sandbox` realm). Public client `aio-sandbox-client` for user login; `sandbox-users` group gates access. |
-| **AIO sandbox pod** | The actual sandbox (bash, code, browser, files…) — its MCP hub is what tools pass through to. Provisioned from a `SandboxTemplate` + warm pool. |
-
-## Prerequisites
-
-- EKS cluster with the AWS Load Balancer Controller, an `agent-sandbox`
-  controller, and a `SandboxTemplate` + `SandboxWarmPool` (`aio-sandbox-template` /
-  `aio-sandbox-warmpool`).
-- Keycloak reachable at `keycloak.example.com` with the `sandbox` realm
-  (public `aio-sandbox-client`; `sandbox-users` group gates access and
-  `sandbox-power` grants the exec tools; the scope mappers in `docs/` —
-  `sub`, `preferred_username`, `groups`, `aud=sandbox-router`).
-- Route 53 zone for the public hostname + an ACM cert for
-  `agentgateway.example.com`.
-- `kubectl`, `docker buildx`, `aws` CLI, and `claude` (Claude Code).
-
-## Get it running
-
-### 1. Build & push the broker image
-
-```bash
-cd broker
-docker buildx build --platform linux/amd64 \
-  -t <your-registry>/aio-sandbox-broker:0.3.1 --push .
-# update deploy/20-broker.yaml image: if you use a different registry/tag
+```
+Claude Code ──HTTPS MCP + OAuth──▶ agentgateway ──▶ broker ──▶ sandboxd router ──▶ sandbox
+              (browser login,        (validate JWT,   (per-user session id,
+               Keycloak)              tool authz,      per-app routing)
+                                      passthrough)
 ```
 
-### 2. Deploy the in-cluster pieces
+- **agentgateway** — public MCP gateway. Validates the Keycloak JWT, serves OAuth
+  discovery, gates tools by group, and (multi‑app) routes each app path to the
+  broker with an `X-Sandbox-App` header.
+- **broker** (`broker/broker_sandboxd.py`) — re‑validates the JWT, enforces the
+  group, derives a durable per‑user (per‑app) session id, and **transparently
+  proxies MCP** to the sandboxd router. Supports several sandbox "apps" behind one
+  broker (see [docs/PRD-broker-multi-app.md](./docs/PRD-broker-multi-app.md)).
+- **Keycloak** — OIDC provider (`sandbox` realm; public client `aio-sandbox-client`).
 
-```bash
-cd deploy
-kubectl apply -f 00-serviceaccount-rbac.yaml   # broker SA + RBAC (SandboxClaim CRUD)
-kubectl apply -f 10-router-clusterip.yaml      # router: ClusterIP-only, no sidecar
-kubectl apply -f 20-broker.yaml                # broker (Deployment + Service)
-kubectl apply -f 30-agentgateway.yaml          # agentgateway (ConfigMap + Deployment + Service)
-```
-
-### 3. Expose agentgateway publicly
-
-```bash
-# Ensure an ACM cert for agentgateway.example.com exists; put its ARN in
-# deploy/40-agentgateway-ingress.yaml, then:
-kubectl apply -f 40-agentgateway-ingress.yaml
-
-# Point Route 53 at the provisioned ALB:
-ALB=$(kubectl get ingress -n default agentgateway \
-  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-aws route53 change-resource-record-sets --hosted-zone-id <ZONE_ID> \
-  --change-batch "{\"Changes\":[{\"Action\":\"UPSERT\",\"ResourceRecordSet\":{
-    \"Name\":\"agentgateway.example.com\",\"Type\":\"A\",
-    \"AliasTarget\":{\"HostedZoneId\":\"Z1H1FL5HABSF5\",\"DNSName\":\"${ALB}\",
-      \"EvaluateTargetHealth\":false}}}]}"
-```
-
-Verify the OAuth discovery doc points at Keycloak:
-
-```bash
-curl -s https://agentgateway.example.com/.well-known/oauth-protected-resource/mcp | jq
-# authorization_servers should be ["https://keycloak.example.com/realms/sandbox"]
-```
-
-### 4. Register in Claude Code & authenticate
-
-```bash
-claude mcp add aio-sandbox \
-  --scope user --transport http \
-  --client-id aio-sandbox-client \
-  https://agentgateway.example.com/mcp
-```
-
-Start a **new** Claude Code session, run `/mcp` → **aio-sandbox** →
-**Authenticate**. Log in to Keycloak as a member of `sandbox-users`. Then ask
-Claude to do something in a sandbox (e.g. *"run `uname -a` in a sandbox"*).
-
-> Keycloak anonymous Dynamic Client Registration is disabled, so the static
-> `--client-id aio-sandbox-client` is required (it has the localhost redirect
-> URIs + PKCE that Claude Code's auth-code flow needs).
+The front door is documented in `docs/sandboxd/` (broker end‑user / admin /
+architecture guides). It is a **reference**, not a requirement — swap in your own
+identity/broker layer, or drive sandboxd directly.
 
 ## Repo layout
 
 ```
-broker/         broker_mcp.py (the MCP broker) + Dockerfile
-deploy/         k8s manifests, applied in numeric order
-docs/           DESIGN-agentgateway.md, POSTMORTEM, ADRs, and historical
-                Stage-1/Stage-2 notes
-ARCHITECTURE.md the design + auth/authz swim-lane
+checkpoint-restore/         sandboxd itself
+  controlplane/             operator + router (Go) + CRDs + deploy manifests
+    deploy/                 control-plane, aio pool/app, SPIRE, smoke manifests
+  sandboxd/                 the worker agent (Go) + runsc
+  docs/                     pre-build design notes (ARCHITECTURE, TDD, runbooks)
+broker/                     the reference front-door broker (broker_sandboxd.py)
+deploy/                     shared front-door infra: Keycloak realm, agentgateway
+                            (+ its ingress)
+docs/sandboxd/              ← primary docs (product + front door)
+docs/                       PRDs + design notes
+delete_me/                  quarantined dead agent-sandbox integration (pending removal)
 ```
 
-## Operational notes
+## Reference environment
 
-- **DNS**: EKS CoreDNS reliability matters here (the broker resolves the router
-  and Keycloak JWKS). If you see intermittent `Temporary failure in name
-  resolution` / 504s, check for a black-hole CoreDNS pod (dig each pod IP, not
-  just the Service VIP) and consider NodeLocal DNSCache. See
-  `docs/DESIGN-agentgateway.md`.
-- **Karpenter**: broker, agentgateway, and sandbox pods carry
-  `karpenter.sh/do-not-disrupt` so consolidation doesn't drain them.
-- **Tool tiering** (implemented): agentgateway's `mcpAuthorization` CEL policy
-  in `deploy/30-agentgateway.yaml` gates individual tools by Keycloak group.
-  `sandbox-power` members get all tools (incl. `sandbox_execute_bash` /
-  `sandbox_execute_code`); plain `sandbox-users` get browsing + non-exec
-  sandbox tools, and the exec tools are filtered out of `tools/list` entirely.
-  Create a `sandbox-power` group in Keycloak and add the relevant users.
-- **Create gate + per-user quota** (implemented): the broker requires the
-  `sandbox-users` group to get a sandbox at all, and caps concurrent sandboxes
-  per user at `AIO_MAX_SANDBOXES_PER_USER` (default 3), returning `429` past
-  the cap. Each user gets their own isolated sandbox(es); they are never shared.
+The live examples throughout the docs use EKS cluster `EKSClusterStack-cluster`
+(`us-west-2`), gVisor nodes tainted `sandbox=gvisor`, control plane in
+`sandboxd-controlplane-system`, pools/sessions in `default`. Substitute your own
+account, cluster, DNS, and bucket. (Docs use scrubbed placeholders —
+`111122223333`, `example.com` — replace with your values.)
+
+> **Historical note:** an earlier version fronted the
+> [kubernetes-sigs agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
+> project via `broker_mcp.py`. That integration is retired; its files are parked in
+> [`delete_me/`](./delete_me/README.md) pending removal.

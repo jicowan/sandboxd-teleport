@@ -77,6 +77,24 @@ Checkpoints live in S3; the worker reads/writes them via EKS Pod Identity.
    > (cosmetic; renaming a bucket means migrating snapshots). Only the SA/role were
    > renamed to the `sandboxd-worker-*` family.
 
+   **Private‑registry (ECR) image pulls.** The worker pulls the *workload* image
+   (the sandbox's OCI image) directly via the node containerd API, authenticating
+   with the worker's Pod Identity. Public images (ghcr/Docker Hub) and images the
+   kubelet already cached pull anonymously, but a **private ECR** workload image
+   needs pull permission on this role. If any `SandboxTemplate.image` or
+   `AppTemplate.image` you run is a private ECR repo, add an inline policy
+   `ecr-pull`:
+
+   - `ecr:GetAuthorizationToken` on `*` (AWS requires `*` for this action)
+   - `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`,
+     `ecr:BatchCheckLayerAvailability` on
+     `arn:aws:ecr:us-west-2:111122223333:repository/*` (or scope to specific repos)
+
+   > The worker's containerd pull uses an ECR authorizer only for `*.dkr.ecr.*`
+   > image refs (a token fetched via this role); non‑ECR hosts stay anonymous, so
+   > public images are unaffected. Without this policy, a private‑ECR workload image
+   > fails at `/run` with a containerd `401 Unauthorized` on the manifest HEAD.
+
 3. **Create the ServiceAccount** the workers run as and **associate** the role.
    The reference uses SA `sandboxd-worker` in namespace `default`:
 

@@ -17,9 +17,12 @@ registry.
 | Keycloak realm | `deploy/00-keycloak-realm.yaml` | `KeycloakRealmImport/sandbox-realm` |
 | agentgateway | `deploy/30-agentgateway.yaml`, `deploy/40-agentgateway-ingress.yaml` | ConfigMap `agentgateway-config`, Deployment `agentgateway`, Service `agentgateway-svc`, Ingress `agentgateway` |
 | broker (sandboxd) | `broker/broker_sandboxd.py`, `broker/Dockerfile.sandboxd`, `checkpoint-restore/controlplane/deploy/aio/broker-sandboxd.yaml` | Deployment `aio-sandbox-broker-sandboxd`, Service `aio-sandbox-broker-svc` |
-| RBAC/SA for the front door | `deploy/00-serviceaccount-rbac.yaml` | (as defined there) |
+| Generic pool + AppTemplates | `checkpoint-restore/controlplane/deploy/aio/generic-pool.yaml` | SandboxTemplate `aio-generic` (no image ⇒ generic pool), WarmPool `aio-generic-pool`, AppTemplates `aio-app` and `everything-app` |
 
-> The order of files (`00`→`40`) is the apply order.
+> The shared front-door infra lives in the repo `deploy/` directory
+> (`00-keycloak-realm.yaml`, `30-agentgateway.yaml`, `40-agentgateway-ingress.yaml`);
+> the numeric prefix is the apply order. The broker and pool/AppTemplate manifests
+> live under `checkpoint-restore/controlplane/deploy/aio/`.
 
 ---
 
@@ -97,14 +100,22 @@ kubectl apply -f deploy/40-agentgateway-ingress.yaml # ALB Ingress (TLS)
   from the ConfigMap.
 - **Service** `agentgateway-svc`: ClusterIP `:3000`.
 - **Ingress** `agentgateway`: `alb`, **internet‑facing**, TLS 443 → `:3000`,
-  host `agentgateway.example.com`, health‑check path `/mcp` (success codes
+  host `agentgateway.example.com`, health‑check path `/aio/mcp` (success codes
   `200,400,401,406`). Requires an ACM cert ARN in the annotation — replace with
   your own.
 
 ### Configure — the `agentgateway-config` ConfigMap
 
-The config has one HTTP listener (`:3000`) and one route (`pathPrefix: /`) with
-three policies. Edit the ConfigMap to change behavior; the key knobs:
+The config has one HTTP listener (`:3000`) and **one route per app**. Each app
+gets two routes:
+
+- a data-path route `pathPrefix: /<app>/mcp` (e.g. `/aio/mcp`, `/everything/mcp`),
+- a discovery route `pathPrefix: /.well-known/oauth-protected-resource/<app>/mcp`,
+
+and each route uses a `requestHeaderModifier` to inject the `X-Sandbox-App`
+header the broker resolves (see §3), plus its own `resourceMetadata.resource`.
+There is **no** catch-all `/` route. Edit the ConfigMap to change behavior; the
+key knobs (shown for the `aio` app):
 
 **Identity (`mcpAuthentication`, mode `strict`):**
 
@@ -117,7 +128,7 @@ mcpAuthentication:
     url: https://keycloak.example.com/realms/sandbox/protocol/openid-connect/certs
   provider: { keycloak: {} }
   resourceMetadata:
-    resource: https://agentgateway.example.com/mcp
+    resource: https://agentgateway.example.com/aio/mcp
     authorization_servers:
       - https://keycloak.example.com/realms/sandbox
     scopesSupported: [openid, sandbox]
@@ -126,6 +137,7 @@ mcpAuthentication:
 
 Update `issuer`, `jwks.url`, `resource`, and `authorization_servers` to your
 Keycloak/DNS. `audiences` must match the `aud` your realm mints (`sandbox-router`).
+Each app's route sets its own `resource` (e.g. `.../aio/mcp`, `.../everything/mcp`).
 
 **Tool authorization (`mcpAuthorization.rules`)** — this is where you tune who can
 call what. Rules are OR'd; unauthorized tools are also hidden from `tools/list`:
@@ -185,6 +197,10 @@ docker push <registry>/aio-sandbox-broker-sandboxd:<tag>
 ### Deploy
 
 ```sh
+# generic pool + AppTemplates the broker fronts (SandboxTemplate aio-generic,
+# WarmPool aio-generic-pool, AppTemplates aio-app + everything-app)
+kubectl apply -f checkpoint-restore/controlplane/deploy/aio/generic-pool.yaml
+# the broker itself
 kubectl apply -f checkpoint-restore/controlplane/deploy/aio/broker-sandboxd.yaml
 ```
 
@@ -193,13 +209,15 @@ This creates Deployment `aio-sandbox-broker-sandboxd` (2 replicas, container
 
 ```yaml
 env:
-- { name: SANDBOXD_POOL,       value: aio-pool }
-- { name: SANDBOXD_ROUTER_URL, value: http://sandboxd-router.sandboxd-controlplane-system.svc.cluster.local:8080 }
+- { name: SANDBOXD_POOL,        value: aio-generic-pool }
+- { name: SANDBOXD_ROUTER_URL,  value: http://sandboxd-router.sandboxd-controlplane-system.svc.cluster.local:8080 }
+- { name: SANDBOXD_APPS,        value: '{"aio":{"appTemplate":"aio-app","pool":"aio-generic-pool","group":"sandbox-users"},"everything":{"appTemplate":"everything-app","pool":"aio-generic-pool","group":"sandbox-power"}}' }
+- { name: SANDBOXD_DEFAULT_APP, value: aio }
 ```
 
 > Note: `broker-sandboxd.yaml` ships only a Deployment — no Service. The Service
-> `aio-sandbox-broker-svc` is shared with the older broker and is where cutover
-> happens (below).
+> `aio-sandbox-broker-svc` selects the broker pods and is where cutover happens
+> (below).
 
 ### Configuration — all broker environment variables
 
@@ -208,52 +226,72 @@ code, so you can run with almost none set.
 
 | Env var | Default | Meaning |
 |---------|---------|---------|
-| `SANDBOXD_POOL` | `aio-pool` | Value sent as `X-Session-Pool`; selects the pool/template a new session uses. |
+| `SANDBOXD_APPS` | (unset) | JSON registry mapping app-id → `{appTemplate, pool, group}`. When set, the broker runs in **multi-app mode**: it reads the `X-Sandbox-App` request header (injected by agentgateway's per-app route), resolves it to that app's `pool` + `appTemplate`, and **enforces** the app's required Keycloak `group` (returns `403` if the caller isn't in it). See example below. |
+| `SANDBOXD_DEFAULT_APP` | (unset) | Fallback app-id used when a request omits `X-Sandbox-App` (multi-app mode). |
+| `SANDBOXD_APP` | (unset) | **Single-app / generic-pool mode.** The AppTemplate name to run on a generic pool, sent as `X-Session-App`. Used only when `SANDBOXD_APPS` is unset. |
+| `SANDBOXD_POOL` | `aio-pool` | Value sent as `X-Session-Pool`; selects the pool a new session uses (**capacity**). On a **generic** pool the workload comes from `SANDBOXD_APP`/`SANDBOXD_APPS`; on a **dedicated** pool the pool's own SandboxTemplate image is used. |
 | `SANDBOXD_ROUTER_URL` | `http://sandboxd-router.sandboxd-controlplane-system.svc.cluster.local:8080` | Router base URL; broker POSTs `/mcp` and `/_warm` here. Trailing slash stripped. |
 | `AIO_OIDC_ISSUER` | `https://keycloak.example.com/realms/sandbox` | Required JWT issuer; also derives the JWKS URL (`{issuer}/protocol/openid-connect/certs`). |
 | `AIO_EXPECTED_AUDIENCE` | `sandbox-router` | Required JWT `aud`. |
 | `AIO_GATEWAY_AZP` | `aio-sandbox-client` | Required JWT `azp` (proves the token came via the gateway client). |
-| `AIO_REQUIRED_GROUP` | `sandbox-users` | Group the JWT `groups` claim must contain. |
+| `AIO_REQUIRED_GROUP` | `sandbox-users` | Baseline group the JWT `groups` claim must contain. In multi-app mode each app additionally enforces its own `group`. |
 | `SANDBOXD_MAX_SESSIONS_PER_USER` | `1` | Intended per‑user session cap. **Read but not enforced** in the current code (each principal maps to exactly one durable session anyway). |
-| `AIO_MCP_PROTOCOL_VERSION` | `2025-11-25` | MCP protocol version advertised in the `initialize` response. |
+| `AIO_MCP_PROTOCOL_VERSION` | `2025-11-25` | MCP protocol version the broker sends when forwarding the `initialize` request to the sandbox. |
+
+**Multi-app registry** — example `SANDBOXD_APPS` value fronting two apps on the
+same generic pool (`aio` for standard users, `everything` for power users):
+
+```json
+{"aio":{"appTemplate":"aio-app","pool":"aio-generic-pool","group":"sandbox-users"},"everything":{"appTemplate":"everything-app","pool":"aio-generic-pool","group":"sandbox-power"}}
+```
+
+> **Legacy single-app mode.** With `SANDBOXD_APPS` **unset**, the broker uses
+> `SANDBOXD_POOL` + `SANDBOXD_APP` and ignores `X-Sandbox-App`.
 
 If you deploy Keycloak under different DNS or a different realm/client/audience,
 set the `AIO_*` vars in the broker Deployment to match — otherwise the broker's
 own JWT re‑validation will reject tokens.
+
+> **Private-ECR app images.** If an AppTemplate references a private-ECR image
+> (e.g. `everything-app`), the sandboxd worker authenticates its containerd image
+> pulls to ECR using the worker's EKS Pod Identity, which requires ECR read perms
+> on the worker role (`sandboxd-worker-checkpoint`) — documented in
+> [install-guide-sandboxd.md](install-guide-sandboxd.md).
 
 ### Health
 
 - `GET /healthz` → `200` (readiness probe).
 - MCP is served at the **root path** `/` (POST for calls, DELETE is a `204`
   no‑op).
+- The broker is a **transparent MCP proxy**: it forwards `initialize` and all
+  other methods to the sandbox and relays the `Mcp-Session-Id` header, so it
+  supports stateful MCP servers (not just AIO) — it does not answer `initialize`
+  locally.
 
 ---
 
 ## 4. The public front door (ALB) and cutover
 
-The public endpoint is an ALB Ingress → the shared broker Service
-`aio-sandbox-broker-svc` → broker pods (selected by label). Cutting traffic
-between broker implementations is a **Service‑selector patch** — no DNS or client
-change.
+The public endpoint is an ALB Ingress → the broker Service
+`aio-sandbox-broker-svc` → broker pods (selected by label). Pointing traffic at a
+given broker Deployment is a **Service‑selector patch** — no DNS or client change.
 
-### Cut over to the sandboxd broker
+### Point the Service at the sandboxd broker
 
 ```sh
 kubectl patch svc aio-sandbox-broker-svc -n default --type=merge \
   -p '{"spec":{"selector":{"app":"aio-sandbox-broker-sandboxd"}}}'
 ```
 
-### Roll back to the previous broker
-
-```sh
-kubectl patch svc aio-sandbox-broker-svc -n default --type=merge \
-  -p '{"spec":{"selector":{"app":"aio-sandbox-broker"}}}'
-```
-
 Clients need no change — same endpoint, same OAuth.
 
-> The primary internet‑facing path is `agentgateway.example.com/mcp` (through
-> agentgateway, with the tool allowlist). There is also an internal ALB
+> The former agent-sandbox broker (`broker_mcp.py`) and its manifests have been
+> **retired** (moved to `delete_me/`); `aio-sandbox-broker-sandboxd` is now the
+> only broker.
+
+> The primary internet‑facing paths are the per-app routes
+> `agentgateway.example.com/aio/mcp` and `agentgateway.example.com/everything/mcp`
+> (through agentgateway, with the tool allowlist). There is also an internal ALB
 > `broker.example.com` that reaches the broker directly (JWT still enforced by
 > the broker, but **no** tool allowlist). The internal ingress currently has no
 > manifest under `deploy/`; if you rely on it, add it to IaC.
@@ -265,8 +303,15 @@ Clients need no change — same endpoint, same OAuth.
 1. **Front door reachable + demands auth:**
 
    ```sh
-   curl -s -o /dev/null -w '%{http_code}\n' https://agentgateway.example.com/mcp
+   curl -s -o /dev/null -w '%{http_code}\n' https://agentgateway.example.com/aio/mcp
    # expect 401 (unauthenticated) — proves the edge is up and enforcing
+   ```
+
+   OAuth discovery for the `aio` app should return its resource metadata:
+
+   ```sh
+   curl -s https://agentgateway.example.com/.well-known/oauth-protected-resource/aio/mcp
+   # expect JSON with "resource": "https://agentgateway.example.com/aio/mcp"
    ```
 
 2. **Broker healthy in‑cluster** (from a debug pod):
@@ -278,10 +323,12 @@ Clients need no change — same endpoint, same OAuth.
    ```
 
 3. **Full path with a real client:** connect Claude Code to
-   `https://agentgateway.example.com/mcp` (see
+   `https://agentgateway.example.com/aio/mcp` (see
    [end-user-guide-broker.md](end-user-guide-broker.md)), authenticate, and confirm
    tools appear. A `sandbox-users` account should NOT see
    `sandbox_execute_bash`/`sandbox_execute_code`; a `sandbox-power` account should.
+   The `everything` app is reachable at `.../everything/mcp` and requires the
+   `sandbox-power` group.
 
 4. **Warm path:** on `initialize` the broker fires `/_warm`; confirm the session's
    pool provisions/holds a worker (see the control‑plane admin guide for

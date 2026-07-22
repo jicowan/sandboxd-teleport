@@ -1,71 +1,80 @@
-# AIO on sandboxd — reproducible deploy
+# AIO (+ multi-app) on sandboxd — reference front door deploy
 
-Runs the AIO sandbox image (`ghcr.io/agent-infra/sandbox`) as a **nested gVisor
-sandbox** under the sandboxd control plane, fronted by the sandboxd broker so a
-Claude MCP client teleports its own durable session.
+Runs sandbox "apps" as **nested gVisor sandboxes** on a **generic pool** under the
+sandboxd control plane, fronted by the sandboxd reference broker + agentgateway so a
+Claude MCP client teleports its own durable session per app.
 
-Full path:
+Full path (multi-app):
 
 ```
-Claude --MCP+OAuth--> agentgateway --(passthrough JWT)--> broker_sandboxd
-   --X-Session-ID + X-Session-Pool--> sandboxd router
-   --resume--> operator --> sandboxd worker (nested gVisor AIO) --> MCP tools
+Claude --MCP+OAuth--> agentgateway (per-app route: /<app>/mcp, injects X-Sandbox-App)
+   --(passthrough JWT + X-Sandbox-App)--> broker_sandboxd
+   --X-Session-ID + X-Session-Pool + X-Session-App--> sandboxd router
+   --resume--> operator (lazily creates Session{poolRef, appRef}) --> worker
+   --> nested gVisor sandbox (the app's image) --> MCP tools
 ```
+
+The broker transparently proxies MCP (forwards `initialize` + relays the sandbox's
+`Mcp-Session-Id`), so any MCP server works — not just AIO.
+
+## Files
+
+| File | What |
+|------|------|
+| `generic-pool.yaml` | The **generic pool** (`SandboxTemplate aio-generic` = worker‑shape only, **no image**; `WarmPool aio-generic-pool`) + the **AppTemplates** (`aio-app`, `everything-app`). This is the current model. |
+| `broker-sandboxd.yaml` | The reference front‑door broker (`broker/broker_sandboxd.py`, built from `broker/Dockerfile.sandboxd`). Its `SANDBOXD_APPS` env maps app‑id → {appTemplate, pool, group}. |
+| `aio-pool.yaml` | **Legacy** single dedicated AIO pool (`SandboxTemplate` with a pinned image + `WarmPool aio-pool`). Kept for reference; the generic pool supersedes it. |
+
+The shared front‑door infra (Keycloak realm, agentgateway multi‑app routes + its
+ingress) is in the repo‑root `deploy/` (`00-keycloak-realm.yaml`,
+`30-agentgateway.yaml`, `40-agentgateway-ingress.yaml`).
 
 ## Prerequisites
 
 - The control plane is deployed (see `../smoke/controlplane.yaml`): operator,
   router, Valkey in `sandboxd-controlplane-system`.
 - gVisor worker nodes labeled `sandbox=gvisor` (+ the matching taint toleration).
-- The images referenced below are pushed to ECR.
+- The images referenced are pushed to ECR. A **private‑ECR** app image (e.g.
+  `everything-app`) also needs the worker role's `ecr-pull` policy (see the install
+  guide) so the worker can pull it.
 
 ## Apply
 
 ```sh
-# 1. AIO pool (SandboxTemplate + WarmPool) in the control-plane's session namespace
-kubectl apply -f aio-pool.yaml
+# 1. Generic pool + AppTemplates (in the control plane's session namespace)
+kubectl apply -f generic-pool.yaml
 
-# 2. The sandboxd broker, deployed side-by-side with any existing broker
+# 2. The sandboxd reference broker
 kubectl apply -f broker-sandboxd.yaml
 ```
 
-`aio-pool.yaml` notes:
-- image `ghcr.io/agent-infra/sandbox:latest`, port 8080, health `GET /v1/health`.
-- `idle.timeoutSeconds: 600` (checkpoint→S3 after 10m idle; teleport-resumes on
-  reconnect).
-- `replicas: 4, minIdle: 2` — warm headroom (AIO cold start is ~40-45s: image
-  pull + Chrome boot).
-- scheduling pins to gVisor nodes and spreads across nodes (`minDomains: 2`).
+Then apply the shared front door from repo‑root `deploy/` (Keycloak realm,
+agentgateway, ingress) if not already up.
 
-## Cut traffic over to this broker
+### Adding another app
 
-The public front door is an ALB Ingress (`broker.example.com`) → Service
-`aio-sandbox-broker-svc` → broker pods (by label). Flip the Service selector:
-
-```sh
-# cut over to the sandboxd broker
-kubectl patch svc aio-sandbox-broker-svc -n default --type=merge \
-  -p '{"spec":{"selector":{"app":"aio-sandbox-broker-sandboxd"}}}'
-
-# ROLLBACK to the original agent-sandbox broker
-kubectl patch svc aio-sandbox-broker-svc -n default --type=merge \
-  -p '{"spec":{"selector":{"app":"aio-sandbox-broker"}}}'
-```
-
-The Claude client needs **no config change** — same endpoint/OAuth.
+1. Push the app's image (it must serve **Streamable‑HTTP MCP at `/mcp`** on its
+   container port; private ECR is fine with the worker `ecr-pull` policy).
+2. Add an `AppTemplate` (in `generic-pool.yaml`) with its image/ports/health/idle.
+3. Add the app to the broker's `SANDBOXD_APPS` (`{appTemplate, pool, group}`).
+4. Add an agentgateway route pair for it (`/<app>/mcp` data + its
+   `/.well-known/oauth-protected-resource/<app>` discovery), injecting
+   `X-Sandbox-App: <app>` — see `deploy/30-agentgateway.yaml`.
+5. Client registers `https://<gw>/<app>/mcp` as a new MCP server.
 
 ## Notes / gotchas learned
 
-- **First tool call is slow (~45s)** while AIO cold-starts, unless the session is
-  pre-warmed. The broker warms on MCP `initialize`; still, a client with a short
-  per-request timeout may need one retry on a truly cold session.
-- **Keep `minIdle` >= expected concurrent new-session rate.** A cold-start `503`
-  (no idle worker) can poison an MCP client's cached tool list — the client shows
-  "connected · tools fetch failed" and needs a reconnect/re-auth to recover. Sizing
-  `minIdle` so a new session almost always finds a warm worker avoids the 503
-  entirely. This matters most for slow-booting images (AIO ~45s): without headroom,
-  the first user of a saturated pool eats the cold start AND may hit 503.
-- **Capacity**: a new session needs an idle worker. `minIdle` keeps headroom; if
-  the pool is saturated a new session gets `503 Retry-After`.
-- The resume/warm-up deadline defaults to 90s (`SANDBOXD_RESUME_DEADLINE_SECONDS`)
-  — must exceed AIO cold start.
+- **First tool call is slow (~45s)** on a truly cold AIO session (image pull +
+  Chrome boot). A client with a short per‑request timeout may need one retry; the
+  session is warm afterward. Keep `minIdle` ≥ the expected concurrent new‑session
+  rate so new sessions find a warm worker (a cold‑start `503` can poison a client's
+  cached tool list → "connected · tools fetch failed"; reconnect/re‑auth recovers).
+- **Generic vs dedicated pool:** a generic pool's `SandboxTemplate` has **no image**
+  (worker‑shape only) and runs whatever `AppTemplate` the session's `appRef` names; a
+  dedicated pool pins one image and takes `poolRef`‑only sessions. See
+  [docs/sandboxd/admin-guide-crds.md](../../../../docs/sandboxd/admin-guide-crds.md)
+  and [docs/PRD-arbitrary-image-sessions.md §13](../../../../docs/PRD-arbitrary-image-sessions.md).
+- The resume/warm‑up deadline defaults to 90s (`SANDBOXD_RESUME_DEADLINE_SECONDS`) —
+  must exceed AIO cold start.
+- A **private‑ECR** workload image fails at `/run` with `502` (containerd `401`)
+  unless the worker role has the `ecr-pull` policy (install guide, Step 1).

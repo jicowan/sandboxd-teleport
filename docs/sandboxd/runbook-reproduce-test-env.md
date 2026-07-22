@@ -330,10 +330,12 @@ kubectl delete pod toolbox -n default
 
 To reproduce what an end user sees, add the front door and connect a real client:
 
-1. Deploy Keycloak realm, agentgateway, and the broker —
-   [admin-guide-broker.md](admin-guide-broker.md).
-2. Cut the broker Service selector to the sandboxd broker.
-3. Connect Claude Code to `https://<your-gateway-host>/mcp` and authenticate —
+1. Deploy Keycloak realm, agentgateway (multi‑app routes), the sandboxd broker, and
+   the generic pool + AppTemplates — [admin-guide-broker.md](admin-guide-broker.md).
+2. Ensure the `aio-sandbox-broker-svc` Service selects the sandboxd broker
+   (`app: aio-sandbox-broker-sandboxd`).
+3. Connect Claude Code to a per‑app endpoint, e.g.
+   `https://<your-gateway-host>/aio/mcp` (or `/everything/mcp`), and authenticate —
    [end-user-guide-broker.md](end-user-guide-broker.md).
 4. Ask Claude to run a tool; confirm it executes in your sandbox and that state
    persists across a reconnect.
