@@ -58,7 +58,8 @@ type TemplateSpec struct {
 // via TemplateLookup) or an inline arbitrary image (O6). Exactly one path is used.
 type SessionPlan struct {
 	Pool         string // pool to claim a worker from
-	TemplateName string // "" when inline image mode
+	TemplateName string // SandboxTemplate config source (dedicated pool); "" otherwise
+	AppName      string // AppTemplate config source (generic pool via appRef); "" otherwise
 	Image        string // inline image (arbitrary-image mode), else ""
 	Cmd          []string
 	Env          []string
@@ -132,13 +133,23 @@ func (nopMirror) Delete(context.Context, string)                  {}
 // Workflow runs the Resume operation. Construct once, call Resume per request.
 type Workflow struct {
 	kv        *assign.Client
-	lookup    TemplateLookup
+	lookup    TemplateLookup // resolves a SandboxTemplate name (dedicated-pool config)
+	appLookup TemplateLookup // resolves an AppTemplate name (generic-pool appRef config); optional
 	clientFor WorkerClientFactory
 	planFor   PlanFunc
 	notify    assign.PoolNotifier
 	mirror    SessionMirror
 	sem       chan struct{} // resume concurrency limiter; nil = unlimited
 	opts      Options
+}
+
+// WithAppLookup wires the AppTemplate resolver used when a plan carries AppName
+// (a Session's appRef → AppTemplate; docs/PRD-arbitrary-image-sessions.md §13).
+// Optional: when unset, a plan.AppName is treated as unresolvable (an error at
+// cold start), so appRef sessions require this to be wired. Returns wf for chaining.
+func (wf *Workflow) WithAppLookup(l TemplateLookup) *Workflow {
+	wf.appLookup = l
+	return wf
 }
 
 // New builds a Workflow. planFor resolves a session id (+subject, +pool hint) to
@@ -278,10 +289,21 @@ func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint string) (
 	cmd, env, ports, health := plan.Cmd, plan.Env, plan.Ports, plan.Health
 	roleARN := plan.IAMRoleARN
 	idleTimeout, ckptInterval := 0, 0
-	if plan.TemplateName != "" {
-		tmpl, terr := wf.lookup(ctx, plan.TemplateName)
+	// Resolve the config template: a SandboxTemplate (dedicated pool, plan.TemplateName)
+	// OR an AppTemplate (generic pool via appRef, plan.AppName). At most one is set
+	// (planFor enforces the precedence image > appRef > pool's template). Both resolve
+	// into the same TemplateSpec, so the merge below is identical for either kind.
+	if plan.TemplateName != "" || plan.AppName != "" {
+		lookup, name := wf.lookup, plan.TemplateName
+		if plan.AppName != "" {
+			if wf.appLookup == nil {
+				return "", metrics.KindColdStart, false, fmt.Errorf("appRef %q requested but no AppTemplate resolver wired", plan.AppName)
+			}
+			lookup, name = wf.appLookup, plan.AppName
+		}
+		tmpl, terr := lookup(ctx, name)
 		if terr != nil {
-			return "", metrics.KindColdStart, false, fmt.Errorf("lookup template %q: %w", plan.TemplateName, terr)
+			return "", metrics.KindColdStart, false, fmt.Errorf("lookup template %q: %w", name, terr)
 		}
 		img = tmpl.Image
 		if len(cmd) == 0 {

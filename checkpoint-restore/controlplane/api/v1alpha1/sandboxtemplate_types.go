@@ -28,8 +28,15 @@ import (
 type SandboxTemplateSpec struct {
 	// image is the OCI image run AS THE SANDBOX (nested gVisor workload), not the
 	// worker pod image.
-	// +kubebuilder:validation:Required
-	Image string `json:"image"`
+	//
+	// OPTIONAL as of the generic-pool model (docs/PRD-arbitrary-image-sessions.md §13):
+	//   - SET   => a DEDICATED pool that runs ONLY this image (poolRef-only sessions
+	//              get it; this is the classic/original behavior — aio, redis, etc.).
+	//   - EMPTY => a GENERIC pool: worker-shape (scheduling/resources) only, running
+	//              whatever workload a Session brings via spec.appRef (an AppTemplate).
+	// Leaving it empty is how you declare capacity that many apps can share.
+	// +optional
+	Image string `json:"image,omitempty"`
 
 	// cmd overrides the image entrypoint+cmd (optional; image default otherwise).
 	// +optional

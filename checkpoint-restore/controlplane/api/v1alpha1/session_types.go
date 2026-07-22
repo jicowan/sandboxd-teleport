@@ -26,32 +26,34 @@ import (
 // for observability and a declarative create path for the front door.
 // The object's metadata.name is the session ID.
 type SessionSpec struct {
-	// poolRef selects a WarmPool — the session's CAPACITY source (which pool a worker
-	// is claimed from). In classic "template mode" (no image/templateRef set) the
-	// pool's own SandboxTemplate also supplies the workload config; on a GENERIC pool
-	// (WarmPool.spec.arbitraryImage) the pool provides only capacity and the workload
-	// comes from image or templateRef below (see docs/PRD-arbitrary-image-sessions.md
-	// §13). poolRef is the capacity source and is effectively always required — an
-	// image/templateRef session still needs a pool to run on.
+	// poolRef selects a WarmPool — the session's CAPACITY + PLACEMENT source (which
+	// pool a worker is claimed from). On a DEDICATED pool (its SandboxTemplate pins an
+	// image) poolRef alone runs that image. On a GENERIC pool (its SandboxTemplate has
+	// no image — worker-shape only) the pool supplies only capacity and the workload
+	// comes from appRef below (docs/PRD-arbitrary-image-sessions.md §13). poolRef is
+	// effectively always required — an appRef/image session still needs a pool to run
+	// on.
 	// +optional
 	PoolRef *LocalRef `json:"poolRef,omitempty"`
 
-	// image is a caller-supplied arbitrary image (arbitrary-image mode, O6):
-	// authz-gated at the front door before creation. When set it is the workload
-	// image directly; cmd/env/ports may accompany it. It is the session's CONFIG
-	// source, independent of poolRef (capacity). Mutually exclusive with templateRef.
+	// image is a caller-supplied arbitrary image (inline arbitrary-image mode, O6):
+	// admin/kubectl escape hatch, NOT exposed through the front door. When set it is
+	// the workload image directly; cmd/env/ports may accompany it. Highest-precedence
+	// workload source. Mutually exclusive with appRef.
 	// +optional
 	Image string `json:"image,omitempty"`
 
-	// templateRef optionally names a SandboxTemplate that supplies the workload CONFIG
+	// appRef optionally names an AppTemplate that supplies the WORKLOAD
 	// (image + cmd/env/ports/health/idle/checkpoint/iam), DECOUPLED from poolRef
-	// (capacity). This lets many curated templates run on one generic pool without a
-	// dedicated WarmPool per template (docs/PRD-arbitrary-image-sessions.md §13.3).
-	// Resolution precedence: image > templateRef > poolRef's own template. Mutually
-	// exclusive with image. Additive/optional: inert unless set, so classic poolRef
-	// and arbitrary-image sessions are unaffected.
+	// (capacity + placement). This is how a session runs a workload on a GENERIC pool
+	// (a WarmPool whose SandboxTemplate has no image): the pool supplies worker-shape,
+	// the AppTemplate supplies what to run (docs/PRD-arbitrary-image-sessions.md §13).
+	// An AppTemplate cannot specify scheduling — placement is always the pool's.
+	// Resolution precedence: image > appRef > poolRef's own (dedicated-pool) image.
+	// Mutually exclusive with image. Additive/optional: inert unless set, so classic
+	// poolRef and inline-image sessions are unaffected.
 	// +optional
-	TemplateRef *LocalRef `json:"templateRef,omitempty"`
+	AppRef *LocalRef `json:"appRef,omitempty"`
 
 	// cmd overrides the entrypoint for arbitrary-image mode.
 	// +optional

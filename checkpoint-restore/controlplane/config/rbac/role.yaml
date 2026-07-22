@@ -28,6 +28,15 @@ rules:
 - apiGroups:
   - core.sandboxd.io
   resources:
+  - apptemplates
+  - sandboxtemplates
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - core.sandboxd.io
+  resources:
   - basesnapshots
   - forksets
   - sessions
@@ -59,11 +68,3 @@ rules:
   - get
   - patch
   - update
-- apiGroups:
-  - core.sandboxd.io
-  resources:
-  - sandboxtemplates
-  verbs:
-  - get
-  - list
-  - watch

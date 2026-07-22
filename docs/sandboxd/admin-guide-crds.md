@@ -19,15 +19,27 @@ schema rejects the object without it.
 
 ## SandboxTemplate (`sbxt`)
 
-The operator‑authored blueprint. Its fields map onto the worker's `/run` and
-`/restore` request bodies (see [api-reference-sandboxd-worker.md](api-reference-sandboxd-worker.md)).
-Has a `status` subresource; no printer columns.
+The operator‑authored blueprint for a **pool**. It carries the pool's *worker‑shape*
+(scheduling/resources/workerImage) and, optionally, a pinned *workload* image. Its
+workload fields map onto the worker's `/run` and `/restore` request bodies (see
+[api-reference-sandboxd-worker.md](api-reference-sandboxd-worker.md)). Has a `status`
+subresource; no printer columns.
+
+> **Dedicated vs. generic pools (image is now optional).** Whether `.spec.image` is
+> set determines the pool's character:
+> - **`image` set → dedicated pool:** the pool runs *only* that one image;
+>   `poolRef`‑only Sessions get it (the classic behavior — `aio`, `redis`, etc.).
+> - **`image` empty → generic pool:** worker‑shape only. It runs whatever workload a
+>   Session brings via `spec.appRef` (an [AppTemplate](#apptemplate-appt)). Reach for a
+>   generic pool first; stand up a dedicated pool only when one image earns its own
+>   warm fleet or a distinct capacity class. See
+>   [PRD‑arbitrary‑image‑sessions §13](../PRD-arbitrary-image-sessions.md).
 
 ### `.spec`
 
 | Field | Type | Required | Default / validation | Meaning |
 |-------|------|----------|----------------------|---------|
-| `image` | string | **Yes** | — | OCI image run **as the sandbox** (the nested gVisor workload) — not the worker pod image. |
+| `image` | string | No | empty ⇒ **generic** pool | OCI image run **as the sandbox** (nested gVisor workload) — not the worker pod image. **Set ⇒ dedicated single‑image pool; empty ⇒ generic pool** (workload comes from a Session's `appRef`). |
 | `cmd` | []string | No | — | Overrides the image entrypoint+cmd. |
 | `env` | []string | No | — | Added to the sandbox process environment. |
 | `ports` | []PortMap | No | — | Exposed via the worker's DNAT (`podIP:host → interiorIP:container`). |
@@ -73,6 +85,57 @@ spec:
 > To pin workers to gVisor nodes you **must** set `scheduling.nodeSelector` +
 > `tolerations` — nothing is defaulted. Node spread across hosts needs
 > `minDomains: 2` (a plain `maxSkew` won't force scale‑up).
+
+---
+
+## AppTemplate (`appt`)
+
+The **workload half** of a sandbox definition, for use on **generic pools**. A
+`Session.spec.appRef` names an AppTemplate to run its workload; the pool
+(`poolRef`) supplies capacity + placement. AppTemplate is **deliberately
+scheduling‑free** — it has no `scheduling`/`resources`/`workerImage` fields, so an
+application *cannot* dictate worker placement (that's a pool property, by type). One
+AppTemplate is reusable across any generic pool (GPU, AZ‑pinned, standard). Has a
+`status` subresource; no printer columns. See
+[PRD‑arbitrary‑image‑sessions §13](../PRD-arbitrary-image-sessions.md).
+
+### `.spec`
+
+| Field | Type | Required | Default / validation | Meaning |
+|-------|------|----------|----------------------|---------|
+| `image` | string | **Yes** | — | OCI image run as the sandbox workload. |
+| `cmd` | []string | No | — | Overrides the image entrypoint+cmd. |
+| `env` | []string | No | — | Added to the sandbox process environment. |
+| `ports` | []PortMap | No | — | Exposed via the worker's DNAT. |
+| `health` | Health | No | — | Drives the worker readiness probe. |
+| `idle` | IdlePolicy | No | (see IdlePolicy) | Idle‑suspend behavior for sessions running this app. |
+| `checkpointIntervalSeconds` | int | No | `0` (disabled); min 0 | Periodic background checkpoints while Running. |
+| `iam` | IAMSpec | No | — | Lets the sandbox assume an AWS IAM role (`iam.roleArn`); a `Session` may override. Requires the operator's `--cred-token-secret`. |
+
+> **No `scheduling`, `resources`, or `workerImage`** — by design. Those are pool
+> properties on the pool's `SandboxTemplate`. An app runs on whatever generic pool it
+> is assigned to.
+
+### `.status`
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `conditions` | []metav1.Condition | Standard condition list (`listType=map` keyed by `type`). |
+
+### Example
+
+```yaml
+apiVersion: core.sandboxd.io/v1alpha1
+kind: AppTemplate
+metadata: { name: redis-app, namespace: default }
+spec:
+  image: docker.io/library/redis:7-alpine
+  ports: [{ container: 6379, host: 6379 }]
+  health: { probe: tcp, probePort: 6379 }
+  idle: { timeoutSeconds: 90, action: suspend }
+# Run it on a generic pool:
+#   Session.spec: { poolRef: {name: generic-pool}, appRef: {name: redis-app} }
+```
 
 ---
 
@@ -150,13 +213,14 @@ Printer columns: `Phase` (`.status.phase`), `Worker` (`.status.workerPodIP`).
 
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
-| `poolRef` | LocalRef | No | Selects a `WarmPool` (template mode). Mutually exclusive with `image`. |
-| `image` | string | No | Caller‑supplied arbitrary image (arbitrary‑image mode; authz‑gated at the front door before creation). Mutually exclusive with `poolRef`. |
-| `cmd` | []string | No | Entrypoint override (arbitrary‑image mode). |
-| `env` | []string | No | Env (arbitrary‑image mode). |
-| `ports` | []PortMap | No | Ports (arbitrary‑image mode). |
+| `poolRef` | LocalRef | No | Selects a `WarmPool` — the session's **capacity + placement** source. Effectively always required (an `appRef`/`image` session still needs a pool to run on). On a *dedicated* pool, `poolRef` alone runs the pool's pinned image; on a *generic* pool it supplies only capacity and the workload comes from `appRef`. |
+| `appRef` | LocalRef | No | Names an [AppTemplate](#apptemplate-appt) supplying the **workload** (image + cmd/env/ports/health/idle/checkpoint/iam), **decoupled from the pool**. The way to run a workload on a generic pool. Mutually exclusive with `image`. Workload precedence: `image` > `appRef` > the pool's own (dedicated) image. |
+| `image` | string | No | Inline caller‑supplied arbitrary image (**admin/`kubectl` escape hatch**, not exposed through the front door). Highest‑precedence workload source. Mutually exclusive with `appRef`. |
+| `cmd` | []string | No | Entrypoint override (with inline `image`). |
+| `env` | []string | No | Env (with inline `image`). |
+| `ports` | []PortMap | No | Ports (with inline `image`). |
 | `subject` | string | No | Opaque identity the router matches the JWT‑derived subject against. |
-| `iam` | IAMSpec | No | Assume an AWS IAM role for this session's sandbox (`iam.roleArn`), overriding the pool template's `iam`. |
+| `iam` | IAMSpec | No | Assume an AWS IAM role for this session's sandbox (`iam.roleArn`), overriding the app/pool template's `iam`. |
 | `lifecycle` | SessionLifecycle | No | Overrides template idle/TTL for this session. |
 | `forkFrom` | ForkProvenance | No | Set by the `ForkSet` controller on a fork child: `{baseRef, snapshotURI}` records the base it was seeded from (snapshot source; empty for image forks). Makes the child self‑describing and is the base‑reclaim ref‑count key. Not set by hand. |
 | `suspendRequest` | string | No | **Edge‑triggered, one‑shot** request to checkpoint+suspend this session **now** (docs/PRD-on-demand-suspend.md). Set it to a fresh **opaque token** (uuid/timestamp/etc.); when it differs from `status.lastSuspendHandled` the operator performs exactly one checkpoint→S3→Suspended→free‑worker, then sets the watermark equal. It is **not** a level‑triggered desired‑state — reactive resume (a request to the router) may bring the session back to Running afterward and will **not** re‑suspend it (the token is already handled). Wait for `status.lastSuspendHandled == spec.suspendRequest && status.snapshotURI != ""` to know the snapshot is durable (e.g. before promoting a `BaseSnapshot`). |

@@ -90,7 +90,14 @@ Responsibilities:
 - **Reconcile pools → worker Deployments.** A `WarmPool` (bound to a
   `SandboxTemplate`) becomes a Deployment of worker pods. `minIdle` autoscaling
   raises the effective replica count to `max(spec.replicas, busy + minIdle)` so
-  warm headroom is maintained.
+  warm headroom is maintained. A pool's `SandboxTemplate` supplies **worker‑shape**
+  (scheduling/resources/workerImage); its `image` is optional — **set ⇒ a dedicated
+  single‑image pool** (`poolRef`‑only sessions get that image), **empty ⇒ a generic
+  pool** that runs whatever workload a Session names via `spec.appRef` (an
+  `AppTemplate` — the scheduling‑free workload half). Workload resolution precedence:
+  inline `image` > `appRef` (AppTemplate) > the pool's own dedicated image. Placement
+  is always a pool property; an app can't request scheduling. See
+  [PRD‑arbitrary‑image‑sessions §13](../PRD-arbitrary-image-sessions.md).
 - **Worker discovery.** A label‑scoped pod informer (`sandboxd.io/app=worker`)
   writes a `worker:<pod>` KV entry when a worker becomes Ready, and removes it when
   the pod dies. A 30s prune loop reconciles missed deletes.

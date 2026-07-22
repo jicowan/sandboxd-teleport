@@ -124,6 +124,13 @@ spec:
                 description: |-
                   image is the OCI image run AS THE SANDBOX (nested gVisor workload), not the
                   worker pod image.
+
+                  OPTIONAL as of the generic-pool model (docs/PRD-arbitrary-image-sessions.md §13):
+                    - SET   => a DEDICATED pool that runs ONLY this image (poolRef-only sessions
+                               get it; this is the classic/original behavior — aio, redis, etc.).
+                    - EMPTY => a GENERIC pool: worker-shape (scheduling/resources) only, running
+                               whatever workload a Session brings via spec.appRef (an AppTemplate).
+                  Leaving it empty is how you declare capacity that many apps can share.
                 type: string
               ports:
                 description: ports are exposed via the worker's DNAT (podIP:host ->
@@ -1375,8 +1382,6 @@ spec:
                   incompatible runsc, so a divergent override steps outside that guarantee.
                   Empty = use the operator's global default.
                 type: string
-            required:
-            - image
             type: object
           status:
             description: status defines the observed state of SandboxTemplate

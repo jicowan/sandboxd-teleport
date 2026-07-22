@@ -193,6 +193,7 @@ type WarmPoolReconciler struct {
 // +kubebuilder:rbac:groups=core.sandboxd.io,resources=warmpools/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.sandboxd.io,resources=warmpools/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core.sandboxd.io,resources=sandboxtemplates,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core.sandboxd.io,resources=apptemplates,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core.sandboxd.io,resources=sessions,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.sandboxd.io,resources=sessions/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete

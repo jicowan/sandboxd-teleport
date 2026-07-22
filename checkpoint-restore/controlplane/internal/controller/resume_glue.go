@@ -50,6 +50,13 @@ func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, h
 		}
 		return templateSpecFromCRD(&t), nil
 	}
+	appLookup := func(ctx context.Context, name string) (*resume.TemplateSpec, error) {
+		var a corev1alpha1.AppTemplate
+		if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &a); err != nil {
+			return nil, err
+		}
+		return appSpecFromCRD(&a), nil
+	}
 
 	planFor := func(ctx context.Context, sid, subject, poolHint string) (*resume.SessionPlan, error) {
 		// Resolve the plan from the Session CR. If none exists yet, lazily create
@@ -98,24 +105,25 @@ func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, h
 		if s.Spec.IAM != nil {
 			plan.IAMRoleARN = s.Spec.IAM.RoleARN
 		}
-		// Capacity is always the pool. Config source has a precedence
-		// (image > templateRef > pool's own template) resolved below.
+		// Capacity is always the pool. Workload source has a precedence
+		// (image > appRef > pool's own SandboxTemplate) resolved below
+		// (docs/PRD-arbitrary-image-sessions.md §13.3).
 		if s.Spec.PoolRef != nil {
 			plan.Pool = s.Spec.PoolRef.Name
 		}
 		switch {
-		case s.Spec.Image != "": // arbitrary-image mode (O6): inline image is the config.
+		case s.Spec.Image != "": // inline arbitrary image (admin/kubectl escape hatch, §12).
 			plan.Image = s.Spec.Image
-		case s.Spec.TemplateRef != nil: // config from a named template, DECOUPLED from the pool (§13.3).
-			plan.TemplateName = s.Spec.TemplateRef.Name
-		case s.Spec.PoolRef != nil: // classic template mode: the pool's own template supplies config.
+		case s.Spec.AppRef != nil: // generic-pool workload from an AppTemplate, decoupled from the pool.
+			plan.AppName = s.Spec.AppRef.Name
+		case s.Spec.PoolRef != nil: // dedicated-pool mode: the pool's own SandboxTemplate supplies the image.
 			tmplName, err := templateForPool(ctx, c, namespace, s.Spec.PoolRef.Name)
 			if err != nil {
 				return nil, err
 			}
 			plan.TemplateName = tmplName
 		default:
-			return nil, fmt.Errorf("session %q has neither poolRef, templateRef, nor image", sid)
+			return nil, fmt.Errorf("session %q has neither poolRef, appRef, nor image", sid)
 		}
 		if plan.Pool == "" {
 			return nil, fmt.Errorf("session %q resolves to no pool", sid)
@@ -131,6 +139,7 @@ func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, h
 	}
 
 	return resume.New(kv, lookup, clientFor, planFor, opts).
+		WithAppLookup(appLookup).
 		WithMirror(NewSessionMirror(c, namespace))
 }
 
@@ -148,17 +157,14 @@ func BuildSuspender(c client.Client, kv *assign.Client, namespace string, httpCl
 		if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: sid}, &s); err != nil {
 			return resume.IdlePolicy{}, err
 		}
-		// Session lifecycle idle timeout overrides the template's when set. The
-		// template is resolved via the shared precedence (image > templateRef >
-		// pool's template), so a templateRef/generic-pool session gets the same idle
+		// Session lifecycle idle timeout overrides the config's when set. The config
+		// policy is resolved via the shared precedence (image > appRef > pool's
+		// SandboxTemplate), so an appRef/generic-pool session gets the same idle
 		// policy it would from a dedicated pool.
 		var pol resume.IdlePolicy
-		if tmplName, terr := configTemplateForSession(ctx, c, namespace, &s); terr == nil && tmplName != "" {
-			var t corev1alpha1.SandboxTemplate
-			if e := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: tmplName}, &t); e == nil {
-				pol.TimeoutSeconds = t.Spec.Idle.TimeoutSeconds
-				pol.Action = t.Spec.Idle.Action
-			}
+		if cp, terr := configPolicyForSession(ctx, c, namespace, &s); terr == nil {
+			pol.TimeoutSeconds = cp.IdleTimeoutSeconds
+			pol.Action = cp.IdleAction
 		}
 		if s.Spec.Lifecycle.IdleTimeoutSeconds > 0 {
 			pol.TimeoutSeconds = s.Spec.Lifecycle.IdleTimeoutSeconds
@@ -183,21 +189,14 @@ func BuildCheckpointer(c client.Client, kv *assign.Client, namespace string, htt
 		if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: sid}, &s); err != nil {
 			return resume.CheckpointPolicy{}, err
 		}
-		// Resolve the config template via the shared precedence (image > templateRef
-		// > pool's template). No template (inline-image or pool-less) => no periodic
-		// checkpoint policy.
-		tmplName, terr := configTemplateForSession(ctx, c, namespace, &s)
+		// Resolve the config policy via the shared precedence (image > appRef >
+		// pool's SandboxTemplate). No template (inline-image or pool-less) => no
+		// periodic checkpoint policy.
+		cp, terr := configPolicyForSession(ctx, c, namespace, &s)
 		if terr != nil {
 			return resume.CheckpointPolicy{}, terr
 		}
-		if tmplName == "" {
-			return resume.CheckpointPolicy{}, nil
-		}
-		var t corev1alpha1.SandboxTemplate
-		if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: tmplName}, &t); err != nil {
-			return resume.CheckpointPolicy{}, err
-		}
-		return resume.CheckpointPolicy{IntervalSeconds: t.Spec.CheckpointIntervalSeconds}, nil
+		return resume.CheckpointPolicy{IntervalSeconds: cp.CheckpointIntervalSeconds}, nil
 	}
 	return resume.NewCheckpointer(kv, clientFor, policyFor, 0, nil).
 		WithMirror(NewSessionMirror(c, namespace))
@@ -292,24 +291,51 @@ func templateForPool(ctx context.Context, c client.Client, ns, pool string) (str
 	return wp.Spec.TemplateRef.Name, nil
 }
 
-// configTemplateForSession returns the SandboxTemplate name that supplies a
-// session's workload CONFIG (idle/checkpoint policy, etc.), following the
-// image > templateRef > pool's-own-template precedence (§13.3). Returns ("", nil)
-// when the config is not template-derived — an inline-image session
-// (s.Spec.Image set), or a session with no pool to resolve — so callers treat an
-// empty name as "no template policy to apply" rather than an error. This is the
-// single resolver the suspender and checkpointer share so their policy lookups
-// honor templateRef identically to the resume path.
-func configTemplateForSession(ctx context.Context, c client.Client, ns string, s *corev1alpha1.Session) (string, error) {
+// sessionConfigPolicy is the idle + periodic-checkpoint policy a session inherits
+// from its workload config source (an AppTemplate via appRef, or the pool's
+// SandboxTemplate). Zero value = no policy (e.g. an inline-image session).
+type sessionConfigPolicy struct {
+	IdleTimeoutSeconds        int
+	IdleAction                string
+	CheckpointIntervalSeconds int
+}
+
+// configPolicyForSession resolves a session's idle/checkpoint policy from its
+// workload CONFIG source, following the same precedence as the resume path
+// (image > appRef > pool's own SandboxTemplate; §13.3). It is the single resolver
+// the suspender and checkpointer share so their policy lookups honor appRef
+// identically to cold start. Returns a zero policy (no error) when the config is
+// not template-derived: an inline-image session, or a session with no pool.
+func configPolicyForSession(ctx context.Context, c client.Client, ns string, s *corev1alpha1.Session) (sessionConfigPolicy, error) {
 	switch {
 	case s.Spec.Image != "":
-		return "", nil // inline image: no template config
-	case s.Spec.TemplateRef != nil:
-		return s.Spec.TemplateRef.Name, nil
+		return sessionConfigPolicy{}, nil // inline image: no template policy
+	case s.Spec.AppRef != nil:
+		var a corev1alpha1.AppTemplate
+		if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: s.Spec.AppRef.Name}, &a); err != nil {
+			return sessionConfigPolicy{}, err
+		}
+		return sessionConfigPolicy{
+			IdleTimeoutSeconds:        a.Spec.Idle.TimeoutSeconds,
+			IdleAction:                a.Spec.Idle.Action,
+			CheckpointIntervalSeconds: a.Spec.CheckpointIntervalSeconds,
+		}, nil
 	case s.Spec.PoolRef != nil:
-		return templateForPool(ctx, c, ns, s.Spec.PoolRef.Name)
+		tmplName, err := templateForPool(ctx, c, ns, s.Spec.PoolRef.Name)
+		if err != nil {
+			return sessionConfigPolicy{}, err
+		}
+		var t corev1alpha1.SandboxTemplate
+		if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: tmplName}, &t); err != nil {
+			return sessionConfigPolicy{}, err
+		}
+		return sessionConfigPolicy{
+			IdleTimeoutSeconds:        t.Spec.Idle.TimeoutSeconds,
+			IdleAction:                t.Spec.Idle.Action,
+			CheckpointIntervalSeconds: t.Spec.CheckpointIntervalSeconds,
+		}, nil
 	default:
-		return "", nil
+		return sessionConfigPolicy{}, nil
 	}
 }
 
@@ -337,6 +363,36 @@ func templateSpecFromCRD(t *corev1alpha1.SandboxTemplate) *resume.TemplateSpec {
 		// Map the template idle policy onto the worker's idle-timeout field.
 		if t.Spec.Idle.TimeoutSeconds > 0 {
 			ts.Health.IdleTimeoutSec = t.Spec.Idle.TimeoutSeconds
+		}
+	}
+	return ts
+}
+
+// appSpecFromCRD maps an AppTemplate onto the same resume.TemplateSpec the resolver
+// consumes, so an appRef workload resolves identically to a SandboxTemplate one
+// (docs/PRD-arbitrary-image-sessions.md §13). AppTemplate has no worker-shape fields,
+// so only the workload subset is mapped.
+func appSpecFromCRD(a *corev1alpha1.AppTemplate) *resume.TemplateSpec {
+	ts := &resume.TemplateSpec{
+		Image: a.Spec.Image,
+		Cmd:   a.Spec.Cmd,
+		Env:   a.Spec.Env,
+		Ports: portsFromCRD(a.Spec.Ports),
+	}
+	if a.Spec.IAM != nil {
+		ts.IAMRoleARN = a.Spec.IAM.RoleARN
+	}
+	ts.IdleTimeoutSeconds = a.Spec.Idle.TimeoutSeconds
+	ts.CheckpointIntervalSeconds = a.Spec.CheckpointIntervalSeconds
+	if a.Spec.Health != nil {
+		ts.Health = &sbxapi.Health{
+			RestartPolicy: a.Spec.Health.RestartPolicy,
+			Probe:         a.Spec.Health.Probe,
+			ProbePort:     a.Spec.Health.ProbePort,
+			ProbePath:     a.Spec.Health.ProbePath,
+		}
+		if a.Spec.Idle.TimeoutSeconds > 0 {
+			ts.Health.IdleTimeoutSec = a.Spec.Idle.TimeoutSeconds
 		}
 	}
 	return ts
