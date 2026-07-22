@@ -1,9 +1,38 @@
 # PRD — broker: let a Claude client run different sandboxes (multi-app)
 
-Status: **Proposed / not started.** Drafted 2026-07-22, to revisit. Grounded in the
-shipped generic-pool + AppTemplate model (see
-[PRD-arbitrary-image-sessions.md §13](./PRD-arbitrary-image-sessions.md) and
+Status: **Level B IMPLEMENTED in the broker 2026-07-22 (not yet deployed);** agentgateway
+per-app routes + live test pending. Grounded in the shipped generic-pool + AppTemplate
+model (see [PRD-arbitrary-image-sessions.md §13](./PRD-arbitrary-image-sessions.md) and
 [[sandboxd-generic-pools]]) and the live `broker/broker_sandboxd.py`.
+
+## 0. As-built decision (2026-07-22) — app selection lives in agentgateway, not the broker path
+
+The original §4.1 idea was "broker maps the request PATH → app." That does **not** work as
+written, because **agentgateway is MCP-aware**: it terminates MCP, does tool-authz, and
+forwards to the broker as a single `mcp` backend at host `/` — the client's path
+(`/aio`, `/devbox`) does **not** pass through to the broker. Verified against agentgateway's
+docs, the clean realization is instead:
+
+- **agentgateway (config only):** one **route per app**, each matching a path prefix
+  (`/aio`, `/devbox`), each attaching a `requestHeaderModifier` that **injects
+  `X-Sandbox-App: <app>`**, all pointing at the *same* broker backend. Claude Code
+  registers each app as a separate MCP server (`…/aio`, `…/devbox`).
+- **broker:** reads the `X-Sandbox-App` header (NOT the path), resolves it via a registry
+  to `(pool, AppTemplate)`, **enforces the app's required Keycloak group** (the header is
+  a hint; the group check is the security boundary), folds the app into the session id,
+  and sends the resolved `X-Session-App` downstream to the router.
+
+No router/operator/CRD change — a per-app session is a normal `appRef` session. This is the
+Header + group-ACL option, and it moves most of the selection logic into agentgateway config
+rather than broker code.
+
+**Implemented (broker):** `SANDBOXD_APPS` JSON registry (app-id → {appTemplate, pool, group}),
+`_resolve_app()` (entitlement-enforcing), `X-Sandbox-App` header on the handler,
+`_sid_for(..., app_key=)` folding the app into the durable id, and per-request pool/app
+threaded through `_warm`/`_forward`/`_session_headers`. Legacy single-app mode (SANDBOXD_APPS
+unset) is byte-identical to before (same principal-only sid). Tests:
+`broker/test_broker_sandboxd_multiapp.py` (5, all pass). **Remaining:** agentgateway per-app
+routes + rebuild/deploy + live multi-app test.
 
 ## 1. Problem
 

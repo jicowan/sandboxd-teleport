@@ -56,15 +56,55 @@ POOL = os.environ.get("SANDBOXD_POOL", "aio-pool")
 # is a generic pool. See docs/PRD-arbitrary-image-sessions.md §13.
 APP = os.environ.get("SANDBOXD_APP", "")
 
+# Multi-app mode (docs/PRD-broker-multi-app.md, Level B). SANDBOXD_APPS is a JSON map
+# of app-id -> {appTemplate, pool, group}, letting ONE broker front several sandbox
+# apps. The app-id arrives per request in the X-Sandbox-App header, which an
+# agentgateway per-app route injects (route /aio -> add X-Sandbox-App: aio). The broker
+# resolves the id -> (pool, AppTemplate) and ENFORCES the app's required Keycloak group
+# (the header is a hint; this group check is the security boundary). Example:
+#   SANDBOXD_APPS='{"aio":{"appTemplate":"aio-app","pool":"aio-generic-pool","group":"sandbox-users"},
+#                   "devbox":{"appTemplate":"devbox-app","pool":"aio-generic-pool","group":"sandbox-power"}}'
+# When SANDBOXD_APPS is UNSET, the broker runs in legacy SINGLE-app mode using POOL/APP
+# above (the X-Sandbox-App header is ignored) — existing deploys are unchanged.
+_APPS_RAW = os.environ.get("SANDBOXD_APPS", "").strip()
+try:
+    APPS = json.loads(_APPS_RAW) if _APPS_RAW else {}
+except ValueError as _e:
+    raise SystemExit(f"SANDBOXD_APPS is not valid JSON: {_e}")
+# Fallback app-id when a multi-app request omits X-Sandbox-App (optional).
+DEFAULT_APP_ID = os.environ.get("SANDBOXD_DEFAULT_APP", "").strip()
 
-def _session_headers(sid: str) -> dict:
+
+def _resolve_app(app_id: Optional[str], groups: list) -> tuple:
+    """Resolve a request's (app_key, pool, app_template), enforcing entitlement.
+
+    Legacy mode (SANDBOXD_APPS unset): ignore app_id, use env POOL/APP; app_key="" so
+    the session id stays principal-only (unchanged behavior).
+
+    Multi-app mode: map the X-Sandbox-App id via the registry, require the app's
+    Keycloak group, and return that app's pool + AppTemplate."""
+    if not APPS:
+        return ("", POOL, APP)
+    key = (app_id or DEFAULT_APP_ID).strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="No app selected (missing X-Sandbox-App and no default).")
+    entry = APPS.get(key)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Unknown app '{key}'.")
+    grp = entry.get("group")
+    if grp and grp not in groups:
+        raise HTTPException(status_code=403, detail=f"Not authorized for app '{key}': missing group '{grp}'.")
+    return (key, entry.get("pool") or POOL, entry.get("appTemplate") or "")
+
+
+def _session_headers(sid: str, pool: str, app_template: str) -> dict:
     """Routing headers the broker sends to the sandboxd router: session id, the
     pool (capacity), and — on a generic pool — the AppTemplate (workload). The
     control plane uses pool+app only to lazily create the Session CR on first
     contact; both are ignored once the session exists."""
-    h = {"X-Session-ID": sid, "X-Session-Pool": POOL}
-    if APP:
-        h["X-Session-App"] = APP
+    h = {"X-Session-ID": sid, "X-Session-Pool": pool}
+    if app_template:
+        h["X-Session-App"] = app_template
     return h
 
 # The sandboxd router Service. Broker forwards MCP here with X-Session-ID.
@@ -163,17 +203,28 @@ def _authenticate(authorization: Optional[str]) -> AuthContext:
 
 # ---- session identity ----
 
-def _sid_for(principal: str, mcp_session_id: Optional[str], slot: int = 0) -> str:
+def _sid_for(principal: str, mcp_session_id: Optional[str], slot: int = 0, app_key: str = "") -> str:
     """Derive a stable, DNS-safe session id from the principal (one durable
     session per user; teleportable across MCP reconnects). With
     MAX_SESSIONS_PER_USER>1, `slot` distinguishes a user's concurrent sessions
-    (keyed off the MCP session id). The control plane treats this string as the
-    opaque session id / sandbox id (must match ^[a-z0-9][a-z0-9-]{0,62}$)."""
+    (keyed off the MCP session id). `app_key` (multi-app mode) folds the selected
+    app into BOTH the hash and the human-readable prefix so a user's different apps
+    get DISTINCT durable sessions (sess-<user>-<app>-<hash>) that never clobber each
+    other; empty app_key keeps the legacy principal-only id byte-for-byte. The
+    control plane treats this string as the opaque session id / sandbox id (must
+    match ^[a-z0-9][a-z0-9-]{0,62}$)."""
     base = principal if slot == 0 else f"{principal}:{mcp_session_id or slot}"
+    if app_key:
+        base = f"{app_key}:{base}"
     h = hashlib.sha256(base.encode()).hexdigest()[:16]
     # human-readable prefix + hash; sanitized to the sandbox-id charset.
-    safe = "".join(c if (c.isalnum()) else "-" for c in principal.lower())[:24].strip("-") or "u"
-    return f"sess-{safe}-{h}"
+    user = "".join(c if c.isalnum() else "-" for c in principal.lower())[:24].strip("-") or "u"
+    if app_key:
+        ak = "".join(c if c.isalnum() else "-" for c in app_key.lower())[:16].strip("-")
+        prefix = f"{user}-{ak}" if ak else user
+    else:
+        prefix = user
+    return f"sess-{prefix}-{h}"
 
 
 # ---- MCP forwarding ----
@@ -239,7 +290,7 @@ def _rewrite_init_version(payload: bytes) -> bytes:
         return payload
 
 
-async def _warm(sid: str) -> None:
+async def _warm(sid: str, pool: str, app_template: str) -> None:
     """Background warm-on-initialize (O8): ask the router's generic /_warm
     primitive to ensure the session is Running before the first tool call. This
     is protocol-agnostic — the router just resumes the session and returns 204
@@ -250,18 +301,18 @@ async def _warm(sid: str) -> None:
         async with httpx.AsyncClient(timeout=httpx.Timeout(300.0)) as client:
             await client.post(
                 f"{ROUTER_URL}/_warm",
-                headers=_session_headers(sid),
+                headers=_session_headers(sid, pool, app_template),
             )
     except Exception:
         pass
 
 
-async def _forward(body: bytes, sid: str, content_type: str, accept: str):
+async def _forward(body: bytes, sid: str, pool: str, app_template: str, content_type: str, accept: str):
     """Forward the MCP request to the sandboxd router. The router resolves
     X-Session-ID -> worker (cold start / restore-on-connect via the control
     plane) and streams the response back. X-Session-Pool tells the control plane
     which pool to place a brand-new session in."""
-    headers = _session_headers(sid)
+    headers = _session_headers(sid, pool, app_template)
     headers["Content-Type"] = content_type or "application/json"
     if accept:
         headers["Accept"] = accept
@@ -306,6 +357,7 @@ async def mcp(
     request: Request,
     authorization: Optional[str] = Header(default=None),
     mcp_session_id: Optional[str] = Header(default=None, alias="Mcp-Session-Id"),
+    sandbox_app: Optional[str] = Header(default=None, alias="X-Sandbox-App"),
 ):
     auth = await run_in_threadpool(_authenticate, authorization)
     body = await request.body()
@@ -315,12 +367,18 @@ async def mcp(
 
     mcp_sess = mcp_session_id or uuid.uuid4().hex
 
+    # Resolve the selected app (multi-app mode) → (app_key, pool, AppTemplate),
+    # enforcing the app's required group. Legacy single-app mode returns
+    # ("", POOL, APP) and ignores the header. Raises 400/403/404 on a bad/unentitled
+    # app. app_key folds into the session id so a user's apps don't collide.
+    app_key, pool, app_template = _resolve_app(sandbox_app, auth.groups)
+
     # Answer lifecycle locally (no backend round trip) — instant handshake — AND
     # kick off a background warm of the session so it's Running before the first
     # tool call (hides AIO's ~45s cold start; avoids the miss-path 503 herd, O8).
     if method == "initialize":
-        sid = _sid_for(auth.principal, mcp_sess)
-        asyncio.create_task(_warm(sid))
+        sid = _sid_for(auth.principal, mcp_sess, app_key=app_key)
+        asyncio.create_task(_warm(sid, pool, app_template))
         resp = Response(content=json.dumps(_synthetic_initialize(_msg_id(body))).encode(),
                         media_type="application/json")
         resp.headers[SESSION_HEADER] = mcp_sess
@@ -335,8 +393,8 @@ async def mcp(
     # principal-derived ids, one principal maps to MAX_SESSIONS_PER_USER distinct
     # session ids; slot 0 is the default durable session. A future enhancement
     # can map multiple MCP sessions to slots 1..N and enforce the cap here.)
-    sid = _sid_for(auth.principal, mcp_sess)
-    resp = await _forward(body, sid, content_type, accept)
+    sid = _sid_for(auth.principal, mcp_sess, app_key=app_key)
+    resp = await _forward(body, sid, pool, app_template, content_type, accept)
     resp.headers[SESSION_HEADER] = mcp_sess
     return resp
 
