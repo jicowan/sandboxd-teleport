@@ -591,6 +591,11 @@ func (in *SessionSpec) DeepCopyInto(out *SessionSpec) {
 		*out = new(LocalRef)
 		**out = **in
 	}
+	if in.TemplateRef != nil {
+		in, out := &in.TemplateRef, &out.TemplateRef
+		*out = new(LocalRef)
+		**out = **in
+	}
 	if in.Cmd != nil {
 		in, out := &in.Cmd, &out.Cmd
 		*out = make([]string, len(*in))

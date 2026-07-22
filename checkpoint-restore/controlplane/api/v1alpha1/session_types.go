@@ -26,15 +26,32 @@ import (
 // for observability and a declarative create path for the front door.
 // The object's metadata.name is the session ID.
 type SessionSpec struct {
-	// poolRef selects a WarmPool (template mode). Mutually exclusive with image.
+	// poolRef selects a WarmPool — the session's CAPACITY source (which pool a worker
+	// is claimed from). In classic "template mode" (no image/templateRef set) the
+	// pool's own SandboxTemplate also supplies the workload config; on a GENERIC pool
+	// (WarmPool.spec.arbitraryImage) the pool provides only capacity and the workload
+	// comes from image or templateRef below (see docs/PRD-arbitrary-image-sessions.md
+	// §13). poolRef is the capacity source and is effectively always required — an
+	// image/templateRef session still needs a pool to run on.
 	// +optional
 	PoolRef *LocalRef `json:"poolRef,omitempty"`
 
 	// image is a caller-supplied arbitrary image (arbitrary-image mode, O6):
-	// authz-gated at the front door before creation. Mutually exclusive with
-	// poolRef. When set, cmd/env/ports may accompany it.
+	// authz-gated at the front door before creation. When set it is the workload
+	// image directly; cmd/env/ports may accompany it. It is the session's CONFIG
+	// source, independent of poolRef (capacity). Mutually exclusive with templateRef.
 	// +optional
 	Image string `json:"image,omitempty"`
+
+	// templateRef optionally names a SandboxTemplate that supplies the workload CONFIG
+	// (image + cmd/env/ports/health/idle/checkpoint/iam), DECOUPLED from poolRef
+	// (capacity). This lets many curated templates run on one generic pool without a
+	// dedicated WarmPool per template (docs/PRD-arbitrary-image-sessions.md §13.3).
+	// Resolution precedence: image > templateRef > poolRef's own template. Mutually
+	// exclusive with image. Additive/optional: inert unless set, so classic poolRef
+	// and arbitrary-image sessions are unaffected.
+	// +optional
+	TemplateRef *LocalRef `json:"templateRef,omitempty"`
 
 	// cmd overrides the entrypoint for arbitrary-image mode.
 	// +optional

@@ -21,6 +21,12 @@ an authorization gate, a registry/image policy, a self‑service creation path, 
 a pool model that protects the warm hit‑rate of the curated pools. This PRD
 specifies that gap.
 
+> **§13 (design addition)** develops a first‑class **generic pool** — a pool of
+> workers that runs *any* image/template — including decoupling a Session's config
+> source (`templateRef`) from its capacity source (`poolRef`), the `ForkSet` image
+> source, and why **routing needs no change** (the router is session‑keyed and
+> image‑blind).
+
 ## 2. Background — what exists today
 
 - **Workers are generic.** A sandboxd worker is the agent + pinned `runsc`; the
@@ -164,6 +170,13 @@ Whichever front door created the Session, the controller gate still applies.
   must target an `arbitraryImage: true` pool for its worker).
 - Optional later mitigation: a per‑node image pre‑puller for frequently‑used
   arbitrary images.
+
+> **Refinement — see §13.** "Fed by a generic base image" above is loose wording.
+> A worker bakes in *no* workload image, so an `arbitraryImage` pool isn't tied to
+> any base image — it's simply **generic capacity** that runs whatever image each
+> session names. §13 develops this "generic pool" model (capacity decoupled from
+> image), the `templateRef`‑vs‑`poolRef` split on a Session, and the ForkSet
+> implication, and explains why **routing needs no change**.
 
 ### 5.4 Self‑service creation path (front door)
 
@@ -347,3 +360,188 @@ spec:
 
 Then route with `X-Session-ID: sess-alice-mytool`. This is exactly the
 ungoverned path this PRD exists to replace with a safe, self‑service one.
+
+## 13. Design addition — the generic pool model
+
+This section develops §5.3's pool model into a first‑class **generic pool** (a pool
+of workers that can run *any* image or template), and works through the two
+consequences that fall out of it: decoupling a Session's **config source
+(`templateRef`)** from its **capacity source (`poolRef`)**, and adding an image
+source to **ForkSet**. It also resolves the routing question that motivated the
+design ("how would the router know where to send a request for an arbitrary
+image?").
+
+### 13.1 Why a generic pool is mostly a *relaxation*, not new machinery
+
+A sandboxd worker is image‑agnostic by construction: it is the agent + pinned
+`runsc`, bakes in **no** workload image, and pulls whatever image `/run`/`/restore`
+names from the node's containerd cache. `ClaimIdleWorker(pool, sid)` picks *any*
+idle worker in a pool — it never consults the image. The pool→template binding is
+therefore a pure **control‑plane convention**, not a worker or scheduling fact.
+
+Today that convention is a 1:1 rule: `WarmPool.templateRef → SandboxTemplate →
+image`, and a Session's `poolRef` transitively pins its image. A **generic pool**
+simply relaxes that: the pool provides *capacity*, and each session names *what to
+run*. Concretely:
+
+- A generic pool is `WarmPool.spec.arbitraryImage: true` (the marker already exists,
+  §5.3) with **no serving `templateRef`** (or a `templateRef` that provides only a
+  worker‑sizing/scheduling default, not the workload image). `templateForPool`
+  becomes **optional** for this pool flavor rather than required.
+- Its workers are ordinary warm workers. They cold‑pull an un‑cached image on first
+  use and warm‑hit thereafter (the node cache is per‑node, shared across that node's
+  sessions).
+
+Nothing about teleport, suspend, restore, GC, or reclaim changes — those are already
+image‑agnostic and session‑keyed.
+
+### 13.2 Routing needs **no change** — the router is image‑blind
+
+The concern "how does the router route a request for an arbitrary image?" dissolves
+once you trace what the router keys on. **The router routes by *session*, never by
+image or pool.** Per request (`internal/router/router.go`):
+
+1. Resolve `Identity` from headers — `X‑Session‑ID` (+ subject, + pool hint). The
+   image is **not** in the request.
+2. `GetSession(sid)` → the `session:<sid>` KV entry. If `Running` on a live worker,
+   proxy to `e.WorkerPodIP:port`.
+3. On miss/stale → `Resume(sid, subject, poolHint)`; the operator does the work,
+   writes the worker IP into `session:<sid>`, and the router proxies to it.
+
+The router only ever answers *"which worker holds session Y?"* — a session is bound
+to exactly one worker (the one running its sandbox), and the router follows that
+binding. There is no "find a worker that has image X" step to get wrong.
+
+This is why **resume‑from‑snapshot — the common case — is the easy case.** The
+restore path reads the image straight from the session record (`cur.Image` in
+`resume.go`), **not** from a pool template, so a suspended session restores onto any
+idle worker in its pool regardless of what template (if any) the pool has. The image
+travels *with the session* (in the KV entry, mirrored to `Session.status` in etcd).
+The cold‑pull cost (§8) is a one‑time, first‑use event on a never‑seen image; every
+subsequent resume replays the cached image.
+
+The **only** image‑aware step in the entire system is the operator's *cold‑start*
+branch in `planFor` (`resume_glue.go`). That is the single place the generic‑pool
+work touches (§13.3).
+
+### 13.3 Decouple config source from capacity source: `templateRef` on the Session
+
+`Session.spec.poolRef` today conflates two things a generic pool must separate:
+
+- **Capacity** — which pool's workers to claim.
+- **Config** — the workload image plus its `cmd`/`env`/`ports`/`health`/`idle`/`iam`
+  defaults (today these come from the pool's `SandboxTemplate`).
+
+For a generic pool, a session needs to name a template for *config* while claiming a
+*generic* pool for *capacity*. Proposed additive field:
+
+```
+SessionSpec:
+  poolRef:     *LocalRef   # capacity: which pool to claim a worker from
+  templateRef: *LocalRef   # NEW: config source (image + cmd/env/ports/health/idle/iam)
+  image:       string      # OR inline arbitrary image (existing, §2)
+  # ... cmd/env/ports as today (inline overrides)
+```
+
+Resolution precedence in `planFor` / the resume cold‑start branch, in order:
+
+1. **`spec.image`** set → run it directly (existing arbitrary‑image mode).
+2. else **`spec.templateRef`** set → resolve *that* template for the image + config,
+   independent of the pool. (New branch; mirrors the existing pool→template lookup
+   but keyed off the session, not the pool.)
+3. else **`spec.poolRef` → pool's `templateRef`** → today's behavior (curated pool
+   whose template supplies the image). Unchanged.
+
+Capacity always comes from `poolRef` (or the generic pool the front door assigns).
+This is the smallest change that lets *many* curated templates run on *one* generic
+pool without standing up a dedicated warm pool per template — the ergonomic win over
+raw `spec.image` (you keep templated `cmd`/`env`/`ports`/`health`/`idle`/`iam`
+without hand‑copying them into every Session).
+
+Admission (extend §5.5): the one‑of rule becomes **at most one of
+`{image, templateRef}`**, and **`poolRef` (capacity) is always required** — a
+session with `templateRef` but no `poolRef` has no worker to run on. A `templateRef`
+that names a *curated* pool's template is fine; the distinction is only that a
+generic pool doesn't force a single one.
+
+> **Compatibility.** `templateRef` is additive and optional. Existing curated
+> Sessions (only `poolRef`) and existing arbitrary‑image Sessions (only `image`) are
+> unchanged; the new branch is inert unless `templateRef` is set. No CRD‑breaking
+> change.
+
+### 13.4 ForkSet implication — add an image/template source
+
+`ForkSet` has two sources today (`forkset_controller.go`):
+
+- **Snapshot source** (`spec.baseRef` → a `BaseSnapshot`): children `/restore` from
+  the base's S3 snapshot. This is **already generic‑pool‑ready** — a `BaseSnapshot`
+  carries its **own** `status.image`, and children restore from S3 regardless of the
+  pool's template. No change needed; arguably this is the *ideal* "fork any image"
+  path (promote a golden checkpoint once, fan out from it).
+
+- **Image source** (`spec.baseRef` unset): children are created as plain
+  `poolRef`‑backed Sessions and cold‑start from **the pool's template image**. On a
+  generic pool that has *no* single template image, this is under‑specified — there
+  is nothing to inherit.
+
+So an image‑source ForkSet on a generic pool needs to carry its own source. Proposed
+additive fields on `ForkSetSpec`, matching §13.3's precedence exactly:
+
+```
+ForkSetSpec:
+  pool:        string      # capacity (existing)
+  baseRef:     *LocalRef   # snapshot source (existing) — carries its own image
+  image:       string      # NEW: image-source fork of an arbitrary image
+  templateRef: *LocalRef   # NEW: image-source fork of a named template's config
+  # cmd/env/ports optional inline (with spec.image), as on a Session
+```
+
+The image‑source branch of `createForkSessions` then stamps each child Session with
+`spec.image`/`spec.templateRef` (whichever the ForkSet set) alongside its
+`poolRef: <pool>`, instead of relying on the pool→template lookup. Resolution in the
+child is then exactly §13.3. Precedence and admission mirror the Session rules:
+snapshot (`baseRef`) XOR image XOR template; `pool` always required.
+
+**Fan‑out amplifies the cold‑pull tradeoff.** A `count: N` image‑source ForkSet of a
+never‑seen image is up to **N simultaneous cold pulls** across workers (bounded by
+distinct nodes; same‑node children share the cache after the first). This is the
+§8 tradeoff at N×. Mitigations, all optional and layered — none are prerequisites:
+
+- Prefer the **snapshot source** for large fan‑outs (pull/boot once, promote, then
+  every child is an S3 restore of an already‑materialized image — no per‑child pull).
+- The optional **pre‑puller** (§5.3, M3) warms the fork image on the pool's nodes
+  before fan‑out.
+- Later, **image‑affinity‑aware claiming** — prefer an idle worker whose node already
+  has the image cached. This is a new scheduling dimension (the assignment table
+  would track per‑worker/per‑node cached images); explicitly **out of scope** for the
+  MVP, which claims image‑blind and accepts first‑use cold pulls.
+
+### 13.5 What this adds to the rollout (§10)
+
+The generic pool model slots into the existing milestones rather than adding a new
+track:
+
+- **M1** additionally: `arbitraryImage` pools may omit a serving `templateRef`
+  (generic capacity); add the `Session.spec.templateRef` config‑source branch to
+  `planFor`; extend admission to `at‑most‑one{image, templateRef}` + `poolRef`
+  required.
+- **M2** additionally: the front door may set `templateRef` (not just `image`) when
+  assigning a session to a generic pool.
+- **M3** additionally: `ForkSetSpec.image`/`templateRef`; document the fan‑out
+  cold‑pull tradeoff and the snapshot‑source recommendation; optional pre‑puller and
+  (later) image‑affinity claiming.
+
+### 13.6 Summary of the delta
+
+| Change | Where | Kind |
+|--------|-------|------|
+| Generic pool = capacity, no forced serving template | `WarmPool` `arbitraryImage`; `templateForPool` optional for it | control‑plane relaxation |
+| `Session.spec.templateRef` (config source, decoupled from `poolRef`) | `SessionSpec` + `planFor` precedence | additive CRD field + one resolver branch |
+| `ForkSetSpec.image` / `.templateRef` (image‑source fork of arbitrary image/template) | `ForkSetSpec` + `createForkSessions` | additive CRD fields + one branch |
+| Routing | — | **no change** (router is session‑keyed, image‑blind) |
+| Worker | — | **no change** (already image‑agnostic) |
+| Teleport / suspend / restore / GC | — | **no change** (session‑keyed, image travels with the session) |
+
+The net: a "run any image/template" pool is a **control‑plane relaxation plus two
+additive CRD fields**, with the hard part being the *governance* layer this PRD
+already specifies (§5.1–5.5), not the routing or the runtime.
