@@ -1,4 +1,4 @@
-# aio-sandbox / sandboxd
+# sandboxd-teleport
 
 **sandboxd** is a **session‑teleport control plane on Amazon EKS**. Warm pools of
 privileged worker pods run arbitrary OCI images as **nested gVisor sandboxes**; a
