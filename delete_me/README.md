@@ -29,6 +29,24 @@ convenient.)
 | `deploy/10-router-clusterip.yaml` | agent-sandbox's `sandbox-router` (NOT the sandboxd router). |
 | `deploy/00-serviceaccount-rbac.yaml` | RBAC granting the broker `SandboxClaim`/`sandboxes` access (agent-sandbox CRDs). |
 
+### Retired Stage-1/Stage-2 + AgentCore‑Gateway design docs
+
+These describe an abandoned front‑door track (AWS Bedrock **AgentCore Gateway** +
+OBO/3LO token exchange, and the Stage‑1/2 `broker_mcp.py`/`proxy` era). The live front
+door is **agentgateway** (OSS) with `backendAuth: passthrough` — see the current
+`docs/POSTMORTEM-agentcore-vs-agentgateway.md` and `docs/sandboxd/`. Kept only as
+history.
+
+| Moved from | What it was |
+|------------|-------------|
+| `docs/adr/0001-no-agentcore-gateway.md` | ADR: don't use AgentCore Gateway for the (Stage‑1) broker. |
+| `docs/adr/0002-gateway-for-stage2-frontdoor.md` | ADR: use AgentCore Gateway as the Stage‑2 front door (OBO/RFC 8693). This decision was itself reversed — the front door is agentgateway, not AgentCore. |
+| `docs/STAGE2.md` | Stage‑2 design map (AgentCore + OBO + `broker_mcp`). |
+| `docs/DESIGN.md` | Early overall design (Stage‑1/2 era). |
+| `docs/3LO-PLAN.md` | Per‑user identity via 3LO through AgentCore Gateway — obviated by agentgateway JWT passthrough. |
+
+(The `docs/adr/` directory was removed — both ADRs live here now.)
+
 ## NOT moved (still live / shared)
 
 - `deploy/00-keycloak-realm.yaml` — shared auth (Keycloak realm), used by the sandboxd front door.
