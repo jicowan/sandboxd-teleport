@@ -164,10 +164,8 @@ They diverge because they were built for different constraints:
 ## 4. Why sandboxd exists (the EKS blocker)
 
 sandboxd is not a "not‑invented‑here" reimplementation. We first tried to run our
-AIO sandbox **on** Substrate (see `substrate/docs/PRD.md`,
-`substrate/docs/DESIGN-NOTES.md`, `substrate/stage0/NOTES.md`). Stage 0 pre‑flight
-found Substrate **cannot install on managed Amazon EKS at any version available
-today**:
+AIO sandbox **on** Substrate. Stage 0 pre‑flight found Substrate **cannot install
+on managed Amazon EKS at any version available today**:
 
 - Substrate's install deploys a **pod‑certificate controller** (its mTLS identity
   layer) that the installer *waits on*, and it requires the API server to serve
