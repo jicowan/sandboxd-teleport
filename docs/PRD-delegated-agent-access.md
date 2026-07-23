@@ -1,7 +1,7 @@
 # PRD — delegated agent access (protocol‑native user‑identity propagation to sandboxes)
 
 Status: **Proposed** (not scheduled). Decision‑ready spec; grounded in the shipped
-code on the `checkpoint-restore` branch. Related:
+code in this repository. Related:
 [architecture-sandboxd.md](sandboxd/architecture-sandboxd.md),
 [architecture-broker.md](sandboxd/architecture-broker.md),
 [PRD-sandbox-iam-credentials.md](PRD-sandbox-iam-credentials.md) (the AWS analog).

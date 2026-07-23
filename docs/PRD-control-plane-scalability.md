@@ -1,7 +1,7 @@
 # PRD — control‑plane scalability under session churn
 
 Status: **Proposed** (not scheduled — analysis + plan; nothing built). Decision‑ready.
-Grounded in the shipped code on the `checkpoint-restore` branch. Related:
+Grounded in the shipped code in this repository. Related:
 [architecture-sandboxd.md](sandboxd/architecture-sandboxd.md),
 [PRD-durable-assignment-state.md](PRD-durable-assignment-state.md).
 

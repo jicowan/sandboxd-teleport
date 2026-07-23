@@ -2,8 +2,8 @@
 
 Status: **Implemented** (2026‑07‑08, operator `v14`). The operator stamps
 `controller.kubernetes.io/pod-deletion-cost` on worker pods so scale‑in removes
-idle workers before busy ones. Grounded in the shipped code on the
-`checkpoint-restore` branch. Related: [architecture-sandboxd.md](sandboxd/architecture-sandboxd.md),
+idle workers before busy ones. Grounded in the shipped code in this
+repository. Related: [architecture-sandboxd.md](sandboxd/architecture-sandboxd.md),
 [admin-guide-crds.md](sandboxd/admin-guide-crds.md).
 
 > **As built (differs from the original Q3 lean):** the sync lives in the

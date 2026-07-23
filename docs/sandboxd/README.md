@@ -8,8 +8,8 @@ to it through an authenticating front door and a session‑aware router, so a us
 keeps one durable session that survives suspend/resume.
 
 This directory holds the operational documentation. Everything here is grounded
-in the code and manifests on the `checkpoint-restore` branch; where a document
-describes the live reference cluster it says so explicitly.
+in the code and manifests in this repository; where a document describes the live
+reference cluster it says so explicitly.
 
 ## Documents
 
