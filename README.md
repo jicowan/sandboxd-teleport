@@ -71,7 +71,6 @@ deploy/                     shared front-door infra: Keycloak realm, agentgatewa
                             (+ its ingress)
 docs/sandboxd/              ← primary docs (product + front door)
 docs/                       PRDs + design notes
-delete_me/                  quarantined dead agent-sandbox integration (pending removal)
 ```
 
 ## Reference environment
@@ -81,8 +80,3 @@ The live examples throughout the docs use EKS cluster `EKSClusterStack-cluster`
 `sandboxd-controlplane-system`, pools/sessions in `default`. Substitute your own
 account, cluster, DNS, and bucket. (Docs use scrubbed placeholders —
 `111122223333`, `example.com` — replace with your values.)
-
-> **Historical note:** an earlier version fronted the
-> [kubernetes-sigs agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
-> project via `broker_mcp.py`. That integration is retired; its files are parked in
-> [`delete_me/`](./delete_me/README.md) pending removal.
