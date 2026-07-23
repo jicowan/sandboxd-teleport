@@ -72,10 +72,6 @@ Checkpoints live in S3; the worker reads/writes them via EKS Pod Identity.
    > (delete is only used by the operator GC — see Step 6). You may drop
    > `s3:DeleteObject` from the worker role if you never call `/reset`‑style cleanup
    > that removes S3 objects.
-   >
-   > The S3 **bucket** name still carries the old `aio-checkpoint-spike-…` prefix
-   > (cosmetic; renaming a bucket means migrating snapshots). Only the SA/role were
-   > renamed to the `sandboxd-worker-*` family.
 
    **Private‑registry (ECR) image pulls.** The worker pulls the *workload* image
    (the sandbox's OCI image) directly via the node containerd API, authenticating
@@ -93,10 +89,12 @@ Checkpoints live in S3; the worker reads/writes them via EKS Pod Identity.
    > The worker's containerd pull uses an ECR authorizer only for `*.dkr.ecr.*`
    > image refs (a token fetched via this role); non‑ECR hosts stay anonymous, so
    > public images are unaffected. Without this policy, a private‑ECR workload image
-   > fails at `/run` with a containerd `401 Unauthorized` on the manifest HEAD.
+   > fails at `/run` with a containerd `401 Unauthorized` on the manifest HEAD. 
+   > Authenticating to other private registries, such as Arifactory or Harbor, is not
+   > currently supported (feat). 
 
 3. **Create the ServiceAccount** the workers run as and **associate** the role.
-   The reference uses SA `sandboxd-worker` in namespace `default`:
+   The reference environment uses SA `sandboxd-worker` in namespace `default`:
 
    ```sh
    kubectl create serviceaccount sandboxd-worker -n default
@@ -109,8 +107,8 @@ Checkpoints live in S3; the worker reads/writes them via EKS Pod Identity.
    ```
 
 > **Why namespace `default`?** Pools/sessions/workers run in `default` in the
-> reference deployment, so the operator is started with `--resume-namespace=default`
-> and the worker SA + Pod Identity live there. If you use a different namespace,
+> reference environment, so the operator is started with `--resume-namespace=default`
+> and the worker SA + Pod Identity live there. If you elect to use a different namespace,
 > keep the SA, the pool objects, and `--resume-namespace` consistent.
 
 ## Step 2 — Build and push images
@@ -147,11 +145,29 @@ The `runsc` version here **must** equal the version on your gVisor nodes.
 
 ## Step 3 — Install CRDs and the operator ClusterRole
 
-The CRDs and the `manager-role` ClusterRole are applied separately from the smoke
-deploy (which references but doesn't contain them).
+In this step you register sandboxd's **CustomResourceDefinitions** (the API types the
+operator reconciles — `SandboxTemplate`, `AppTemplate`, `WarmPool`, `Session`,
+`ForkSet`, `BaseSnapshot`) and the operator's **`manager-role` ClusterRole** (the
+permission *definition* — get/list/watch/patch pods, read/write Deployments and the
+`core.sandboxd.io` resources). Both are **cluster‑scoped**: the CRDs extend the
+Kubernetes API for the whole cluster, and a ClusterRole is not namespaced — so they
+are installed once, up front, independent of any namespace or release.
+
+> **Role here, binding in Step 4.** This step creates only the ClusterRole (the set of
+> permissions). The operator's **ServiceAccount** and the **ClusterRoleBinding** that
+> grants it that role — plus a namespaced leader‑election `Role`/`RoleBinding` — are
+> created by the smoke deploy in Step 4 (they're namespace/deployment‑specific). So a
+> ClusterRole exists after this step, but nothing is *bound* to it yet; the operator
+> gets its permissions when Step 4 creates the SA + binding.
+
+This is a **separate step** because the CRDs and ClusterRole are **not** part of the
+smoke deploy (below) — they're cluster‑scoped, generated artifacts
+(`config/crd/bases/`, `config/rbac/role.yaml`) applied on their own, and the operator
+can't start without them (it reconciles those CRDs, and Step 4's binding points at
+this ClusterRole).
 
 ```sh
-# CRDs (SandboxTemplate, WarmPool, Session)
+# CRDs: SandboxTemplate, AppTemplate, WarmPool, Session, ForkSet, BaseSnapshot
 make install                       # = kustomize build config/crd | kubectl apply -f -
 # or explicitly:
 kubectl apply -f config/crd/bases/
@@ -166,6 +182,9 @@ Verify:
 
 ```sh
 kubectl get crd | grep core.sandboxd.io
+# apptemplates.core.sandboxd.io
+# basesnapshots.core.sandboxd.io
+# forksets.core.sandboxd.io
 # sandboxtemplates.core.sandboxd.io
 # sessions.core.sandboxd.io
 # warmpools.core.sandboxd.io
@@ -273,32 +292,55 @@ kubectl get pods -n sandboxd-controlplane-system
 
 ## Step 5 — Create a pool of gVisor workers
 
-Define a `SandboxTemplate` (what to run) and a `WarmPool` (how many workers). The
-reference AIO pool is a ready example:
+A pool is a `WarmPool` (how many workers) bound to a `SandboxTemplate` (the pool's
+**worker‑shape**: scheduling, resources, `workerImage`). Whether that template pins an
+`image` decides the pool's character:
+
+- **Generic pool (recommended)** — template has **no image** (worker‑shape only). It
+  runs whatever workload a session brings via `spec.appRef` (an `AppTemplate`), so many
+  apps share one pool. This is the model the multi‑app front door uses.
+- **Dedicated pool** — template pins one `image`; the pool runs only that image
+  (`poolRef`‑only sessions). Use it when one image earns its own warm fleet.
+
+Deploy the reference **generic pool** (it also defines the example `AppTemplate`s):
 
 ```sh
-kubectl apply -f deploy/aio/aio-pool.yaml
+kubectl apply -f deploy/aio/generic-pool.yaml
 ```
 
-It creates `SandboxTemplate/aio` (image `ghcr.io/agent-infra/sandbox:latest`, port
-8080, health `/v1/health`, idle 600s, `streamConsole: true`, a per‑pool
-`workerImage`) and `WarmPool/aio-pool` (`replicas: 4, minIdle: 2`), pinned to
-gVisor nodes with node spread (`minDomains: 2`).
+It creates:
+- `SandboxTemplate/aio-generic` — **no image**; worker‑shape only (`workerImage`,
+  `resources`, `scheduling` pinned to gVisor nodes), so it's a generic pool.
+- `WarmPool/aio-generic-pool` — `replicas: 2, minIdle: 1`.
+- `AppTemplate/aio-app` — the AIO sandbox (`ghcr.io/agent-infra/sandbox:latest`, port
+  8080, health `/v1/health`, idle 600s).
+- `AppTemplate/everything-app` — a second, distinct MCP server (private‑ECR image;
+  needs the worker `ecr-pull` policy from Step 1).
 
 > The operator creates a `Deployment` of worker pods for the pool. Scheduling is
-> **pass‑through** — the template must set `scheduling.nodeSelector: {sandbox:
-> gvisor}` + the matching toleration, or workers won't land on gVisor nodes.
+> **pass‑through** — the template must set `scheduling.nodeSelector: {sandbox: gvisor}`
+> + the matching toleration, or workers won't land on gVisor nodes. A generic pool's
+> template still needs a resolvable `workerImage` (or the operator's global
+> `--worker-image`) even though it has no *workload* image.
 
 Verify workers come up and register as idle:
 
 ```sh
-kubectl get pods -n default -l sandboxd.io/pool=aio-pool
+kubectl get pods -n default -l sandboxd.io/pool=aio-generic-pool
 kubectl get wp -n default
-# NAME       REPLICAS   IDLE   BUSY
-# aio-pool   4          2      0     (idle == replicas until sessions arrive)
+# NAME               REPLICAS   IDLE   BUSY
+# aio-generic-pool   2          1      0     (idle == replicas until sessions arrive)
 ```
 
-See [admin-guide-crds.md](admin-guide-crds.md) for every template/pool field.
+> **Prefer a dedicated pool instead?** `deploy/aio/aio-pool.yaml` is a ready example:
+> `SandboxTemplate/aio` (pins the AIO image) + `WarmPool/aio-pool`. A `poolRef`‑only
+> session on it runs the AIO image directly (no `appRef` needed).
+
+To run a workload on a generic pool, a `Session` names both a pool (capacity) and an
+app (workload): `spec.poolRef: {name: aio-generic-pool}` + `spec.appRef: {name:
+aio-app}`. The front door, i.e. the broker, sets both of these for you; see
+[howto-add-an-app.md](howto-add-an-app.md) to add more apps. See
+[admin-guide-crds.md](admin-guide-crds.md) for every field.
 
 ## Step 6 — (Optional) Session GC
 
@@ -339,11 +381,6 @@ classification against your fleet first** — watch the `gc-sweeper` "would reap
 session footprint" log line and confirm the per‑class counts match live/dead
 sessions — then arm reaping with `SANDBOXD_GC_DRY_RUN=0` (or `--gc-dry-run=false`).
 
-> **Migration:** Sessions created before this feature carry no
-> `sandboxd.io/created-by` label, so GC treats their CRs as user‑declared
-> (tombstone‑only). If they were in fact operator/broker‑created, label them with
-> `hack/backfill-created-by-label.sh` so the operator‑owned reap path applies.
-
 > **Setting a default TTL** (`--default-ttl-after-suspend-seconds`) is what makes the
 > TTL pass actually fire — with the default `0` (keep forever), suspended‑session
 > snapshots are retained indefinitely. Pick a retention that matches your
@@ -354,6 +391,22 @@ sessions — then arm reaping with `SANDBOXD_GC_DRY_RUN=0` (or `--gc-dry-run=fal
 Let sandboxes assume an AWS IAM role scoped to their session (standard AWS SDK,
 no workload code change), teleport‑safe and never the worker's own identity. Off
 unless configured. See [PRD-sandbox-iam-credentials.md](../PRD-sandbox-iam-credentials.md).
+
+> **Why an HMAC key?** The worker runs a tiny credential vendor on the sandbox's
+> interior network; the sandbox's AWS SDK fetches its session credentials from it,
+> presenting a bearer token. That token is **HMAC(key, sid)** — a keyed hash
+> (**HMAC** = Hash‑based Message Authentication Code, here HMAC‑SHA256) of the session
+> id under a fleet‑wide secret **key**. It does two jobs:
+> - **Authorization** — only something holding the key can produce the right token for
+>   a given `sid`, so one sandbox can't guess another session's token and steal its
+>   credentials (even co‑tenant on the same worker).
+> - **Teleport‑safety** — because the token is a *deterministic* function of
+>   `(key, sid)` and **every worker shares the same key**, any worker recomputes the
+>   same token. The token is baked into the checkpoint, so after a session restores on
+>   a *different* worker it still matches — AWS access resumes with no handoff or
+>   re‑issue. (A random token couldn't do this; it would have to be persisted and
+>   transferred.) The Secret below holds only this shared key — not the AWS
+>   credentials themselves; only the *ability to fetch* them teleports.
 
 1. **Fleet HMAC key Secret** (worker namespace) — the per‑session auth token is
    `HMAC(key, sid)`:
@@ -416,12 +469,16 @@ Exercise the control plane end‑to‑end without the broker, using the `/_warm`
 primitive and an in‑cluster client. From a debug pod in `default`:
 
 ```sh
-# Warm (resume/cold-start) a session onto the pool:
+# Warm (resume/cold-start) a session onto the generic pool. On a GENERIC pool you must
+# also name the app (AppTemplate) — the router passes X-Session-Pool (capacity) +
+# X-Session-App (workload) to the operator, which lazily creates the Session:
 curl -s -o /dev/null -w '%{http_code}\n' -X POST \
   -H 'X-Session-ID: sess-smoketest' \
-  -H 'X-Session-Pool: aio-pool' \
+  -H 'X-Session-Pool: aio-generic-pool' \
+  -H 'X-Session-App: aio-app' \
   http://sandboxd-router.sandboxd-controlplane-system:8080/_warm
 # expect 204 (or 503 Retry-After if the pool has no idle worker)
+# (On a DEDICATED pool, drop X-Session-App and use -H 'X-Session-Pool: aio-pool'.)
 
 # Then confirm the session is Running on a worker:
 kubectl get sess -n default sess-smoketest
