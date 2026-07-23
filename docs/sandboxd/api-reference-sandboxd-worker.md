@@ -7,7 +7,7 @@ checkpoint, restore, suspend, and inspect nested gVisor sandboxes on a worker po
 > **Audience & trust.** This API is an **internal control interface**, not a
 > user‑facing one. In normal operation only the operator (resume/suspend/checkpoint
 > workflows) and the router (data‑plane proxy to the sandbox's *workload* port,
-> not to `:8090`) talk to a worker. **Authentication (P1.5, opt‑in):** with
+> not to `:8090`) talk to a worker. **Authentication** with
 > `SANDBOXD_MTLS=1` the `:8090` control API requires **SPIFFE mTLS** and authorizes
 > the caller's SPIFFE ID == `spiffe://sandboxd/operator` — so only the operator can
 > drive it. Off by default (plain HTTP, in‑cluster reachability only). See
@@ -108,6 +108,20 @@ gVisor sandbox.
 (`SANDBOXD_CRED_TOKEN_KEY`), the worker registers the role and injects
 `AWS_CONTAINER_CREDENTIALS_FULL_URI` + `AWS_CONTAINER_AUTHORIZATION_TOKEN` into the
 sandbox so its AWS SDK gets per-session temporary credentials for the role.
+
+> **Security — the `iamRoleArn` argument.** The worker does **not** validate or
+> allow‑list the role; it assumes whatever `/run` names. Two boundaries keep that
+> safe:
+> - **mTLS gate.** When `SANDBOXD_MTLS=1`, `:8090` requires a client SVID and
+>   authorizes only the operator's SPIFFE ID — so **only the operator may call
+>   `/run`**. An untrusted caller can't reach this endpoint to supply a role, and the
+>   operator only sets `iamRoleArn` from an admin‑authored `AppTemplate`/`Session`.
+> - **STS trust‑policy backstop.** The vendor's `sts:AssumeRole` runs as the worker's
+>   own identity, so AWS grants the credentials **only if the target role's trust
+>   policy names that worker role** (and it may further require the
+>   `sandbox-session=<sid>` tag the vendor stamps). A role ARN that doesn't trust the
+>   worker simply fails at STS — no credentials are returned. This is enforced in IAM,
+>   out of band from sandboxd.
 
 **Response `200`**
 
