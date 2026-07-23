@@ -2,10 +2,11 @@
 
 This guide covers the two access-control knobs an operator turns:
 
-1. **Tool filtering** — which MCP tools a user may see and call
-   (enforced at **agentgateway** via `mcpAuthorization`).
-2. **Quotas & the create gate** — who may get a sandbox at all, and how many
-   (enforced at the **broker**).
+1. **Tool filtering** — which MCP tools a user may see and call, per app
+   (enforced at **agentgateway** via each route's `mcpAuthorization`).
+2. **The create gate & quotas** — who may open which app (the **broker**'s per‑app
+   group gate), and how much runs at once (**pool capacity**; plus the apiserver
+   fork‑count cap).
 
 Both are driven by the user's Keycloak identity in the JWT that agentgateway
 passes through unchanged. Nothing here requires a client-side change.
@@ -16,10 +17,19 @@ passes through unchanged. Nothing here requires a client-side change.
 
 ### Where it lives
 
-`deploy/30-agentgateway.yaml`, in the route's `policies.mcpAuthorization.rules`
-block. agentgateway evaluates the rules against the **passed-through user JWT**
-on every `tools/call`, and **also filters `tools/list`** — so a tool a user may
-not call is also invisible to them (their client never even lists it).
+`deploy/30-agentgateway.yaml`, in a route's `policies.mcpAuthorization.rules` block.
+agentgateway evaluates the rules against the **passed-through user JWT** on every
+`tools/call`, and **also filters `tools/list`** — so a tool a user may not call is
+also invisible to them (their client never even lists it).
+
+> **Per app.** The gateway has one route per app (`aio-route` at `/aio/mcp`,
+> `everything-route` at `/everything/mcp`, …), and `mcpAuthorization.rules` is set
+> **on each route independently**. So tool filtering is per‑app: the tiered AIO
+> ruleset below lives on `aio-route`; a different app (e.g. `everything`, whose tools
+> aren't the AIO set) has its own rules on its own route — commonly a single
+> group gate like `'"sandbox-power" in jwt.groups'`. Edit the rules on the route for
+> the app you're tuning. (The app you're on is decided by which endpoint the client
+> connected to — see [howto-add-an-app.md](howto-add-an-app.md).)
 
 ### How the rules work
 
@@ -146,23 +156,44 @@ can require a higher tier than the baseline (e.g. `everything` requires
 To require a distinct "creator" role, point this at a different group and grant it
 only to users who may provision sandboxes.
 
-### b) How many sessions per user (the quota)
+### b) How much a user can consume (the actual quota levers)
 
-A user's session id is **derived from their identity (and the app)** —
-`sess-<principal>[-<app>]-<hash>` — so one user maps to **one durable session per
-app**, reused across reconnects (not one per MCP connection). That structural
-one‑per‑user‑per‑app model is the effective cap.
+There is **no per‑user session counter** to set — and you don't need one. A user's
+session id is **derived from their identity + the app** (`sess-<principal>[-<app>]-<hash>`),
+so one user maps to **exactly one durable session per app**, reused across reconnects.
+A user can't multiply sessions by opening more MCP connections. So "how many sessions
+per user" is bounded structurally: **(# apps they're entitled to)**.
 
-```yaml
-# checkpoint-restore/controlplane/deploy/aio/broker-sandboxd.yaml
-- { name: SANDBOXD_MAX_SESSIONS_PER_USER, value: "1" }   # (see note)
-```
+That makes the real quota levers these three — use them, not a session count:
 
-> **Note:** `SANDBOXD_MAX_SESSIONS_PER_USER` is currently **read but not enforced** —
-> because each principal already maps to exactly one durable session id per app, there
-> are no extra sessions to cap. It's a placeholder for a future
-> multiple‑named‑sessions‑per‑user feature. To actually limit *how many apps* a user
-> may run, gate the apps via their per‑app `group` (a) rather than this knob.
+1. **Entitlement (who can open which app) — the primary lever.** Each app in
+   `SANDBOXD_APPS` has a required `group`; a caller without it gets `403`. To limit a
+   user to fewer/cheaper apps, don't put them in the pricier apps' groups. This is how
+   you cap *what* a user can run. (See (a) and
+   [howto-add-an-app.md](howto-add-an-app.md).)
+
+2. **Pool capacity (how many run at once) — the fleet‑wide cap.** Concurrency is bounded
+   by the pool, not per user: a `WarmPool`'s `replicas` sets the ceiling on
+   simultaneously‑*running* sessions, and `minIdle` keeps warm headroom. When every
+   worker is busy, a new session gets **`503 Retry-After`** (idle ones checkpoint to S3
+   and free their worker, so the ceiling is on *active*, not *total*, sessions). Size
+   `replicas`/`minIdle` to your expected concurrency + budget:
+
+   ```yaml
+   # checkpoint-restore/controlplane/deploy/aio/generic-pool.yaml
+   spec: { templateRef: { name: aio-generic }, replicas: 8, minIdle: 2 }
+   ```
+
+3. **Fork fan‑out cap (blast radius) — apiserver‑enforced.** A `ForkSet.count` is hard‑
+   capped at **256** by the CRD schema (`kubebuilder:validation:Maximum`), so one fan‑out
+   can't spawn unbounded sessions regardless of caller. (Per‑subject fork quota is a
+   caller/front‑door concern, not enforced here — see
+   [PRD-snapshot-fork.md](../PRD-snapshot-fork.md).)
+
+> **`SANDBOXD_MAX_SESSIONS_PER_USER` is currently read but NOT enforced** (each
+> principal already maps to one durable session per app, so there's nothing to count).
+> It's a placeholder for a future multiple‑named‑sessions‑per‑user feature — don't rely
+> on it as a quota today; use the three levers above.
 
 ### Tenant isolation (built in, nothing to configure)
 
@@ -174,25 +205,33 @@ each request to the one worker holding that session via `X-Session-ID`.
 ### Apply changes
 
 ```bash
+# Broker gate / app registry (env-only — no new image; re-apply + roll):
 kubectl apply -f checkpoint-restore/controlplane/deploy/aio/broker-sandboxd.yaml
 kubectl rollout status deployment/aio-sandbox-broker-sandboxd -n default
+
+# Pool capacity (replicas / minIdle): the operator reconciles the WarmPool:
+kubectl apply -f checkpoint-restore/controlplane/deploy/aio/generic-pool.yaml
 ```
 
-(Env‑only changes don't need a new image; just re‑apply and let the Deployment roll.)
+(Group membership changes take effect on the user's next token — no redeploy.)
 
 ### Inspect / operate
 
+sandboxd sessions aren't `SandboxClaim` objects — they live in the Valkey assignment
+table (authoritative) and are mirrored to `Session` CRs. Inspect/operate on those:
+
 ```bash
-# Who holds what
-kubectl get sandboxclaims -n default \
-  -L aio-sandbox.broker/principal,aio-sandbox.broker/session-id
+# A user's sessions (ids are sess-<principal>[-<app>]-<hash>):
+kubectl get sessions -n default | grep <user>
 
-# Count for one principal (compare against the cap)
-kubectl get sandboxclaims -n default \
-  -l aio-sandbox.broker/principal=<user> --no-headers | wc -l
+# A session's phase + worker:
+kubectl get session -n default sess-<user>-<app>-<hash> \
+  -o custom-columns=PHASE:.status.phase,WORKER:.status.workerPod
 
-# Free a user's sandboxes manually (TTL is the automatic backstop)
-kubectl delete sandboxclaims -n default -l aio-sandbox.broker/principal=<user>
+# End a session manually: delete the CR (the operator/GC also reaps its Valkey entry
+# and S3 snapshot; TTL-after-suspend is the automatic backstop). Deleting the CR is
+# the durable action — the router won't resurrect a session with no record.
+kubectl delete session -n default sess-<user>-<app>-<hash>
 ```
 
 ---
@@ -201,10 +240,12 @@ kubectl delete sandboxclaims -n default -l aio-sandbox.broker/principal=<user>
 
 | Goal | Knob | File |
 |---|---|---|
-| Hide/deny a tool for a tier | `mcpAuthorization.rules` (CEL on `jwt.groups` / `mcp.tool.name`) | `deploy/30-agentgateway.yaml` |
+| Hide/deny a tool for a tier (per app) | that app route's `mcpAuthorization.rules` (CEL on `jwt.groups` / `mcp.tool.name`) | `deploy/30-agentgateway.yaml` |
 | Grant a user the exec tools | add to `sandbox-power` group in Keycloak | Keycloak admin |
-| Require membership to get any sandbox | `AIO_REQUIRED_GROUP` (baseline) | `checkpoint-restore/controlplane/deploy/aio/broker-sandboxd.yaml` |
-| Gate a specific app to a tier | the app's `group` in `SANDBOXD_APPS` | `…/broker-sandboxd.yaml` |
+| Require membership to get any sandbox | `AIO_REQUIRED_GROUP` (baseline gate) | `checkpoint-restore/controlplane/deploy/aio/broker-sandboxd.yaml` |
+| Gate a specific app to a tier (limit what a user can run) | the app's `group` in `SANDBOXD_APPS` | `…/broker-sandboxd.yaml` |
+| Cap concurrent running sessions (fleet‑wide) | `WarmPool` `replicas` / `minIdle` (→ `503` when full) | `…/generic-pool.yaml` |
+| Bound a single fan‑out | `ForkSet.count` ≤ 256 (apiserver‑enforced) | CRD schema |
 
 See [architecture-broker.md](architecture-broker.md) for how these fit into the
 end-to-end auth/authz flow.
