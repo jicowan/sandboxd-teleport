@@ -2,9 +2,7 @@
 
 This is the architecture of the session‑teleport control plane behind the broker:
 the **router**, the **operator**, the **Valkey** assignment table, the **sandboxd
-worker** agent, and **S3**. It supersedes the pre‑build design narrative in
-`checkpoint-restore/docs/ARCHITECTURE.md` — that file's "RESOLVED MODEL" section
-remains conceptually accurate, but this document describes the system as shipped.
+worker** agent, and **S3**.
 
 For the auth front door on the other side of the broker, see
 [architecture-broker.md](architecture-broker.md). For field‑level CRD detail, see
@@ -17,6 +15,15 @@ from any particular pod. It can be checkpointed to S3, its worker freed, and lat
 restored onto *any* interchangeable warm worker on *any* node — with state intact.
 This is "teleport." It gives temporal oversubscription: many sessions, fewer
 workers, idle sessions parked in S3.
+
+> **Prior art.** This teleport / suspend‑resume model is borrowed from
+> [Agent Substrate](https://github.com/agent-substrate/substrate), which pioneered
+> multiplexing many mostly‑idle actors onto fewer workers via gVisor
+> checkpoint/restore. sandboxd exists because Substrate can't run on managed EKS (it
+> requires the `PodCertificateRequest`/`ClusterTrustBundle` APIs EKS doesn't serve) —
+> so it reimplements the same core idea EKS‑natively and adds the production layers
+> Substrate hadn't (auth, GC, durability, per‑session IAM). See
+> [overview-and-vs-substrate.md](overview-and-vs-substrate.md).
 
 ## The load‑bearing distinction: worker vs. sandbox
 
@@ -63,7 +70,11 @@ already reserved room when it placed each worker (one sandbox per worker).
 A thin, stateless, session‑aware reverse proxy. Per request:
 
 1. Resolve identity from headers (`X-Session-ID`, optional `X-Session-Subject`,
-   `X-Session-Pool`). Missing session id → `401`.
+   `X-Session-Pool`, `X-Session-App`). Missing session id → `401`. The pool + app
+   hints are only used when the operator must **lazily create** a Session on first
+   contact (`X-Session-Pool` → `spec.poolRef` capacity, `X-Session-App` → `spec.appRef`
+   the AppTemplate workload on a generic pool); they're ignored once the Session
+   exists. The router itself is app‑agnostic — it just carries the hints to `/resume`.
 2. **Fast path:** read the session from Valkey; if it's `Running` on a **live**
    worker, stream‑proxy to that worker's pod IP:port. Liveness is verified against
    the `worker:<pod>` KV entry (must exist, be `busy`, and be bound to this
@@ -74,8 +85,11 @@ A thin, stateless, session‑aware reverse proxy. Per request:
    reach the client*, the router buffers a small body and falls through to a
    resume once (transparent teleport instead of a 502).
 4. `POST /_warm` is a protocol‑agnostic primitive: "ensure this session is
-   Running" (resume if needed) and return `204` — no payload proxied. This is what
-   the broker calls on `initialize`.
+   Running" (resume if needed) and return `204` — no payload proxied. It's available
+   for any caller that wants to pre‑warm a session without sending an MCP payload.
+   (The reference broker no longer calls it on `initialize`: it now transparently
+   *forwards* `initialize` to the sandbox, which warms the session as a side effect.
+   `/_warm` remains as a standalone primitive.)
 
 The router **only reads** the assignment table and stamps `lastActiveAt` (for idle
 detection). It never assigns workers or writes session state — that is the
@@ -84,66 +98,109 @@ output flows token‑by‑token.
 
 ### Operator (`cmd`, kubebuilder)
 
-The control brain. It is the **sole writer** of the Valkey assignment table.
-Responsibilities:
+The control brain — a Kubernetes controller (built with kubebuilder) that runs a set
+of reconcile loops and background sweeps. It is the **sole writer** of the Valkey
+assignment table: the router and workers only *read* it, so every change to "which
+session is on which worker" funnels through the operator. That single‑writer rule is
+what keeps the assignment table consistent (it can guard every write against a version
+number, so two operator replicas or a restart can't corrupt it).
 
-- **Reconcile pools → worker Deployments.** A `WarmPool` (bound to a
-  `SandboxTemplate`) becomes a Deployment of worker pods. `minIdle` autoscaling
-  raises the effective replica count to `max(spec.replicas, busy + minIdle)` so
-  warm headroom is maintained. A pool's `SandboxTemplate` supplies **worker‑shape**
-  (scheduling/resources/workerImage); its `image` is optional — **set ⇒ a dedicated
-  single‑image pool** (`poolRef`‑only sessions get that image), **empty ⇒ a generic
-  pool** that runs whatever workload a Session names via `spec.appRef` (an
-  `AppTemplate` — the scheduling‑free workload half). Workload resolution precedence:
-  inline `image` > `appRef` (AppTemplate) > the pool's own dedicated image. Placement
-  is always a pool property; an app can't request scheduling. See
-  [PRD‑arbitrary‑image‑sessions §13](../PRD-arbitrary-image-sessions.md).
-- **Worker discovery.** A label‑scoped pod informer (`sandboxd.io/app=worker`)
-  writes a `worker:<pod>` KV entry when a worker becomes Ready, and removes it when
-  the pod dies. A 30s prune loop reconciles missed deletes.
-- **Resume workflow.** On `POST /resume`, claim an idle worker (atomic SPOP), CAS
-  the session to `Resuming`, call the worker's `/run` (cold start from the pool's
-  template image) or `/restore` (teleport from an S3 snapshot), wait for ready, CAS
-  to `Running`. Fencing (`workerHolds`) prevents split‑brain; if a live sandbox
-  already exists it is preferred over restoring.
-- **Idle suspend + checkpoints.** A sweeper suspends idle sessions (checkpoint →
-  S3, free the worker). Optional periodic background checkpoints (per‑template
-  `checkpointIntervalSeconds`) bound crash loss. Both sweeps are **O(due), not
-  O(N)**: they read Redis ZSET due‑indexes (`idx:suspend:due`, `idx:checkpoint:due`)
-  scored by each session's deadline, so a pass touches only sessions actually due,
-  not the whole table (`--sweep-interval-seconds`, default 30s, staggered).
-- **On‑demand suspend.** Besides idle‑timeout and checkpoint‑on‑terminate, a session
-  can be checkpoint‑suspended **on request**: set `Session.spec.suspendRequest` to a
-  fresh opaque token and a `SessionReconciler` performs one checkpoint→S3→Suspended,
-  then advances the `status.lastSuspendHandled` watermark. **Edge‑triggered** (one‑shot
-  per token) so it never fights reactive resume — the session may be requested back to
-  Running afterward and won't be re‑suspended. The declarative, CR‑driven "save my
-  state now" primitive (docs/PRD-on-demand-suspend.md); the example broker's
-  `fork_session` composes it.
-- **Session GC.** Optional reaper of a dead session's **whole footprint** — the S3
-  snapshot, the Valkey `session:*` entry (+ its due‑index membership), and the
-  `Session` CR — running under a *separate, least‑privilege* S3 identity (list +
-  delete on `sandboxes/*` only). Four passes: **TTL** (a Suspended session past its
-  retention — per‑session `ttlAfterSuspendSeconds`, else the operator default
-  `--default-ttl-after-suspend-seconds`); **abandoned** (a non‑Suspended entry whose
-  bound worker is gone / no longer holds it — the same `workerHolds` fence the router
-  uses — idle past `--abandoned-grace-seconds`); **orphan‑S3** (a snapshot prefix no
-  session references); and **orphan‑CR** (an operator‑owned `Session` CR with a dead
-  phase and no KV entry). CR deletion is ownership‑aware: only CRs the operator
-  lazily created (labeled `sandboxd.io/created-by=operator`) are **deleted**;
-  user‑declared Sessions are only tombstoned to `Absent`, never deleted.
-  `--gc-dry-run` (**default on** when GC is enabled) classifies + records candidates
-  without mutating anything, so the classification can be validated against a live
-  fleet before arming (set `SANDBOXD_GC_DRY_RUN=0` to arm).
-- **Lazy Session creation.** On a resume for an unknown session id, the operator
-  creates a `Session` object from the pool hint header.
-- **Fork fan‑out.** A `ForkSet` mints N independent child `Session`s from one common
-  source — a `BaseSnapshot` (restore, identical state) or a pool's image (cold‑start)
-  — reusing the resume path; children are ordinary sessions afterward, routed
-  individually by `X‑Session‑ID`. A `BaseSnapshot` is a promoted golden checkpoint
-  (S3 copy‑on‑promote to a fork‑stable `bases/` prefix, outside the GC orphan sweep;
-  finalizer‑backed reclaim; refCount gated on first‑restore + pins). See
-  [PRD-snapshot-fork.md](../PRD-snapshot-fork.md).
+Its responsibilities, grouped by what they do:
+
+**Provision capacity (pools → worker pods).** A `WarmPool` (which points at a
+`SandboxTemplate`) is reconciled into a Kubernetes `Deployment` of warm worker pods.
+The `SandboxTemplate` describes the pool's **worker‑shape** — placement
+(nodeSelector/tolerations/spread), resources, and the sandboxd worker image — and
+whether it pins a workload `image`:
+
+- `image` **set** → a **dedicated** pool that runs only that one image (a plain
+  `poolRef` session gets it).
+- `image` **empty** → a **generic** pool that runs whatever workload each session
+  brings via `spec.appRef` (an [`AppTemplate`](admin-guide-crds.md#apptemplate-appt) —
+  the scheduling‑free "what to run" half).
+
+Workload resolution precedence for a session: inline `spec.image` > `appRef`
+(AppTemplate) > the pool's own dedicated image. **Placement is always a pool property**
+— an app can't request scheduling. To keep warm headroom, `minIdle` autoscaling raises
+the effective replica count to `max(spec.replicas, busy + minIdle)`. See
+[PRD‑arbitrary‑image‑sessions §13](../PRD-arbitrary-image-sessions.md).
+
+**Track live workers (discovery).** A pod informer scoped to the worker label
+(`sandboxd.io/app=worker`) writes a `worker:<pod>` entry into Valkey when a worker
+becomes Ready and deletes it when the pod dies — this is how the operator knows which
+workers exist and are idle. A 30s prune loop is the safety net for delete events the
+informer missed (e.g. pods removed while the operator was down).
+
+**Place / restore a session (the resume workflow).** This is the core hot path, run on
+`POST /resume`. Given a session id, the operator:
+1. **Claims an idle worker** from the target pool — an atomic Redis `SPOP` (pop one
+   from the idle set) so two concurrent resumes can never grab the same worker.
+2. Marks the session `Resuming` (a *compare‑and‑swap* write: it only succeeds if the
+   record hasn't changed since it was read — the guard that makes the single‑writer
+   model safe under retries/HA).
+3. Calls the worker: **`/run`** to cold‑start the workload image, or **`/restore`** to
+   teleport it back from its S3 snapshot (it restores if the session has a saved
+   snapshot, else cold‑starts).
+4. Waits for the sandbox to become ready, then marks the session `Running`.
+
+A **fencing** check (`workerHolds` — "does this worker's KV entry still exist, say
+`busy`, and name this exact session?") prevents split‑brain, i.e. two workers both
+believing they own the same session; and if a live sandbox already exists for the
+session, the operator reuses it instead of restoring a stale snapshot.
+
+**Suspend idle sessions + periodic checkpoints.** A background sweeper checkpoints
+sessions that have gone idle (RAM+FS → S3) and frees their worker; an optional
+per‑template `checkpointIntervalSeconds` also checkpoints long‑running sessions
+periodically so a worker crash loses at most ~N seconds. These sweeps are **cheap at
+scale**: rather than scan every session each tick, the operator keeps two Redis sorted
+sets (`idx:suspend:due`, `idx:checkpoint:due`) scored by each session's *deadline*, and
+a pass only touches sessions whose deadline has actually passed (`--sweep-interval-seconds`,
+default 30s; the two sweeps are staggered to spread Valkey load).
+
+**Suspend on request (on‑demand).** Beyond idle‑timeout and checkpoint‑on‑terminate, a
+caller can force a "save my state now": set `Session.spec.suspendRequest` to a fresh
+opaque token, and a reconciler performs exactly one checkpoint → S3 → `Suspended`, then
+records that token in `status.lastSuspendHandled`. It's **one‑shot per token** (fires
+on the change, not continuously), so it never fights a concurrent resume — the session
+can be brought back to `Running` afterward and won't be re‑suspended until you issue a
+*new* token. This is the declarative "save now" primitive
+([PRD-on-demand-suspend.md](../PRD-on-demand-suspend.md)); the example broker's
+`fork_session` builds on it.
+
+**Reclaim dead sessions (garbage collection, optional).** A session's footprint is
+three things — an S3 snapshot, a Valkey `session:*` entry, and (sometimes) a `Session`
+CR — and GC reaps all three, under a *separate least‑privilege* S3 identity (list +
+delete on `sandboxes/*` only). It classifies dead sessions four ways:
+- **TTL** — a `Suspended` session older than its retention (`ttlAfterSuspendSeconds`,
+  else `--default-ttl-after-suspend-seconds`).
+- **abandoned** — a non‑Suspended session whose worker is gone (same `workerHolds`
+  fence as above), idle past `--abandoned-grace-seconds`.
+- **orphan‑S3** — a snapshot prefix in S3 that no session references.
+- **orphan‑CR** — a `Session` CR with a dead phase and no KV entry.
+
+CR deletion is **ownership‑aware**: only CRs the operator created itself (labeled
+`sandboxd.io/created-by=operator`) are deleted; a user‑declared `Session` is only marked
+`Absent`, never deleted. GC ships **safe by default** — `--gc-dry-run` is on when GC is
+enabled, so it logs what it *would* reap without touching anything; set
+`SANDBOXD_GC_DRY_RUN=0` to arm it once you've validated the classification on your fleet.
+
+**Create sessions the broker didn't (lazy creation).** If a resume arrives for a
+session id with no `Session` CR yet, the operator creates one from the request's pool +
+app hints (`X-Session-Pool` → `poolRef`, `X-Session-App` → `appRef`) — this is how a
+front door can drive sessions without ever touching the CRDs directly.
+
+**Fan out forks.** A `ForkSet` mints N independent child `Session`s from one common
+source and drives each through the normal resume path; afterward each child is an
+ordinary session addressed by its own `X-Session-ID`. The source is either a
+`BaseSnapshot` (all children **restore** the same checkpoint → identical starting state)
+or a pool image/AppTemplate (all children **cold‑start** independently). A `BaseSnapshot`
+is a promoted "golden" checkpoint, copied to a fork‑stable `bases/` S3 prefix (kept out
+of the orphan‑S3 sweep, with finalizer‑backed cleanup and reference counting). See
+[PRD-snapshot-fork.md](../PRD-snapshot-fork.md).
+
+Every assignment‑table write uses the compare‑and‑swap discipline noted above — that,
+plus leader election on the reconcile loops, is what lets you run multiple operator
+replicas safely.
 
 The operator uses CAS‑on‑version (Lua) for every KV write — that's the split‑brain
 guard, since it is the single writer but must be safe across restarts/HA.
@@ -366,7 +423,7 @@ longer keeping up. Full analysis + remaining options:
 
 ## Trust boundaries and what's next
 
-- **Control‑hop mTLS (P1.5) — implemented (opt‑in).** The two control hops —
+- **Control‑hop mTLS (opt‑in).** The two control hops —
   **router → operator `/resume`** and **operator → worker** control API (`:8090`) —
   can be secured with **SPIFFE mTLS via SPIRE**, mutually authenticated on the peer's
   SPIFFE ID (`spiffe://sandboxd/{router,operator,worker}`). Enabled by `--mtls` /
@@ -381,10 +438,29 @@ longer keeping up. Full analysis + remaining options:
   operator + router only (`controlplane/deploy/spire/worker-networkpolicy.yaml`);
   effective once cluster‑wide NetworkPolicy enforcement is enabled. See
   [security-spiffe-spire.md](security-spiffe-spire.md) §8b.
-- **Still to do (data‑plane pass):** the **broker → router** hop is not yet mTLS'd (the
-  router still **trusts the `X-Session-ID` header** from the broker; only the broker can
-  reach it in‑cluster). A second pass would extend mTLS there (the router's inbound
-  `:8080` would then need a plain health port too).
+- **Still to do (data‑plane pass):** the **broker → router** hop is not yet mTLS'd. The
+  router **trusts the request headers** from whatever can reach it in‑cluster —
+  `X-Session-ID` (which session), and the lazy‑creation hints `X-Session-Pool` /
+  `X-Session-App` (which pool + AppTemplate a brand‑new session runs). It does **no**
+  authorization itself: enforcing *who may run which app* is the front door's job (the
+  reference broker checks the app's Keycloak group before it ever sets `X-Session-App`
+  — see [architecture-broker.md](architecture-broker.md)). So the router must stay
+  reachable only by a trusted caller; a second pass would add mTLS there (its inbound
+  `:8080` would then need a plain health port, like the worker's `:8092`).
+- **Worker registry credentials.** The worker pulls the workload image itself (via the
+  node containerd), and for **private ECR** it uses the worker's EKS Pod Identity to
+  fetch a pull token. That grants the (privileged) worker *pod* ECR **read** on the
+  scoped repos — not the nested sandbox, which never sees those credentials. Keep the
+  `ecr-pull` policy scoped to the repos your AppTemplates actually use. Only ECR is
+  wired today; other private registries (Artifactory/Harbor/etc.) aren't yet supported.
+- **Arbitrary workload images (generic pools).** A generic pool runs whatever
+  `AppTemplate` a session names, so *which images run* is a governance question, not
+  just a runtime one. gVisor is still the isolation boundary (an untrusted image runs in
+  the sandbox, not as a peer of the privileged worker), but the platform decides *who
+  may author AppTemplates* and *which images* are allowed. In the reference front door
+  that's gated by the broker's per‑app group entitlement; a self‑service /
+  caller‑supplied‑image path would need the registry/signature policy sketched in
+  [PRD‑arbitrary‑image‑sessions.md](../PRD-arbitrary-image-sessions.md).
 - **Single worker namespace:** the operator assumes one namespace
   (`--resume-namespace`) for templates/pools/sessions and worker‑pod prune, and KV
   keys carry no namespace. Multi‑namespace (per‑tenant) workers are a known future
