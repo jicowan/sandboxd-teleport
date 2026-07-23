@@ -1,6 +1,9 @@
 .venv/
 __pycache__/
 *.pyc
+
+# Quarantined dead code / superseded docs pending deletion (kept locally only)
+delete_me/
 .env
 .env.*
 *.bak
