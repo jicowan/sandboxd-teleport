@@ -301,11 +301,11 @@ deliberately swappable.
 The reference cluster has some state that isn't fully captured in the repo IaC —
 worth knowing when you operate it:
 
-- **Broker Service selector.** `deploy/20-broker.yaml` ships the older
-  agent‑sandbox broker (`app: aio-sandbox-broker`). The live
-  `aio-sandbox-broker-svc` selector was cut over to `app:
-  aio-sandbox-broker-sandboxd` (the sandboxd broker). The cutover/rollback is a
-  Service‑selector patch — see the admin guide.
+- **Broker Service selector.** `aio-sandbox-broker-svc` selects the sandboxd broker
+  (`app: aio-sandbox-broker-sandboxd`). The older agent‑sandbox broker it was cut over
+  from is retired (its manifests are in `delete_me/`), though an orphaned
+  `aio-sandbox-broker` Deployment may still be running on the reference cluster
+  (dead in traffic — scale to 0 / delete when convenient).
 - **`broker.example.com` ingress** (internal ALB) exists in the cluster but has
   no manifest under `deploy/`; it's referenced only in docs. Reconcile it into IaC
   or treat it as a manually‑applied internal door.

@@ -20,6 +20,7 @@ describes the live reference cluster it says so explicitly.
 | 2 | [admin-guide-broker.md](admin-guide-broker.md) | Platform admins | Install & configure the broker, agentgateway, and Keycloak. |
 | 3 | [architecture-broker.md](architecture-broker.md) | Architects / admins | How the broker, agentgateway, and Keycloak fit together (the auth front door). |
 | 3b | [howto-add-an-app.md](howto-add-an-app.md) | Platform admins | Add a new sandbox "app" (MCP server) to the front door: AppTemplate + broker registry + agentgateway routes + Keycloak group. |
+| 3c | [HOWTO-tool-access-and-quotas.md](HOWTO-tool-access-and-quotas.md) | Platform admins | Filter which tools each user sees (agentgateway `mcpAuthorization` tiers) and the create gate / per‑user session model. |
 | 4 | [install-guide-sandboxd.md](install-guide-sandboxd.md) | Platform admins | Deploy the operator, router, Valkey, RBAC, Pod Identity, CRDs, and a pool. |
 | 5 | [admin-guide-crds.md](admin-guide-crds.md) | Platform admins | Reference for every CRD field (SandboxTemplate, AppTemplate, WarmPool, Session, ForkSet, BaseSnapshot). |
 | 6 | [architecture-sandboxd.md](architecture-sandboxd.md) | Architects / admins | How sandboxd, the router, the operator, Valkey, and workers relate. |

@@ -44,6 +44,7 @@ history.
 | `docs/STAGE2.md` | Stage‑2 design map (AgentCore + OBO + `broker_mcp`). |
 | `docs/DESIGN.md` | Early overall design (Stage‑1/2 era). |
 | `docs/3LO-PLAN.md` | Per‑user identity via 3LO through AgentCore Gateway — obviated by agentgateway JWT passthrough. |
+| `docs/POSTMORTEM-agentcore-vs-agentgateway.md` | The evaluation that chose agentgateway over AgentCore Gateway. Its conclusion is now just *the architecture* (see `docs/DESIGN-agentgateway.md` + `docs/sandboxd/`), so it's kept only as the historical rationale. |
 
 (The `docs/adr/` directory was removed — both ADRs live here now.)
 

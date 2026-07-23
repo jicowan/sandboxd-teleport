@@ -1,9 +1,9 @@
 # Design — agentgateway front door (current/production)
 
-Supersedes the AgentCore Gateway design (see
-`POSTMORTEM-agentcore-vs-agentgateway.md`). Verified end-to-end on the live
-cluster: a `tools/call` through agentgateway executed shell in a sandbox as
-the authenticated user, HTTP 200 in ~0.6s.
+Supersedes the earlier AgentCore Gateway design (that evaluation is archived at
+`delete_me/docs/POSTMORTEM-agentcore-vs-agentgateway.md`). Verified end-to-end on the
+live cluster: a `tools/call` through agentgateway executed shell in a sandbox as the
+authenticated user, HTTP 200 in ~0.6s.
 
 ## Architecture
 
