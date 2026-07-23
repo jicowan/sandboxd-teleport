@@ -621,7 +621,7 @@ root-first, real bundles — with the Pod object staying valid in the API?
 Created `busybox-ckpt` Sandbox (CRD, `runtimeClassName: gvisor`, counter+state
 file). Landed on gvisor node as a real runsc pod: pause/root `22c18f…`
 (type=sandbox) + workload `7d5543…` (type=container, name=counter), sharing one
-sentry PID. Manifest: `checkpoint-restore/busybox-sandbox.yaml`. Orchestrator
+sentry PID. Manifest (archived): `delete_me/checkpoint-restore-spike-manifests/busybox-sandbox.yaml`. Orchestrator
 scripts staged on-node at `/var/lib/ckpt-orch.sh` + `/var/lib/restore-orch.sh`.
 
 **Checkpoint (whole sandbox via ROOT/pause id): WORKS ✅** — `runsc checkpoint
@@ -913,7 +913,7 @@ can run `runsc` INSIDE its container to launch a nested gVisor sandbox.
 - `runsc create`+`start` a nested sandbox → **running**; `runsc exec … uname -r`
   → **`4.19.0-gvisor`** (the gVisor sentry kernel, NOT the node's 6.1) = proof
   the nested sandbox is genuinely gVisor-isolated inside the pod.
-- Manifest: `checkpoint-restore/worker-nested.yaml`.
+- Manifest (archived): `delete_me/checkpoint-restore-spike-manifests/worker-nested.yaml`.
 
 **DinD assessment (user flagged: "feels a lot like DnD"): CORRECT, and it's the
 key tradeoff.** This worker is Docker-in-Docker-shaped: privileged container
@@ -965,8 +965,9 @@ would show `boot,count=1` fresh. Same-pod restore showed identical 7→8 continu
 
 **Bottom line:** nested gVisor C/R (the worker model's core mechanism) is proven
 end-to-end incl. cross-pod. The DinD/privileged tradeoff (A vs B) still stands as
-the architecture decision; the MECHANISM works. Runbook:
-`docs/RUNBOOK-nested-cross-pod.md`. Manifests: `worker-nested.yaml` (+ `-b`).
+the architecture decision; the MECHANISM works. Runbook (archived):
+`delete_me/checkpoint-restore-docs/RUNBOOK-nested-cross-pod.md`. Manifests
+(archived): `delete_me/checkpoint-restore-spike-manifests/worker-nested.yaml` (+ `-b`).
 
 ## Findings / go-no-go
 

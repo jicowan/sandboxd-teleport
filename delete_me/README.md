@@ -48,6 +48,45 @@ history.
 
 (The `docs/adr/` directory was removed — both ADRs live here now.)
 
+### Superseded sandboxd design/spike docs (`checkpoint-restore-docs/`)
+
+These are the **original sandboxd design record and spike runbooks** (2026‑07‑01 →
+07‑05), written before the operational docs in `docs/sandboxd/` existed. They are
+*not* agent‑sandbox dead code — they document how the proven primitives work — but
+everything actionable in them is now covered by the current `docs/sandboxd/` set, so
+they're parked here as history. (The one doc with unique, still‑useful content — the
+networking data‑path + lifecycle design — was **salvaged** to
+`docs/sandboxd/architecture-networking-lifecycle.md`, not moved here.)
+
+| Moved from | What it was | Now covered by |
+|------------|-------------|----------------|
+| `checkpoint-restore/docs/ARCHITECTURE.md` | Draft "substrate‑like on agent‑sandbox" architecture | `docs/sandboxd/architecture-sandboxd.md` |
+| `checkpoint-restore/docs/PRD-control-plane.md` | Foundational control‑plane PRD (decisions O1–O9) | shipped code + focused PRDs in `docs/` |
+| `checkpoint-restore/docs/TDD-control-plane.md` | Implementation‑level companion to that PRD | the code itself |
+| `checkpoint-restore/docs/TELEPORT-SOLUTION.md` | Design that proved teleport | `docs/sandboxd/architecture-sandboxd.md` |
+| `checkpoint-restore/docs/WARM-WORKER-DESIGN.md` | Early warm‑pool sketch | `architecture-sandboxd.md` + `admin-guide-crds.md` |
+| `checkpoint-restore/docs/RUNBOOK-aio-teleport.md` | AIO teleport spike walkthrough | `docs/sandboxd/runbook-reproduce-test-env.md` (Part A/B) |
+| `checkpoint-restore/docs/RUNBOOK-container-teleport.md` | Single‑container C/R spike | runbook Part A |
+| `checkpoint-restore/docs/RUNBOOK-nested-cross-pod.md` | Nested cross‑pod C/R spike | runbook Part A |
+
+(The `checkpoint-restore/docs/` directory was removed — these live here now.)
+
+### Early-spike manifests (`checkpoint-restore-spike-manifests/`)
+
+The hand-driven Kubernetes manifests from the **pre‑sandbox checkpoint/restore
+spikes** (2026‑07‑01/02) — used to prove the primitives by running `runsc` C/R by
+hand before the sandboxd worker existed. Superseded by the real worker deploy
+(`checkpoint-restore/sandboxd/worker-deploy.yaml`) and the current runbook. Kept as
+history; only `checkpoint-restore/NOTES.md` (the spike log) and the archived
+runbooks above still reference them.
+
+| Moved from | What it was |
+|------------|-------------|
+| `checkpoint-restore/busybox-sandbox.yaml` | A `Sandbox` CR on the **agent‑sandbox** API (`agents.x-k8s.io/v1alpha1`) — the retired integration; won't even apply without those CRDs. |
+| `checkpoint-restore/ckpt-shim.yaml` | Privileged helper pod (`ckpt-shim2`, SA `ckpt-spike`, hostPath `/`) that ran manual `runsc` checkpoint/restore + S3 I/O. |
+| `checkpoint-restore/worker-nested.yaml` | Plain runc pod that ran `runsc` inside itself to prove nested gVisor C/R (worker A). |
+| `checkpoint-restore/worker-nested-b.yaml` | Same, second copy (worker B) for the cross‑pod teleport proof. |
+
 ## NOT moved (still live / shared)
 
 - `deploy/00-keycloak-realm.yaml` — shared auth (Keycloak realm), used by the sandboxd front door.

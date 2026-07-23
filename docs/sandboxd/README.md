@@ -24,9 +24,16 @@ describes the live reference cluster it says so explicitly.
 | 4 | [install-guide-sandboxd.md](install-guide-sandboxd.md) | Platform admins | Deploy the operator, router, Valkey, RBAC, Pod Identity, CRDs, and a pool. |
 | 5 | [admin-guide-crds.md](admin-guide-crds.md) | Platform admins | Reference for every CRD field (SandboxTemplate, AppTemplate, WarmPool, Session, ForkSet, BaseSnapshot). |
 | 6 | [architecture-sandboxd.md](architecture-sandboxd.md) | Architects / admins | How sandboxd, the router, the operator, Valkey, and workers relate. |
+| 6b | [architecture-networking-lifecycle.md](architecture-networking-lifecycle.md) | Architects / engineers | Deep dive on the sandbox **networking data path** (veth + stable interior IP, DNAT, reconnect-on-restore) and the **sandbox lifecycle** (readiness/idle/reset). |
 | 7 | [runbook-reproduce-test-env.md](runbook-reproduce-test-env.md) | Operators | End‑to‑end reproduction of the test environment + run a sample container. |
 | 8 | [api-reference-sandboxd-worker.md](api-reference-sandboxd-worker.md) | Operators / integrators | HTTP API surface of the sandboxd worker agent (`:8090`). |
 | 9 | [security-spiffe-spire.md](security-spiffe-spire.md) | Platform admins / security | Secure the control‑plane hops (router→operator, operator→worker) with SPIFFE/SPIRE mTLS: install, register identities, enable, verify. |
+
+**Background (optional):**
+[../../checkpoint-restore/history-worker-networking-and-teleport.md](../../checkpoint-restore/history-worker-networking-and-teleport.md)
+is the dated engineering log from the worker bring‑up — the problems hit getting a
+real workload to boot, network, checkpoint, and teleport, and how each was resolved.
+It's kept for rationale only; the current design is in doc 6b, not here.
 
 ## New here? Order of operations
 
