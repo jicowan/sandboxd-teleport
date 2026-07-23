@@ -12,7 +12,7 @@ You connect to an HTTPS MCP endpoint. The reference front door can expose **one 
 more "apps"** — each is a different sandbox image (e.g. the all‑in‑one AIO sandbox,
 or another MCP server), reached at its **own endpoint path** (e.g. `/aio/mcp`,
 `/everything/mcp`). You register each app you want as a separate MCP server in your
-client. Behind each endpoint:
+client, e.g. Claude code. Behind each endpoint:
 
 - **agentgateway** verifies your identity token, filters which tools you may see,
   and routes the path to the right app.

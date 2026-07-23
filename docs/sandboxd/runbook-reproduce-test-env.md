@@ -167,6 +167,10 @@ kubectl delete -f checkpoint-restore/sandboxd/worker-deploy.yaml
 Now stand up the operator, router, Valkey, and a pool, and drive a session through
 the router exactly as the broker would.
 
+> Every command here runs from the in‑cluster debug pod
+> (`kubectl exec toolbox`) against ClusterIP Service DNS (the router, Valkey) and
+> worker pod IPs — all cluster‑internal.
+
 ### B1. Install the control plane
 
 Follow [install-guide-sandboxd.md](install-guide-sandboxd.md) Steps 2–5:
@@ -181,18 +185,24 @@ kubectl apply -f checkpoint-restore/controlplane/deploy/smoke/controlplane.yaml
 kubectl -n sandboxd-controlplane-system rollout status deploy/sandboxd-operator
 kubectl -n sandboxd-controlplane-system rollout status deploy/sandboxd-router
 
-# A pool of gVisor workers
-kubectl apply -f checkpoint-restore/controlplane/deploy/aio/aio-pool.yaml
+# A generic pool of gVisor workers + the AppTemplates it runs
+kubectl apply -f checkpoint-restore/controlplane/deploy/aio/generic-pool.yaml
 ```
+
+This is a **generic pool** (`aio-generic-pool`): its SandboxTemplate carries only
+worker‑shape, so a session brings its own workload via an AppTemplate
+(`X-Session-App`). That's the model the rest of these docs lead with. (Prefer a
+dedicated, single‑image pool? `deploy/aio/aio-pool.yaml` is a ready example — apply
+it instead, then drop `X-Session-App` and use `X-Session-Pool: aio-pool` below.)
 
 Confirm the control plane and pool are healthy:
 
 ```sh
 kubectl get pods -n sandboxd-controlplane-system
 kubectl get wp -n default
-# NAME       REPLICAS   IDLE   BUSY
-# aio-pool   4          2      0
-kubectl get pods -n default -l sandboxd.io/pool=aio-pool
+# NAME               REPLICAS   IDLE   BUSY
+# aio-generic-pool   2          1      0
+kubectl get pods -n default -l sandboxd.io/pool=aio-generic-pool
 ```
 
 ### B1.5. (Optional) Secure the control plane with SPIFFE/SPIRE mTLS
@@ -214,7 +224,7 @@ kubectl patch deploy sandboxd-operator -n sandboxd-controlplane-system \
   --patch-file checkpoint-restore/controlplane/deploy/spire/controlplane-mtls-patch.yaml
 kubectl patch deploy sandboxd-router -n sandboxd-controlplane-system \
   --patch-file checkpoint-restore/controlplane/deploy/spire/router-mtls-patch.yaml
-kubectl annotate warmpool aio-pool -n default sandboxd.io/nudge="$(date +%s)" --overwrite
+kubectl annotate warmpool aio-generic-pool -n default sandboxd.io/nudge="$(date +%s)" --overwrite
 ```
 
 Full guide (registration, verification, troubleshooting, rollback):
@@ -223,20 +233,27 @@ identically with mTLS on.
 
 ### B2. Warm a session through the router
 
-`/_warm` is the protocol‑agnostic primitive the broker uses on `initialize`. It
-resumes/cold‑starts the session onto the pool and returns `204` — no payload.
+`/_warm` is a protocol‑agnostic router primitive: it resumes/cold‑starts the
+session onto the pool and returns `204` — no payload. (The broker doesn't use this
+path; it warms by transparently forwarding the MCP `initialize`, as in B3. `/_warm`
+is handy here to warm the session in isolation before making a real MCP call.)
+
+On a generic pool, `X-Session-App` names the AppTemplate (workload) the session
+should run; `X-Session-Pool` names the pool (capacity). The operator lazily creates
+the `Session` (poolRef + appRef) from these hints on first contact:
 
 ```sh
 kubectl exec toolbox -n default -- sh -c '
 curl -s -o /dev/null -w "%{http_code}\n" -X POST \
   -H "X-Session-ID: sess-demo" \
-  -H "X-Session-Pool: aio-pool" \
+  -H "X-Session-Pool: aio-generic-pool" \
+  -H "X-Session-App: aio-app" \
   http://sandboxd-router.sandboxd-controlplane-system:8080/_warm'
 # → 204  (or 503 if the pool has no idle worker → raise replicas/minIdle)
 ```
 
 Confirm the session went Running and got a worker (the operator lazily created the
-`Session` object from the pool hint):
+`Session` object from the pool + app hints):
 
 ```sh
 kubectl get sess -n default sess-demo
@@ -255,7 +272,8 @@ port:
 kubectl exec toolbox -n default -- sh -c '
 curl -s -X POST http://sandboxd-router.sandboxd-controlplane-system:8080/mcp \
   -H "X-Session-ID: sess-demo" \
-  -H "X-Session-Pool: aio-pool" \
+  -H "X-Session-Pool: aio-generic-pool" \
+  -H "X-Session-App: aio-app" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"runbook\",\"version\":\"1\"}}}"'
@@ -272,7 +290,7 @@ suspend→resume and confirm the marker survives on a possibly‑different worke
    ```sh
    kubectl exec toolbox -n default -- sh -c '
    curl -s -X POST http://sandboxd-router.sandboxd-controlplane-system:8080/mcp \
-     -H "X-Session-ID: sess-demo" -H "X-Session-Pool: aio-pool" \
+     -H "X-Session-ID: sess-demo" -H "X-Session-Pool: aio-generic-pool" -H "X-Session-App: aio-app" \
      -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
      -d "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"sandbox_execute_bash\",\"arguments\":{\"cmd\":\"echo teleport-proof-$(date +%s) | tee /tmp/marker.txt\"}}}"'
    ```
@@ -297,7 +315,7 @@ suspend→resume and confirm the marker survives on a possibly‑different worke
    ```sh
    kubectl exec toolbox -n default -- sh -c '
    curl -s -X POST http://sandboxd-router.sandboxd-controlplane-system:8080/mcp \
-     -H "X-Session-ID: sess-demo" -H "X-Session-Pool: aio-pool" \
+     -H "X-Session-ID: sess-demo" -H "X-Session-Pool: aio-generic-pool" -H "X-Session-App: aio-app" \
      -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
      -d "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"sandbox_execute_bash\",\"arguments\":{\"cmd\":\"cat /tmp/marker.txt\"}}}"'
    # → the SAME teleport-proof-… marker, on a possibly different worker
@@ -319,7 +337,7 @@ kubectl logs -n default <worker-pod-holding-the-session> | grep '\[sandbox'
 
 ```sh
 kubectl exec toolbox -n default -- redis-cli -h valkey.sandboxd-controlplane-system DEL "session:sess-demo"
-kubectl delete -f checkpoint-restore/controlplane/deploy/aio/aio-pool.yaml
+kubectl delete -f checkpoint-restore/controlplane/deploy/aio/generic-pool.yaml
 # (leave the control plane running, or delete deploy/smoke/controlplane.yaml too)
 kubectl delete pod toolbox -n default
 ```

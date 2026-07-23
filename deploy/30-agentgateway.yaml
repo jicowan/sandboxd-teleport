@@ -1,13 +1,16 @@
 # agentgateway (standalone) — the MCP front door.
 #
-#   client (user JWT) -> agentgateway (validate inbound JWT against Keycloak)
+#   client (user JWT) -> agentgateway (validate inbound JWT against Keycloak,
+#                          inject X-Sandbox-App per route)
 #     -> backendAuth passthrough (forward the SAME user JWT)
-#     -> broker (re-validates JWT, reads preferred_username/groups, claims sandbox)
-#     -> sandbox-router -> AIO pod
+#     -> broker (re-validates JWT, reads preferred_username/groups, resolves the
+#                app + enforces its group, derives a per-user+app session id)
+#     -> sandbox-router -> sandbox (runs the app's MCP server)
 #
 # Standalone mode: a single Deployment reading config.yaml from a ConfigMap.
-# Per-user identity reaches the broker with no OBO/3LO/consent (see
-# docs/POSTMORTEM-agentcore-vs-agentgateway.md).
+# MULTI-APP: one route per app (/aio/mcp, /everything/mcp) selects the app; there
+# is no catch-all "/mcp" route. Per-user identity reaches the broker with no
+# OBO/3LO/consent (backendAuth: passthrough).
 #
 # NOTE: the backend target uses the broker's Service DNS name. If the cluster's
 # CoreDNS is flaky, agentgateway's connect may time out — stabilize DNS rather

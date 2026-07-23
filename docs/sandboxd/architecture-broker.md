@@ -6,6 +6,22 @@ authenticating MCP proxy + tool authorization), and the **broker** (session
 derivation + forwarding). Together they turn an anonymous HTTPS request into an
 authenticated, authorized, per‑user MCP session routed into a sandbox.
 
+> **This front door is a *reference*, not a required part of sandboxd.** sandboxd
+> itself is a **generic platform for running sandboxes** — the sandbox inside a session
+> can be an MCP server, an agent, a web service, a batch job, or anything else that
+> runs in a container. sandboxd has no opinion about *who* creates a session or *how*
+> callers reach it; you drive it directly through its CRDs and the router's HTTP API.
+>
+> The broker + agentgateway + Keycloak described here are **one worked example** of a
+> user‑facing interface on top of sandboxd — specifically a **narrow, MCP‑focused**
+> one: it exposes sandboxes that speak Streamable‑HTTP MCP to Claude/MCP clients, with
+> OAuth login and per‑tool authorization. Anyone adopting sandboxd will likely **build
+> their own broker/interface** suited to their workload — e.g. a plain reverse proxy or
+> load balancer for a web‑service sandbox, a job scheduler for batch sandboxes, an
+> agent runtime's own session manager, or a different identity/authorization model
+> entirely. Read this as a pattern to adapt (how to authenticate a caller, derive a
+> stable session id, and forward to the router), not as the only way to use sandboxd.
+
 For the control plane on the other side of the broker (router, operator, Valkey,
 workers), see [architecture-sandboxd.md](architecture-sandboxd.md).
 
@@ -61,13 +77,13 @@ http://aio-sandbox-broker-svc.default.svc.cluster.local:8080/   (Service → bro
 sandboxd router (control plane)  →  resume/route → sandbox (runs the app's MCP server)
 ```
 
-There is also a secondary **internal** ALB (`broker.example.com`) that reaches
-the broker Service directly, bypassing agentgateway's edge check. The broker's
-own JWT re‑validation still applies, so this path is authenticated — but it does
-**not** apply agentgateway's tool allowlist, **nor** the per‑route `X-Sandbox-App`
-injection, so it only ever reaches the **default app** (`SANDBOXD_DEFAULT_APP`).
-Treat it as an internal/testing door; the primary, tool‑authorized, multi‑app path
-is `agentgateway.example.com/<app>/mcp`.
+> **Reach the broker only through agentgateway.** The broker's tool‑level
+> authorization and per‑app routing (the `X-Sandbox-App` injection) are applied by
+> agentgateway, so a client that reached the broker Service directly would bypass the
+> tool allowlist (the broker's own JWT re‑validation still applies, but not the
+> allowlist). Do **not** expose the broker Service on its own ingress/load balancer;
+> keep agentgateway the single public entry point (a NetworkPolicy restricting the
+> broker Service to agentgateway is a reasonable hardening step).
 
 ## Keycloak (identity)
 
@@ -83,7 +99,7 @@ Defined by `deploy/00-keycloak-realm.yaml` (a `KeycloakRealmImport` CR in the
   complete the flow.
 - **Client scope `sandbox`** shapes the access token:
   - `aud = sandbox-router` (audience mapper) — what agentgateway and the broker require.
-  - `groups` claim, emitted as **bare names** (`sandbox-users`, not `/sandbox-users`).
+  - `groups` claim, emitted as **bare names** (`sandbox-users`).
   - `preferred_username` — the principal the broker uses to derive the session id.
 - **Groups:** `sandbox-users` is provisioned by the realm import. **`sandbox-power`
   is not** — an admin must create it in Keycloak and add power users to it.
@@ -175,7 +191,8 @@ The broker reads `X-Sandbox-App` (injected by agentgateway's per‑app route) an
 resolves it to that triple. The header is only a **hint**; the **security boundary
 is the group check** — if the caller's `groups` claim lacks the app's required
 group, the broker returns `403`. `SANDBOXD_DEFAULT_APP` names the fallback app used
-when the header is absent (the internal‑ALB path).
+if a request ever arrives without `X-Sandbox-App` (normally every request has it,
+since agentgateway's per‑app route injects it).
 
 If `SANDBOXD_APPS` is unset the broker runs in **legacy single‑app mode**: it uses
 `SANDBOXD_POOL` + `SANDBOXD_APP`, ignores `X-Sandbox-App`, and its session ids omit
@@ -295,22 +312,6 @@ deliberately swappable.
   That's acceptable because only the broker can reach it in‑cluster; hardening this
   seam with mTLS + NetworkPolicy is the planned P1.5 phase (see
   [architecture-sandboxd.md](architecture-sandboxd.md)).
-
-## Known drift / things to reconcile
-
-The reference cluster has some state that isn't fully captured in the repo IaC —
-worth knowing when you operate it:
-
-- **Broker Service selector.** `aio-sandbox-broker-svc` selects the sandboxd broker
-  (`app: aio-sandbox-broker-sandboxd`). The older agent‑sandbox broker it was cut over
-  from is retired (its manifests are in `delete_me/`), though an orphaned
-  `aio-sandbox-broker` Deployment may still be running on the reference cluster
-  (dead in traffic — scale to 0 / delete when convenient).
-- **`broker.example.com` ingress** (internal ALB) exists in the cluster but has
-  no manifest under `deploy/`; it's referenced only in docs. Reconcile it into IaC
-  or treat it as a manually‑applied internal door.
-- **`sandbox-power` group** is not in the realm import — create it in Keycloak by
-  hand.
 
 See [admin-guide-broker.md](admin-guide-broker.md) for how to install and operate
 all of this.

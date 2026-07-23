@@ -47,3 +47,15 @@ spec:
             httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 3
             periodSeconds: 5
+---
+# The broker Service — agentgateway forwards to this (see deploy/30-agentgateway.yaml,
+# host aio-sandbox-broker-svc). Do NOT put a public ingress in front of it; agentgateway
+# is the single entry point (it applies the tool allowlist a direct hit would bypass).
+apiVersion: v1
+kind: Service
+metadata:
+  name: aio-sandbox-broker-svc
+  namespace: default
+spec:
+  selector: { app: aio-sandbox-broker-sandboxd }
+  ports: [{ port: 8080, targetPort: 8080 }]

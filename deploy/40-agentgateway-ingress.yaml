@@ -1,8 +1,9 @@
 # Public, internet-facing ALB for agentgateway so Claude Code (on a laptop)
-# can reach the MCP endpoint. TLS terminates at the ALB.
+# can reach the per-app MCP endpoints. TLS terminates at the ALB.
 #
 # After apply, point a Route53 alias agentgateway.example.com -> the ALB.
-# Claude Code reaches: https://agentgateway.example.com/mcp
+# Claude Code reaches a per-app endpoint, e.g. https://agentgateway.example.com/aio/mcp
+# (or /everything/mcp). There is no catch-all /mcp endpoint (see deploy/30-agentgateway.yaml).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -16,12 +17,12 @@ metadata:
     alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
     # Replace with your own ACM certificate ARN for the public hostname.
     alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-west-2:111122223333:certificate/REPLACE_WITH_YOUR_CERT_ID
-    # agentgateway serves MCP at /mcp; the broker health path differs, so
-    # health-check the agentgateway readiness port (15021) is internal — use
-    # the MCP listener port and a path that returns quickly.
+    # Health-check the agentgateway MCP listener (port 3000) on a real route. Use
+    # an app's OAuth protected-resource discovery path — it needs no token and
+    # returns 200 (a data path like /aio/mcp would 401 without a bearer token).
     alb.ingress.kubernetes.io/healthcheck-port: "3000"
-    alb.ingress.kubernetes.io/healthcheck-path: /mcp
-    alb.ingress.kubernetes.io/success-codes: "200,400,401,406"
+    alb.ingress.kubernetes.io/healthcheck-path: /.well-known/oauth-protected-resource/aio/mcp
+    alb.ingress.kubernetes.io/success-codes: "200"
     alb.ingress.kubernetes.io/backend-protocol: HTTP
 spec:
   ingressClassName: alb
