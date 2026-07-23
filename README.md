@@ -75,8 +75,8 @@ docs/                       PRDs + design notes
 
 ## Reference environment
 
-The live examples throughout the docs use EKS cluster `EKSClusterStack-cluster`
-(`us-west-2`), gVisor nodes tainted `sandbox=gvisor`, control plane in
+The live examples throughout the docs use an EKS cluster with
+gVisor nodes tainted `sandbox=gvisor`, control plane in
 `sandboxd-controlplane-system`, pools/sessions in `default`. Substitute your own
 account, cluster, DNS, and bucket. (Docs use scrubbed placeholders —
 `111122223333`, `example.com` — replace with your values.)
