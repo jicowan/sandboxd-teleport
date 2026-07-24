@@ -181,7 +181,7 @@ func (rt *Router) workerLive(ctx context.Context, pod, sid string) bool {
 	if err != nil {
 		return false
 	}
-	return w.State == resumeapi.WorkerBusy && w.SID == sid
+	return resumeapi.WorkerHolds(w, sid)
 }
 
 // bufferBody reads a request body into memory when it is small enough to enable

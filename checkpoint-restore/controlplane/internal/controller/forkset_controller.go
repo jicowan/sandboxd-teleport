@@ -358,26 +358,7 @@ func (r *ForkSetReconciler) materializeAndCountReady(ctx context.Context, fs *co
 // setReady sets the Ready condition on the ForkSet (best-effort; mirrors the
 // WarmPool pattern).
 func (r *ForkSetReconciler) setReady(ctx context.Context, fs *corev1alpha1.ForkSet, status metav1.ConditionStatus, reason, msg string) {
-	meta := metav1.Condition{
-		Type:               "Ready",
-		Status:             status,
-		Reason:             reason,
-		Message:            msg,
-		ObservedGeneration: fs.Generation,
-		LastTransitionTime: metav1.Now(),
-	}
-	// Replace-or-append keyed by type.
-	for i := range fs.Status.Conditions {
-		if fs.Status.Conditions[i].Type == "Ready" {
-			if fs.Status.Conditions[i].Status == status &&
-				fs.Status.Conditions[i].Reason == reason {
-				meta.LastTransitionTime = fs.Status.Conditions[i].LastTransitionTime
-			}
-			fs.Status.Conditions[i] = meta
-			return
-		}
-	}
-	fs.Status.Conditions = append(fs.Status.Conditions, meta)
+	upsertCondition(&fs.Status.Conditions, "Ready", status, reason, msg, fs.Generation)
 }
 
 // SetupWithManager registers the reconciler; it owns the child Sessions.

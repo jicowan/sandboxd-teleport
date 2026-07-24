@@ -58,25 +58,34 @@ func deploymentMatches(existing, desired *appsv1.Deployment) bool {
 }
 
 // setReadyCond upserts the Ready condition on a conditions slice.
-func setReadyCond(conds *[]metav1.Condition, status metav1.ConditionStatus, reason, msg string) {
-	meta := metav1.Condition{
-		Type:    "Ready",
-		Status:  status,
-		Reason:  reason,
-		Message: msg,
+// upsertCondition replace-or-appends a condition keyed by Type, preserving the
+// existing LastTransitionTime when Status AND Reason are unchanged (so the timestamp
+// only moves on a real transition) and stamping Now() otherwise. Shared by every
+// controller's condition setter (Ready on WarmPool/ForkSet/BaseSnapshot,
+// SuspendRequest on Session). observedGeneration is stamped verbatim (0 = omit).
+func upsertCondition(conds *[]metav1.Condition, condType string, status metav1.ConditionStatus, reason, msg string, observedGeneration int64) {
+	c := metav1.Condition{
+		Type:               condType,
+		Status:             status,
+		Reason:             reason,
+		Message:            msg,
+		ObservedGeneration: observedGeneration,
+		LastTransitionTime: metav1.Now(),
 	}
-	// find + replace, else append
 	for i := range *conds {
-		if (*conds)[i].Type == "Ready" {
-			if (*conds)[i].Status != status || (*conds)[i].Reason != reason {
-				meta.LastTransitionTime = metav1.Now()
-			} else {
-				meta.LastTransitionTime = (*conds)[i].LastTransitionTime
+		if (*conds)[i].Type == condType {
+			if (*conds)[i].Status == status && (*conds)[i].Reason == reason {
+				c.LastTransitionTime = (*conds)[i].LastTransitionTime
 			}
-			(*conds)[i] = meta
+			(*conds)[i] = c
 			return
 		}
 	}
-	meta.LastTransitionTime = metav1.Now()
-	*conds = append(*conds, meta)
+	*conds = append(*conds, c)
+}
+
+// setReadyCond upserts the "Ready" condition (no observedGeneration — WarmPool's
+// historical shape). Thin wrapper over upsertCondition.
+func setReadyCond(conds *[]metav1.Condition, status metav1.ConditionStatus, reason, msg string) {
+	upsertCondition(conds, "Ready", status, reason, msg, 0)
 }

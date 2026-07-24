@@ -29,12 +29,23 @@ func (s *server) imgDir(id string) string { return filepath.Join(s.work, "img", 
 
 // moveSpecFromImg moves the downloaded config.json out of the image dir into the
 // bundle (shared by restore + restart-restore).
-func (s *server) moveSpecFromImg(sb *sandbox) {
-	src := filepath.Join(s.imgDir(sb.ID), "config.json")
-	if b, err := os.ReadFile(src); err == nil {
-		os.WriteFile(filepath.Join(sb.Bundle, "config.json"), b, 0o644)
-		os.Remove(src)
+func (s *server) moveSpecFromImg(sb *sandbox) bool {
+	return moveConfigJSON(s.imgDir(sb.ID), sb.Bundle)
+}
+
+// moveConfigJSON moves imgDir/config.json -> bundle/config.json (runsc treats a
+// stray config.json in the image dir as an image file, so the saved spec must live
+// in the bundle). Returns true if a config.json was present and moved. Shared by the
+// /restore handler and the supervisor restart-restore.
+func moveConfigJSON(imgDir, bundle string) bool {
+	src := filepath.Join(imgDir, "config.json")
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return false
 	}
+	os.WriteFile(filepath.Join(bundle, "config.json"), b, 0o644)
+	os.Remove(src)
+	return true
 }
 
 // ---- runtime health state (not persisted) ----
