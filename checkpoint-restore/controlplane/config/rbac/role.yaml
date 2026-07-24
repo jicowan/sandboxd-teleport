@@ -54,6 +54,7 @@ rules:
   resources:
   - basesnapshots/finalizers
   - forksets/finalizers
+  - sessions/finalizers
   - warmpools/finalizers
   verbs:
   - update

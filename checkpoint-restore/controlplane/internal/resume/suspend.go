@@ -274,6 +274,54 @@ func (s *Suspender) SuspendForTerminate(ctx context.Context, sid, workerPod, wor
 	return rerr
 }
 
+// ReleaseForDelete tears down a session's authoritative KV footprint when its
+// Session CR is being DELETED (direct delete, ForkSet ownerRef cascade, or ForkSet
+// scale-in). This is the delete-time counterpart of the idle-`reset` path
+// (suspendOne action=="reset"): the session is being discarded, so we do NOT
+// checkpoint — we free the worker and drop the session entry.
+//
+// Without this, deleting a Session CR is a silent no-op against Valkey: the
+// `session:<sid>` entry stays Running and the `worker:<pod>` stays busy, so the
+// worker is never returned to the pool and the WarmPool never scales back down (the
+// self-healing sweeps all key on the KV entry, which the CR delete leaves intact).
+// A Session finalizer calls this before removing its finalizer.
+//
+// Idempotent: a missing session entry (already gone) is success. If a live worker is
+// still bound, its sandbox is reset (best-effort — the worker frees it on next use
+// regardless) and the worker returned to the idle pool.
+func (s *Suspender) ReleaseForDelete(ctx context.Context, sid string) error {
+	ctx, cancel := context.WithTimeout(ctx, s.opts.SuspendDeadline)
+	defer cancel()
+
+	e, err := s.kv.GetSession(ctx, sid)
+	if err != nil {
+		if errors.Is(err, assign.ErrNotFound) {
+			return nil // already gone — nothing to release
+		}
+		return fmt.Errorf("get session %q for delete: %w", sid, err)
+	}
+
+	// If a worker is bound, best-effort reset its sandbox (discard) and return it to
+	// idle. A reset failure (worker gone/unreachable) must not block the release — the
+	// worker binding is dropped below regardless so the pool recovers.
+	if e.WorkerPod != "" {
+		if e.WorkerPodIP != "" {
+			if rerr := s.clientFor(e.WorkerPodIP).Reset(ctx, sid); rerr != nil {
+				metrics.SuspendsTotal.WithLabelValues("delete", metrics.OutcomeError).Inc()
+			}
+		}
+		_ = s.kv.ReleaseWorker(ctx, e.WorkerPod, e.Pool)
+		s.notify.PoolChanged(e.Pool) // busy->idle: refresh pool status
+	}
+
+	if derr := s.kv.DeleteSession(ctx, sid); derr != nil {
+		return fmt.Errorf("delete session %q: %w", sid, derr)
+	}
+	s.mirror.Delete(ctx, sid) // drop the durable record too (best-effort)
+	metrics.SuspendsTotal.WithLabelValues("delete", metrics.OutcomeSuccess).Inc()
+	return nil
+}
+
 // casSession mirrors the resume workflow's CAS-with-retry.
 func (s *Suspender) casSession(ctx context.Context, sid string, mutate func(*resumeapi.SessionEntry)) error {
 	const maxTries = 5

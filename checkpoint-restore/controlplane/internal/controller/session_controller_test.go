@@ -30,10 +30,12 @@ import (
 	corev1alpha1 "github.com/jicowan/aio-sandbox/controlplane/api/v1alpha1"
 )
 
-// fakeSuspender records SuspendNow calls and can be made to fail.
+// fakeSuspender records SuspendNow / ReleaseForDelete calls and can be made to fail.
 type fakeSuspender struct {
-	calls    []string
-	failNext bool
+	calls        []string
+	releaseCalls []string
+	failNext     bool
+	failRelease  bool
 }
 
 func (f *fakeSuspender) SuspendNow(_ context.Context, sid string) error {
@@ -41,6 +43,14 @@ func (f *fakeSuspender) SuspendNow(_ context.Context, sid string) error {
 	if f.failNext {
 		f.failNext = false
 		return fmt.Errorf("boom")
+	}
+	return nil
+}
+
+func (f *fakeSuspender) ReleaseForDelete(_ context.Context, sid string) error {
+	f.releaseCalls = append(f.releaseCalls, sid)
+	if f.failRelease {
+		return fmt.Errorf("release boom")
 	}
 	return nil
 }
@@ -66,7 +76,7 @@ var _ = Describe("Session Controller (on-demand suspend)", func() {
 		Expect(k8sClient.Create(ctx, s)).To(Succeed())
 
 		fs := &fakeSuspender{}
-		r := &SessionReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Suspend: fs}
+		r := &SessionReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Suspend: fs, Release: fs}
 		_, err := reconcile(r, "sess-sr-1")
 		Expect(err).NotTo(HaveOccurred())
 
@@ -84,7 +94,7 @@ var _ = Describe("Session Controller (on-demand suspend)", func() {
 		}
 		Expect(k8sClient.Create(ctx, s)).To(Succeed())
 		fs := &fakeSuspender{}
-		r := &SessionReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Suspend: fs}
+		r := &SessionReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Suspend: fs, Release: fs}
 
 		_, err := reconcile(r, "sess-sr-2")
 		Expect(err).NotTo(HaveOccurred())
@@ -107,7 +117,7 @@ var _ = Describe("Session Controller (on-demand suspend)", func() {
 		}
 		Expect(k8sClient.Create(ctx, s)).To(Succeed())
 		fs := &fakeSuspender{}
-		r := &SessionReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Suspend: fs}
+		r := &SessionReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Suspend: fs, Release: fs}
 		_, err := reconcile(r, "sess-sr-3")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fs.calls).To(HaveLen(1))
@@ -128,7 +138,7 @@ var _ = Describe("Session Controller (on-demand suspend)", func() {
 		}
 		Expect(k8sClient.Create(ctx, s)).To(Succeed())
 		fs := &fakeSuspender{}
-		r := &SessionReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Suspend: fs}
+		r := &SessionReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Suspend: fs, Release: fs}
 		_, err := reconcile(r, "sess-sr-4")
 		Expect(err).NotTo(HaveOccurred())
 
@@ -145,6 +155,64 @@ var _ = Describe("Session Controller (on-demand suspend)", func() {
 		Expect(got.Status.LastSuspendHandled).To(Equal("b"))
 	})
 
+	It("releases the KV footprint on delete via the finalizer", func() {
+		ctx := context.Background()
+		s := &corev1alpha1.Session{
+			ObjectMeta: metav1.ObjectMeta{Name: "sess-del-1", Namespace: ns},
+			Spec:       corev1alpha1.SessionSpec{PoolRef: &corev1alpha1.LocalRef{Name: "aio-pool"}},
+		}
+		Expect(k8sClient.Create(ctx, s)).To(Succeed())
+		fs := &fakeSuspender{}
+		r := &SessionReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Suspend: fs, Release: fs}
+
+		// First reconcile installs the finalizer.
+		_, err := reconcile(r, "sess-del-1")
+		Expect(err).NotTo(HaveOccurred())
+		var got corev1alpha1.Session
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "sess-del-1"}, &got)).To(Succeed())
+		Expect(got.Finalizers).To(ContainElement(sessionFinalizer))
+
+		// Delete: the CR lingers (finalizer held) until the reconciler releases KV.
+		Expect(k8sClient.Delete(ctx, &got)).To(Succeed())
+		_, err = reconcile(r, "sess-del-1")
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(fs.releaseCalls).To(Equal([]string{"sess-del-1"})) // KV released exactly once
+		// Finalizer gone -> the object is actually removed.
+		err = k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "sess-del-1"}, &got)
+		Expect(err).To(HaveOccurred())
+	})
+
+	It("keeps the finalizer (retries) if KV release fails on delete", func() {
+		ctx := context.Background()
+		s := &corev1alpha1.Session{
+			ObjectMeta: metav1.ObjectMeta{Name: "sess-del-2", Namespace: ns},
+			Spec:       corev1alpha1.SessionSpec{PoolRef: &corev1alpha1.LocalRef{Name: "aio-pool"}},
+		}
+		Expect(k8sClient.Create(ctx, s)).To(Succeed())
+		fs := &fakeSuspender{failRelease: true}
+		r := &SessionReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Suspend: fs, Release: fs}
+		_, err := reconcile(r, "sess-del-2")
+		Expect(err).NotTo(HaveOccurred())
+
+		var got corev1alpha1.Session
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "sess-del-2"}, &got)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, &got)).To(Succeed())
+
+		// Release fails -> error surfaced (requeue), finalizer retained, CR still present.
+		_, err = reconcile(r, "sess-del-2")
+		Expect(err).To(HaveOccurred())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "sess-del-2"}, &got)).To(Succeed())
+		Expect(got.Finalizers).To(ContainElement(sessionFinalizer))
+
+		// Recover: release succeeds, finalizer drops, object removed.
+		fs.failRelease = false
+		_, err = reconcile(r, "sess-del-2")
+		Expect(err).NotTo(HaveOccurred())
+		err = k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "sess-del-2"}, &got)
+		Expect(err).To(HaveOccurred())
+	})
+
 	It("no request is a no-op", func() {
 		ctx := context.Background()
 		s := &corev1alpha1.Session{
@@ -153,7 +221,7 @@ var _ = Describe("Session Controller (on-demand suspend)", func() {
 		}
 		Expect(k8sClient.Create(ctx, s)).To(Succeed())
 		fs := &fakeSuspender{}
-		r := &SessionReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Suspend: fs}
+		r := &SessionReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Suspend: fs, Release: fs}
 		_, err := reconcile(r, "sess-sr-5")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fs.calls).To(BeEmpty())
@@ -167,7 +235,7 @@ var _ = Describe("Session Controller (on-demand suspend)", func() {
 		}
 		Expect(k8sClient.Create(ctx, s)).To(Succeed())
 		fs := &fakeSuspender{failNext: true}
-		r := &SessionReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Suspend: fs}
+		r := &SessionReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Suspend: fs, Release: fs}
 
 		_, err := reconcile(r, "sess-sr-6")
 		Expect(err).To(HaveOccurred()) // surfaced -> requeue

@@ -422,3 +422,80 @@ NODE — shared across all worker pods + survive pod restarts already. A fresh
 worker does a fast snapshot Prepare, no re-pull (proven by the fresh-worker E2E
 tests). Only per-sandbox bundles/overlays under /work stay ephemeral, which is
 correct (transient; state goes to S3). So no hostPath cache is needed.
+
+---
+
+## ForkSet fan-out bugs surfaced by the RL example (2026-07-24, operator v39→v42)
+
+Building the RL parallel-rollout example (`examples/forkset/`) and running it live
+surfaced four control-plane bugs that only manifest under a **large concurrent
+ForkSet fan-out** — many sessions claiming/releasing workers on one pool at once,
+plus the pool autoscaling underneath. All four are fixed with regression tests; the
+example was reworked to `activation: Lazy` + checkpoint-when-done (temporal
+oversubscription), which both fits real RL usage and avoids the burst that made #1/#4
+fire. Symptom first seen: an eager fan-out of 8 snapshot forks wedged at "6/8 Running"
+and, after deleting the ForkSets, 14 workers stayed `busy` forever and the pool never
+scaled down.
+
+**#1 — Worker double-booking (lost update between two writers of worker state).**
+The `SPOP`-based claim (`assign.go` `claimWorkerScript`) is atomic and correct in
+isolation, so two claims can never pop the same idle member. The bug was a *second,
+un-serialized* writer: worker-discovery (`worker_discovery.go`) re-registers a pod as
+idle on every pod event (readiness flap, `pod-deletion-cost` patch from the fan-out's
+own minIdle autoscaling, informer resync), via `UpsertWorker` →
+`upsertWorkerScript`, which did a **blind `SET` + `SADD`** with no CAS. When such an
+event fired on a pod in the window between its atomic claim (`SET busy`) and the
+session starting on it, discovery overwrote `busy`→`idle` and **re-added the pod to
+the idle set** — then a second fork's `SPOP` legitimately claimed the same worker, and
+the second wedged in `Resuming` (one-sandbox-per-worker). *Live evidence:* 8 forks
+landed on 6 distinct workers. **Fix:** `upsertWorkerScript` now refuses to demote a
+`busy` worker to idle (idle-registration is a no-op on state when the stored entry is
+already busy). Legit busy→idle stays on the `releaseWorkerScript` / suspend paths.
+Regression: `TestDiscoveryUpsertCannotResurrectBusyWorker`.
+
+**#2 — CR deletion strands the worker binding (no finalizer).** Deleting a `Session`
+CR — directly, via ForkSet ownerRef cascade, or ForkSet scale-in — was a **silent
+no-op against Valkey**: `SessionReconciler` had no finalizer, so nothing ran
+`DeleteSession` + `ReleaseWorker`. The `session:<sid>` entry stayed `Running` and
+`worker:<pod>` stayed `busy`, so workers never freed and the pool never scaled down.
+The self-healing sweeps couldn't recover it because they all key on the *KV entry*
+(which the delete leaves intact): GC-abandoned is suppressed by `workerHolds` (live
+busy worker) + fresh `lastActiveAt`; GC-orphan-CR fires only when the KV entry is
+*absent* (opposite direction); worker-reclaim classifies a Running-bound-here entry
+as healthy (its "orphan" reason keys on a missing KV entry, not a missing CR). **Fix:**
+a Session finalizer (`session_controller.go`) calls `Suspender.ReleaseForDelete`
+(`suspend.go`) on delete — release the worker to idle + delete the KV entry (reset
+semantics, no checkpoint: a deleted session is discarded). Regressions:
+`releases the KV footprint on delete via the finalizer`, `keeps the finalizer (retries)
+if KV release fails`.
+
+**#3 — Per-fork idle policy ignored (worker never freed on the ForkSet's terms).** A
+ForkSet sets `lifecycle.idleAction` + `idleTimeoutSeconds` on each child Session, but
+the operator dropped both: the idle sweeper's `policyFor` (`resume_glue.go`) honored
+only the timeout, never `SessionLifecycle.IdleAction`; and cold-start
+(`resume.go`) wrote the *template's* idle timeout into the KV entry, which is what
+seeds the `suspend:due` deadline that schedules the O(due) sweep. So a fork asking for
+`reset@60s` inherited the template's `suspend@300s` and its worker didn't free when
+expected. **Fix:** `applyLifecycleOverride` (`resume_glue.go`) overrides both action
+and timeout from `spec.lifecycle`; `SessionPlan.IdleTimeoutOverride` threads the
+per-session timeout into the KV entry on cold-start. Regressions: the
+`applyLifecycleOverride` specs. *Live evidence after fix:* KV shows
+`idleTimeoutSeconds:60`; idle-reset freed all 4 workers at ~60s.
+
+**#4 — Phantom idle-set member → negative `busy` count.** `releaseWorkerScript`
+(rollback of a failed claim) re-added a worker to `pool:<pool>:idle` **even when its
+`worker:<pod>` entry no longer existed** (the `if cur then` guarded the `SET` but not
+the `SADD`). A failed fork materialization racing pool scale-in could thus leave a pod
+in the idle set with no backing entry — invisible to `PruneStaleWorkers` (which scans
+`worker:*` keys), claimable by `SPOP` (a dead pod), and skewing `CountWorkers`
+(`busy = SCARD(all) − SCARD(idle)`) **negative**. *Live evidence:* `pool:idle` had 5
+members, `pool:all` had 4 → `busy=-1`. **Fix:** `releaseWorkerScript` only re-adds to
+the idle set when the worker entry exists; otherwise it `SREM`s any stale membership.
+Regression: `TestReleaseDoesNotResurrectDeletedWorker`.
+
+**Through-line:** #1 and #4 are the same class — worker-state writes (unlike session
+writes) were **not** CAS/existence-guarded, so a concurrent or out-of-order writer
+could resurrect a claimed/deleted worker into the idle set. #2 and #3 are missing
+delete-time and per-session-override plumbing that only a fan-out (many short-lived,
+declaratively-managed sessions) exercises hard. Fixed in operator **v42**; verified
+live end-to-end (app fork + snapshot fork, distinct workers, idle-free, clean delete).

@@ -66,6 +66,13 @@ type SessionPlan struct {
 	Ports        []sbxapi.PortMap
 	Health       *sbxapi.Health
 	IAMRoleARN   string // session's assumable AWS role (from template or session)
+	// IdleTimeoutOverride is the session's spec.lifecycle.idleTimeoutSeconds (0 = none).
+	// When >0 it overrides the template's idle timeout for THIS session, so the value
+	// written into the KV entry (and thus the suspend:due deadline that schedules the
+	// idle sweep) matches what the session asked for — e.g. a ForkSet's per-fork
+	// idleTimeoutSeconds. Without it a fork would inherit the pool template's timeout
+	// and its worker would free on the wrong schedule (docs/PRD-snapshot-fork.md §5.3).
+	IdleTimeoutOverride int
 }
 
 // TemplateLookup resolves a template name (in a pool's namespace) to its spec.
@@ -325,6 +332,13 @@ func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint, appHint 
 		}
 		idleTimeout = tmpl.IdleTimeoutSeconds
 		ckptInterval = tmpl.CheckpointIntervalSeconds
+	}
+	// Per-session idle-timeout override (spec.lifecycle.idleTimeoutSeconds) wins over
+	// the template — this is what makes a ForkSet's per-fork timeout drive the KV
+	// deadline + idle sweep (docs/PRD-snapshot-fork.md §5.3). Applies to inline-image
+	// sessions too (no template, so it's the only source).
+	if plan.IdleTimeoutOverride > 0 {
+		idleTimeout = plan.IdleTimeoutOverride
 	}
 	if img == "" {
 		return "", metrics.KindColdStart, false, errors.New("no image to run (empty template and no inline image)")

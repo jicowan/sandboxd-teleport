@@ -29,6 +29,7 @@ import (
 //     GENERIC pool (docs/PRD-arbitrary-image-sessions.md §13.6).
 //   - both UNSET           -> fork-from-image: children cold-start from a DEDICATED
 //     pool's own SandboxTemplate image (the original behavior).
+//
 // baseRef and appRef are mutually exclusive.
 //
 // A ForkSet is to forked Sessions what a WarmPool is to worker pods: the

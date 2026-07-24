@@ -298,21 +298,42 @@ func (c *Client) GetWorker(ctx context.Context, pod string) (*resumeapi.WorkerEn
 // worker's state, and records pool membership in the pool "all" set so per-pool
 // counts are O(1) (SCARD) instead of a worker:* scan.
 //
+// CRITICAL — it must NEVER demote a busy worker back to idle. This is the
+// discovery-side write (worker_discovery.go re-registers a pod as idle on every pod
+// event: readiness flap, pod-deletion-cost patch, informer resync). Those events can
+// fire on a pod in the window between an atomic claim (SPOP + SET busy) and the
+// session actually starting on it. A blind SET+SADD there would overwrite the busy
+// binding and RE-ADD the pod to the idle set, letting a second claim SPOP the same
+// worker → two sessions on one worker (the second wedges in Resuming). So: when the
+// incoming state is idle but the STORED entry is already busy (claimed), preserve the
+// stored (busy) entry and leave it OUT of the idle set. A legitimate busy→idle
+// transition goes through releaseWorkerScript / a suspend, never through discovery.
+//
 // KEYS[1]=workerKey KEYS[2]=poolIdleKey KEYS[3]=poolAllKey
 // ARGV[1]=valueJSON ARGV[2]=pod ARGV[3]=state
 var upsertWorkerScript = redis.NewScript(`
-redis.call('SET', KEYS[1], ARGV[1])
-redis.call('SADD', KEYS[3], ARGV[2])
+redis.call('SADD', KEYS[3], ARGV[2])          -- pool membership: always idempotent
 if ARGV[3] == 'idle' then
+  local cur = redis.call('GET', KEYS[1])
+  if cur then
+    local w = cjson.decode(cur)
+    if w.state == 'busy' then
+      return 0                                 -- claimed: keep busy, stay out of idle set
+    end
+  end
+  redis.call('SET', KEYS[1], ARGV[1])
   redis.call('SADD', KEYS[2], ARGV[2])
 else
+  redis.call('SET', KEYS[1], ARGV[1])
   redis.call('SREM', KEYS[2], ARGV[2])
 end
 return 1
 `)
 
 // UpsertWorker writes/updates a worker entry and keeps the pool idle-set + all-set
-// in sync. The operator bumps Version on each write.
+// in sync. The operator bumps Version on each write. Registering a worker as idle is
+// a no-op on the stored state when the worker is already busy (claimed): discovery
+// must never resurrect a claimed worker into the idle set (see upsertWorkerScript).
 func (c *Client) UpsertWorker(ctx context.Context, w *resumeapi.WorkerEntry) error {
 	w.Version++
 	payload, err := json.Marshal(w)
@@ -398,6 +419,14 @@ func (c *Client) ClaimIdleWorker(ctx context.Context, pool, sid string) (*resume
 // releaseWorkerScript marks a worker idle again and re-adds it to the pool idle
 // set (used to roll back a failed claim). KEYS[1]=workerKey KEYS[2]=poolIdleKey
 // ARGV[1]=pod
+//
+// The SADD to the idle set is GUARDED by the worker entry still existing: if the
+// worker:<pod> key is gone (its pod was deleted / pruned, e.g. a failed fork
+// materialization racing pool scale-in), re-adding it to the idle set would create a
+// PHANTOM idle member with no backing entry. That member is invisible to
+// PruneStaleWorkers (which scans worker:* keys), lets ClaimIdleWorker SPOP a dead
+// pod, and skews CountWorkers so busy = total(all) - idle goes NEGATIVE. So: no
+// worker entry -> also remove any stale idle membership and do not re-add.
 var releaseWorkerScript = redis.NewScript(`
 local cur = redis.call('GET', KEYS[1])
 if cur then
@@ -406,8 +435,10 @@ if cur then
   w.sid = ''
   w.version = (w.version or 0) + 1
   redis.call('SET', KEYS[1], cjson.encode(w))
+  redis.call('SADD', KEYS[2], ARGV[1])
+else
+  redis.call('SREM', KEYS[2], ARGV[1])   -- worker gone: don't resurrect a phantom idle member
 end
-redis.call('SADD', KEYS[2], ARGV[1])
 return 1
 `)
 

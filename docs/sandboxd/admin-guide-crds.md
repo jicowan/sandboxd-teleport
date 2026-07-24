@@ -337,8 +337,8 @@ spec:
   count: 16
   namePrefix: rollout
   pool: aio-pool
-  activation: Eager
-  lifecycle: { idleAction: reset, idleTimeoutSeconds: 600 }
+  activation: Lazy                        # recommended at scale (see note below)
+  lifecycle: { idleAction: reset, idleTimeoutSeconds: 60 }
 ```
 
 ```sh
@@ -349,7 +349,18 @@ kubectl get fork rl-batch -n default -o jsonpath='{.status.forks}'   # the N ses
 
 > **Addressing a fork:** send its session id as `X-Session-ID` to the router (each
 > child is a normal session on its own worker). The router is unchanged — it resolves
-> whatever id it's handed. Deleting the `ForkSet` cascade‑deletes its child Sessions.
+> whatever id it's handed. Deleting the `ForkSet` cascade‑deletes its child Sessions,
+> and a Session finalizer releases each child's worker + KV entry on delete (so a
+> delete never strands a busy worker).
+
+> **`Lazy` + checkpoint‑when‑done for large fan‑outs (temporal oversubscription).**
+> `activation: Lazy` materializes each fork on first contact rather than pinning ~N
+> workers up front, and `lifecycle.idleAction` (`reset`/`suspend`) frees a fork's
+> worker between episodes — so a small pool cycles through many rollouts and there is
+> no simultaneous‑restore burst. `Eager` needs ~N idle workers at once; reserve it for
+> small pre‑warmed batches. `lifecycle.idleTimeoutSeconds` and `idleAction` on the
+> ForkSet apply to **every** child (both are honored per session, overriding the pool
+> template). See the end‑to‑end walkthrough in [`examples/forkset/`](../../examples/forkset/).
 
 > **Where forked state lives is a workload concern.** A fork restores the workload's
 > whole checkpointed state, but caller‑written data only survives if the workload

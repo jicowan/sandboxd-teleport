@@ -195,6 +195,87 @@ func sids(es []*resumeapi.SessionEntry) []string {
 	return out
 }
 
+// TestDiscoveryUpsertCannotResurrectBusyWorker reproduces the fork-fan-out
+// double-booking race (docs/PRD-snapshot-fork.md): worker-discovery re-registers a
+// pod as idle (a pod event firing in the window after a claim) MUST NOT overwrite a
+// busy binding or re-add the pod to the idle set — else a second claim SPOPs the same
+// worker and two sessions land on it.
+func TestDiscoveryUpsertCannotResurrectBusyWorker(t *testing.T) {
+	ctx := context.Background()
+	c := newTestClient(t)
+
+	// One idle worker; claim it for s1 (atomic SPOP + SET busy).
+	must(t, c.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w1", Pool: "p", State: resumeapi.WorkerIdle}))
+	w, err := c.ClaimIdleWorker(ctx, "p", "s1")
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if w.Pod != "w1" || w.State != resumeapi.WorkerBusy {
+		t.Fatalf("claim result: got pod=%s state=%s", w.Pod, w.State)
+	}
+
+	// Discovery fires on the just-claimed pod and tries to register it idle again
+	// (the resurrection the bug relied on).
+	must(t, c.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w1", Pool: "p", State: resumeapi.WorkerIdle}))
+
+	// The stored entry must still be busy + bound to s1...
+	got, err := c.GetWorker(ctx, "w1")
+	if err != nil {
+		t.Fatalf("get worker: %v", err)
+	}
+	if got.State != resumeapi.WorkerBusy || got.SID != "s1" {
+		t.Fatalf("busy binding clobbered by discovery: state=%s sid=%q", got.State, got.SID)
+	}
+	// ...and it must NOT be back in the idle set, so a second claim finds no capacity.
+	idle, total, _ := c.CountWorkers(ctx, "p")
+	if idle != 0 || total != 1 {
+		t.Fatalf("worker resurrected into idle set: idle=%d total=%d (want 0/1)", idle, total)
+	}
+	if _, err := c.ClaimIdleWorker(ctx, "p", "s2"); err != ErrNoCapacity {
+		t.Fatalf("second claim should find NO capacity, got err=%v (double-booking!)", err)
+	}
+
+	// Sanity: a legitimate release DOES return it to idle (busy->idle is allowed via
+	// ReleaseWorker, just not via discovery upsert).
+	must(t, c.ReleaseWorker(ctx, "w1", "p"))
+	idle, _, _ = c.CountWorkers(ctx, "p")
+	if idle != 1 {
+		t.Fatalf("after ReleaseWorker: want idle=1, got %d", idle)
+	}
+}
+
+// TestReleaseDoesNotResurrectDeletedWorker guards the phantom-idle-member bug: a
+// rollback release of a worker whose entry was already removed (pod deleted / pruned,
+// e.g. a failed fork materialization racing scale-in) must NOT re-add it to the idle
+// set. A phantom idle member (in pool:idle but no worker:<pod>) is invisible to prune,
+// lets a dead pod be claimed, and drives busy = total-idle negative.
+func TestReleaseDoesNotResurrectDeletedWorker(t *testing.T) {
+	ctx := context.Background()
+	c := newTestClient(t)
+
+	must(t, c.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w1", Pool: "p", State: resumeapi.WorkerIdle}))
+	// Claim then REMOVE the worker (pod deleted) before the rollback release runs.
+	if _, err := c.ClaimIdleWorker(ctx, "p", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	must(t, c.RemoveWorker(ctx, "w1", "p"))
+
+	// Rollback release of the now-deleted worker: must be a no-op on the idle set.
+	must(t, c.ReleaseWorker(ctx, "w1", "p"))
+
+	idle, total, err := c.CountWorkers(ctx, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idle != 0 || total != 0 {
+		t.Fatalf("phantom idle member resurrected: idle=%d total=%d (want 0/0)", idle, total)
+	}
+	// And a claim must find no capacity (not SPOP a dead pod).
+	if _, err := c.ClaimIdleWorker(ctx, "p", "s2"); err != ErrNoCapacity {
+		t.Fatalf("claim should find no capacity, got %v", err)
+	}
+}
+
 func TestCountWorkersUsesSets(t *testing.T) {
 	ctx := context.Background()
 	c := newTestClient(t)

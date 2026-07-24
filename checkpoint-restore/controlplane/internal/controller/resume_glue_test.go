@@ -42,8 +42,8 @@ var _ = Describe("configPolicyForSession precedence", func() {
 		Expect(k8sClient.Create(ctx, &corev1alpha1.SandboxTemplate{
 			ObjectMeta: metav1.ObjectMeta{Name: tmpl, Namespace: ns},
 			Spec: corev1alpha1.SandboxTemplateSpec{
-				Image: "ghcr.io/example/pool-img:1",
-				Idle:  corev1alpha1.IdlePolicy{TimeoutSeconds: idle, Action: "suspend"},
+				Image:                     "ghcr.io/example/pool-img:1",
+				Idle:                      corev1alpha1.IdlePolicy{TimeoutSeconds: idle, Action: "suspend"},
 				CheckpointIntervalSeconds: ckpt,
 			},
 		})).To(Succeed())
@@ -85,8 +85,8 @@ var _ = Describe("configPolicyForSession precedence", func() {
 		Expect(k8sClient.Create(ctx, &corev1alpha1.AppTemplate{
 			ObjectMeta: metav1.ObjectMeta{Name: "cp-app-redis", Namespace: ns},
 			Spec: corev1alpha1.AppTemplateSpec{
-				Image: "docker.io/library/redis:7-alpine",
-				Idle:  corev1alpha1.IdlePolicy{TimeoutSeconds: 90, Action: "suspend"},
+				Image:                     "docker.io/library/redis:7-alpine",
+				Idle:                      corev1alpha1.IdlePolicy{TimeoutSeconds: 90, Action: "suspend"},
 				CheckpointIntervalSeconds: 30,
 			},
 		})).To(Succeed())
@@ -122,6 +122,34 @@ var _ = Describe("configPolicyForSession precedence", func() {
 		pol, err := configPolicyForSession(ctx, k8sClient, ns, s)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(pol).To(Equal(sessionConfigPolicy{}))
+	})
+})
+
+// applyLifecycleOverride: a Session's spec.lifecycle overrides the template-resolved
+// idle policy for BOTH timeout and action. The action override is what lets a ForkSet
+// make ephemeral (reset) or durable (suspend) forks without a dedicated pool
+// (docs/PRD-snapshot-fork.md §5.3/§5.5) — the regression that stranded fork workers
+// because the sweeper ignored SessionLifecycle.IdleAction.
+var _ = Describe("applyLifecycleOverride", func() {
+	base := resume.IdlePolicy{TimeoutSeconds: 600, Action: "suspend"} // template default
+
+	It("overrides action AND timeout when both set (ephemeral fork)", func() {
+		got := applyLifecycleOverride(base, corev1alpha1.SessionLifecycle{
+			IdleTimeoutSeconds: 60, IdleAction: "reset",
+		})
+		Expect(got.TimeoutSeconds).To(Equal(60))
+		Expect(got.Action).To(Equal("reset"))
+	})
+
+	It("overrides only the action when timeout is unset", func() {
+		got := applyLifecycleOverride(base, corev1alpha1.SessionLifecycle{IdleAction: "reset"})
+		Expect(got.TimeoutSeconds).To(Equal(600), "timeout inherits the template")
+		Expect(got.Action).To(Equal("reset"))
+	})
+
+	It("inherits the template when lifecycle is empty (classic session UNCHANGED)", func() {
+		got := applyLifecycleOverride(base, corev1alpha1.SessionLifecycle{})
+		Expect(got).To(Equal(base))
 	})
 })
 

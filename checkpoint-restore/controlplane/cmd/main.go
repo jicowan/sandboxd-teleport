@@ -446,6 +446,7 @@ func main() {
 		Client:  mgr.GetClient(),
 		Scheme:  mgr.GetScheme(),
 		Suspend: suspender,
+		Release: suspender, // finalizer path: release worker + delete KV on CR delete
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "session")
 		os.Exit(1)

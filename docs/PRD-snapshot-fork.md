@@ -37,6 +37,36 @@ Status: **Implemented + verified live** (2026‑07‑19, operator `v28` + worker
 > `bases/*` (GetObject `sandboxes/*`, Put/Get/Delete `bases/*`). Commits: `35ff1f5`
 > (ForkSet), `61942cb` (BaseSnapshot conflict), `edffd20` (worker snapshot‑collision
 > + WarmPool conflict). Design/analysis below preserved as written.
+>
+> **Update (2026‑07‑24, operator v42) — hardening from the RL example.** Building the
+> RL parallel‑rollout example (`examples/forkset/`) and driving it at scale surfaced
+> four fan‑out bugs (full write‑up:
+> `checkpoint-restore/history-worker-networking-and-teleport.md`), now fixed with
+> regression tests:
+> 1. **Worker double‑booking** — worker‑discovery's non‑CAS idle re‑registration
+>    (`UpsertWorker`) could overwrite a just‑claimed `busy` worker and re‑add it to the
+>    idle set, so a second fork claimed the same worker (one wedged in `Resuming`).
+>    Fixed: idle‑registration never demotes a busy worker.
+> 2. **CR‑delete stranded the worker** — deleting a `ForkSet`/child `Session` left the
+>    KV `session:` Running + `worker:` busy (no finalizer), so workers never freed.
+>    Fixed: a **Session finalizer** releases the worker + deletes the KV entry on
+>    delete (covers direct delete, ownerRef cascade, and scale‑in — supersedes the
+>    §5.3/§5.4 "session GC reaps the KV entry" assumption for the *live‑worker* case).
+> 3. **Per‑fork idle policy ignored** — `SessionLifecycle.idleAction` **and** the
+>    per‑session idle timeout weren't threaded into the idle sweeper / KV, so a fork
+>    inherited the pool template's action+timeout instead of the ForkSet's. Fixed: the
+>    sweeper and cold‑start now honor `spec.lifecycle` for both.
+> 4. **Phantom idle‑set member → negative `busy`** — `ReleaseWorker` re‑added a worker
+>    to the idle set even when its entry was already gone (failed materialization
+>    racing scale‑in), skewing pool counts and letting a dead pod be claimed. Fixed:
+>    release only re‑adds when the worker entry still exists.
+>
+> **Guidance:** prefer `activation: Lazy` + checkpoint‑when‑done (`idleAction`
+> `reset`/`suspend`, or per‑fork `suspendRequest`) for large fan‑outs — forks
+> materialize on demand and free their workers between episodes (temporal
+> oversubscription), which both fits RL usage and avoids the simultaneous‑restore
+> burst that stresses the scheduler. `Eager` needs ~N workers at once. See
+> `examples/forkset/README.md`.
 
 ## 1. Summary
 
@@ -247,7 +277,7 @@ spec:
   count: 16                               # N forks
   namePrefix: rollout-7                    # children sess-fork-rollout-7-{0..15}; else generated suffix
   pool: aio-pool                           # placement + (image source) the template image; must be runsc-compatible with a base
-  activation: Eager                        # Eager = resume/run all N now (RL default) | Lazy = born Suspended/Absent, materialize on first contact
+  activation: Lazy                         # Lazy (recommended, see §7) = born Suspended/Absent, materialize on first contact | Eager = resume/run all N now (needs ~N workers)
   lifecycle:                               # per-fork lifecycle policy (see 5.3)
     idleAction: reset                      #   reset = ephemeral rollout | suspend = durable branch | none
     idleTimeoutSeconds: 300
@@ -268,7 +298,7 @@ status:
 | `count` | N forks to create. |
 | `namePrefix` | deterministic child naming so a harness can address `rollout-7-<k>`; optional. |
 | `pool` | pool that places the forks; for the image source it also supplies the template image. Must be `runsc`‑compatible with the base (snapshot source). |
-| `activation` | `Eager` (materialize all N now — RL default) vs `Lazy` (born Suspended (snapshot) / Absent (image), materialize on first contact). |
+| `activation` | `Lazy` (born Suspended (snapshot) / Absent (image), materialize on first contact — **recommended at scale**, §7) vs `Eager` (materialize all N now — needs ~N workers). |
 | `lifecycle.idleAction` | **ephemeral (`reset`) vs durable (`suspend`)** — the key policy knob (5.3). |
 | `lifecycle.idleTimeoutSeconds` / `ttlAfterSuspendSeconds` | per‑fork idle + retention. |
 | `subject` | owner for the fan‑out quota + attribution. |
@@ -502,6 +532,16 @@ built. Summary of the three limits (per‑object done; both aggregates deferred)
   the full image). Modest K is fine; large K is a pool‑scaling + scheduling question
   (and a thundering‑herd on S3 for the base — mitigate with the shared‑prefix read,
   possibly a cache, later). The fan‑out quota (§6) bounds it.
+- **Prefer `Lazy` + checkpoint‑when‑done over `Eager` at scale (learned live).** An
+  `Eager` fan‑out issues K simultaneous restores/cold‑starts and needs ~K workers at
+  once; that burst (plus the pool's own minIdle autoscaling + `pod-deletion-cost`
+  patches firing worker‑discovery) is what stressed the worker‑claim path and exposed
+  the fan‑out bugs fixed in v42 (see the As‑built update at top and
+  `history-worker-networking-and-teleport.md`). `activation: Lazy` materializes each
+  fork on first contact, and `lifecycle.idleAction: reset`/`suspend` (or a per‑fork
+  `suspendRequest` when the episode ends) frees its worker between episodes — so a
+  small pool cycles through many rollouts (temporal oversubscription) and there is no
+  restore burst. This is the recommended RL pattern; see `examples/forkset/`.
 - **Base storage cost.** A pinned base persists indefinitely; plus each fork that
   checkpoints writes its own full lineage (no CoW in v1). Bound with base TTL +
   ref‑count reclaim (5.4) and the per‑fork session GC.
@@ -657,7 +697,7 @@ snapshot source (base + pinning + GC).
 | Q0 | Fork source: snapshot only, or also image? | **Both**, via optional `baseRef` on one `ForkSet` CR — set → snapshot (amortized/reproducible state), omit → image (cheap, independent per‑boot init). Complementary; see §1.1. |
 | Q1 | New `BaseSnapshot` CR, or inline snapshot URI on the fork request? | New CR (snapshot source only) — gives GC a first‑class pin/ref‑count object and a stable base identity. |
 | Q2 | Base under a separate `bases/` prefix, or stay in `sandboxes/` + pin? | Separate `bases/` prefix — keeps it out of the orphan‑S3 sweep entirely; pin as defense in depth. |
-| Q3 | Forks born `Suspended`/`Absent` (lazy) or eagerly materialized? | `ForkSet.spec.activation`: `Lazy` (reuses the resume/cold‑start path, pay on first use) vs `Eager` (materialize all N now — the RL default). Caller chooses per batch. |
+| Q3 | Forks born `Suspended`/`Absent` (lazy) or eagerly materialized? | `ForkSet.spec.activation`: `Lazy` (reuses the resume/cold‑start path, pay on first use) vs `Eager` (materialize all N now). Caller chooses per batch. **Revised (2026‑07‑24): `Lazy` is the recommended default at scale** — it avoids the simultaneous‑restore burst that stressed the scheduler, and pairs with checkpoint‑when‑done for temporal oversubscription (§7). `Eager` needs ~N workers up front; reserve it for small pre‑warmed batches. |
 | Q4 | Fork surface: broker MCP tool, broker REST, operator API, or CRs? | The **`ForkSet` CR is the substrate** — RL harnesses `kubectl apply` it and watch `.status.forks`. A broker `fork_session` tool is sugar that creates a `ForkSet` for interactive callers. |
 | Q7 | Should fork *addressing* go through the broker or direct to the router? | Direct by `X-Session-ID` for RL harnesses (broker's principal‑derived id assumes one session/user); router is unchanged either way (§5.7). A broker extension could target a chosen fork id if interactive fork‑driving is needed. |
 | Q8 | `refCount` counts live forks, or only not‑yet‑restored forks + pins? | Only **not‑yet‑restored forks + explicit pins** (§5.4.3) — a fork needs the base solely for its first restore, so a base with all forks Running (unpinned) is immediately reclaimable. CR‑existence, not the count, is the retention guarantee. |
@@ -671,6 +711,12 @@ see the as‑built note at the top. Both sources shipped (image fan‑out + snap
 copy‑on‑promote/restore), finalizer‑backed base reclaim, refCount, and the
 worker‑side sid‑reuse fix. **Also shipped (2026‑07‑21, operator `v32`):** the CEL
 `count ≤ 256` hard cap (§5.2/§6) and the reconciler pool‑resolvability check.
+**Fan‑out hardening (2026‑07‑24, operator `v42`):** fixed four bugs surfaced by the RL
+example — worker double‑booking, CR‑delete stranding the worker (Session finalizer),
+per‑fork idle policy (action + timeout) being ignored, and a phantom idle‑set member
+skewing pool counts (see the As‑built update at top, §7, and
+`checkpoint-restore/history-worker-networking-and-teleport.md`). Example + walkthrough:
+`examples/forkset/`.
 **Not yet built (deferred):** the broker `fork_session` sugar (§5.2 — the CR is the
 substrate today), the **aggregate** fan‑out quota (per‑subject at the front door +
 optional cluster‑wide reconciler gate, §6), a runsc‑version match (data gap, §5.2), and

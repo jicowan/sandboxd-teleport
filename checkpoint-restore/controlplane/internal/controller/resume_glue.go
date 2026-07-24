@@ -101,9 +101,10 @@ func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, h
 			return nil, err
 		}
 		plan := &resume.SessionPlan{
-			Cmd:   s.Spec.Cmd,
-			Env:   s.Spec.Env,
-			Ports: portsFromCRD(s.Spec.Ports),
+			Cmd:                 s.Spec.Cmd,
+			Env:                 s.Spec.Env,
+			Ports:               portsFromCRD(s.Spec.Ports),
+			IdleTimeoutOverride: s.Spec.Lifecycle.IdleTimeoutSeconds, // per-session (e.g. ForkSet) idle timeout
 		}
 		// Session-level IAM role overrides the template's (resolved in the resume
 		// workflow when TemplateName is set).
@@ -159,13 +160,26 @@ func BuildSuspender(c client.Client, kv *assign.Client, namespace string, httpCl
 			pol.TimeoutSeconds = cp.IdleTimeoutSeconds
 			pol.Action = cp.IdleAction
 		}
-		if s.Spec.Lifecycle.IdleTimeoutSeconds > 0 {
-			pol.TimeoutSeconds = s.Spec.Lifecycle.IdleTimeoutSeconds
-		}
-		return pol, nil
+		return applyLifecycleOverride(pol, s.Spec.Lifecycle), nil
 	}
 	return resume.NewSuspender(kv, clientFor, policyFor, resume.SuspendOptions{}).
 		WithMirror(NewSessionMirror(c, namespace))
+}
+
+// applyLifecycleOverride layers a Session's spec.lifecycle over the template-resolved
+// idle policy. Both the timeout AND the action are overridable per session:
+// SessionLifecycle.IdleAction is what lets an ephemeral fork choose reset-on-idle (or
+// a durable fork choose suspend) WITHOUT a dedicated pool (docs/PRD-snapshot-fork.md
+// §5.3/§5.5) — a ForkSet sets it once and every child honors it. An empty
+// field/zero timeout means "inherit the template", so classic sessions are unchanged.
+func applyLifecycleOverride(pol resume.IdlePolicy, lc corev1alpha1.SessionLifecycle) resume.IdlePolicy {
+	if lc.IdleTimeoutSeconds > 0 {
+		pol.TimeoutSeconds = lc.IdleTimeoutSeconds
+	}
+	if lc.IdleAction != "" {
+		pol.Action = lc.IdleAction
+	}
+	return pol
 }
 
 // BuildCheckpointer wires resume.Checkpointer to the cached client + KV, resolving
