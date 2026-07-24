@@ -490,13 +490,10 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	// Use the EXACT config.json the checkpoint was made with; move it out of imgDir
 	// (runsc would treat a stray file there as an image file).
-	cfgSrc := filepath.Join(imgDir, "config.json")
-	if b, err := os.ReadFile(cfgSrc); err == nil {
-		os.WriteFile(filepath.Join(bundle, "config.json"), b, 0o644)
-		os.Remove(cfgSrc)
+	if moveConfigJSON(imgDir, bundle) {
 		lg("using original spec from snapshot")
 	} else {
-		lg("WARN: no config.json in snapshot, rebuilding spec: %v", err)
+		lg("WARN: no config.json in snapshot, rebuilding spec")
 		netnsPath := ""
 		if len(req.Ports) > 0 {
 			netnsPath = interiorNetNSPath

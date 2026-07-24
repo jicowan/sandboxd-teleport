@@ -234,7 +234,7 @@ func (wf *Workflow) workerHolds(ctx context.Context, pod, sid string) bool {
 	if err != nil {
 		return false // entry gone -> pod gone (pruned) -> stale RUNNING
 	}
-	return w.State == resumeapi.WorkerBusy && w.SID == sid
+	return resumeapi.WorkerHolds(w, sid)
 }
 
 // resume returns (ip, kind, fastPath, err). kind is cold_start|restore; fastPath

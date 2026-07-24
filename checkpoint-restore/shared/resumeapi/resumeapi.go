@@ -59,6 +59,14 @@ type WorkerEntry struct {
 	Version int64  `json:"version"`
 }
 
+// WorkerHolds reports whether worker entry w is busy-bound to sid — the shared
+// liveness/fencing predicate used by the resume path, the router fast path, and the
+// GC abandoned-check. A nil w (entry gone: pod pruned) is NOT held, so a stale
+// RUNNING record fences off. Callers fetch w (GetWorker) and guard pod=="" first.
+func WorkerHolds(w *WorkerEntry, sid string) bool {
+	return w != nil && w.State == WorkerBusy && w.SID == sid
+}
+
 // ResumeRequest is the router -> operator POST /resume body.
 type ResumeRequest struct {
 	SID     string `json:"sid"`

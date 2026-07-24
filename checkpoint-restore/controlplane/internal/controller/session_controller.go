@@ -149,28 +149,7 @@ func (r *SessionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 // watermark is the machine signal). Best-effort in-memory mutation; persisted by the
 // caller's Status().Update, or standalone on the failure path.
 func (r *SessionReconciler) setSuspendCond(ctx context.Context, s *corev1alpha1.Session, status metav1.ConditionStatus, reason, msg string) {
-	cond := metav1.Condition{
-		Type:               "SuspendRequest",
-		Status:             status,
-		Reason:             reason,
-		Message:            msg,
-		ObservedGeneration: s.Generation,
-		LastTransitionTime: metav1.Now(),
-	}
-	replaced := false
-	for i := range s.Status.Conditions {
-		if s.Status.Conditions[i].Type == "SuspendRequest" {
-			if s.Status.Conditions[i].Status == status && s.Status.Conditions[i].Reason == reason {
-				cond.LastTransitionTime = s.Status.Conditions[i].LastTransitionTime
-			}
-			s.Status.Conditions[i] = cond
-			replaced = true
-			break
-		}
-	}
-	if !replaced {
-		s.Status.Conditions = append(s.Status.Conditions, cond)
-	}
+	upsertCondition(&s.Status.Conditions, "SuspendRequest", status, reason, msg, s.Generation)
 	// On the failure path there is no follow-up Status().Update, so persist here.
 	if status == metav1.ConditionFalse {
 		_ = r.Status().Update(ctx, s)

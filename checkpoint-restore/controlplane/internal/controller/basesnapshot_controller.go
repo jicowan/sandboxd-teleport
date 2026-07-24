@@ -229,24 +229,7 @@ func (r *BaseSnapshotReconciler) fail(ctx context.Context, base *corev1alpha1.Ba
 }
 
 func (r *BaseSnapshotReconciler) setReady(ctx context.Context, base *corev1alpha1.BaseSnapshot, status metav1.ConditionStatus, reason, msg string) {
-	cond := metav1.Condition{
-		Type:               "Ready",
-		Status:             status,
-		Reason:             reason,
-		Message:            msg,
-		ObservedGeneration: base.Generation,
-		LastTransitionTime: metav1.Now(),
-	}
-	for i := range base.Status.Conditions {
-		if base.Status.Conditions[i].Type == "Ready" {
-			if base.Status.Conditions[i].Status == status && base.Status.Conditions[i].Reason == reason {
-				cond.LastTransitionTime = base.Status.Conditions[i].LastTransitionTime
-			}
-			base.Status.Conditions[i] = cond
-			return
-		}
-	}
-	base.Status.Conditions = append(base.Status.Conditions, cond)
+	upsertCondition(&base.Status.Conditions, "Ready", status, reason, msg, base.Generation)
 }
 
 // SetupWithManager registers the reconciler.

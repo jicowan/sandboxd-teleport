@@ -38,6 +38,19 @@ import (
 	"github.com/jicowan/aio-sandbox/shared/sbxapi"
 )
 
+// workerClientFactory builds the sandboxd worker-client factory shared by the
+// resume workflow, suspender, and checkpointer: an mTLS client when httpClient is
+// set (P1.5), else a plain-HTTP client (P1). Extracted so the three builders don't
+// each carry a copy (one place to add e.g. a timeout later).
+func workerClientFactory(httpClient *http.Client) resume.WorkerClientFactory {
+	return func(podIP string) *sandboxdclient.Client {
+		if httpClient != nil {
+			return sandboxdclient.NewMTLS(podIP, httpClient)
+		}
+		return sandboxdclient.New(podIP, nil)
+	}
+}
+
 // BuildResumeWorkflow wires the resume.Workflow to the operator's cached client
 // and the KV table. namespace is where SandboxTemplate/Session objects live
 // (single-namespace MVP). httpClient is passed to sandboxd clients (nil = plain
@@ -125,12 +138,7 @@ func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, h
 		return plan, nil
 	}
 
-	clientFor := func(podIP string) *sandboxdclient.Client {
-		if httpClient != nil {
-			return sandboxdclient.NewMTLS(podIP, httpClient)
-		}
-		return sandboxdclient.New(podIP, nil)
-	}
+	clientFor := workerClientFactory(httpClient)
 
 	return resume.New(kv, lookup, clientFor, planFor, opts).
 		WithAppLookup(appLookup).
@@ -140,12 +148,7 @@ func BuildResumeWorkflow(c client.Client, kv *assign.Client, namespace string, h
 // BuildSuspender wires resume.Suspender to the operator's cached client + KV.
 // It resolves each session's idle policy from its pool's SandboxTemplate.
 func BuildSuspender(c client.Client, kv *assign.Client, namespace string, httpClient *http.Client) *resume.Suspender {
-	clientFor := func(podIP string) *sandboxdclient.Client {
-		if httpClient != nil {
-			return sandboxdclient.NewMTLS(podIP, httpClient)
-		}
-		return sandboxdclient.New(podIP, nil)
-	}
+	clientFor := workerClientFactory(httpClient)
 	policyFor := func(ctx context.Context, sid string) (resume.IdlePolicy, error) {
 		var s corev1alpha1.Session
 		if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: sid}, &s); err != nil {
@@ -185,12 +188,7 @@ func applyLifecycleOverride(pol resume.IdlePolicy, lc corev1alpha1.SessionLifecy
 // BuildCheckpointer wires resume.Checkpointer to the cached client + KV, resolving
 // each session's periodic-checkpoint interval from its pool's template (P5).
 func BuildCheckpointer(c client.Client, kv *assign.Client, namespace string, httpClient *http.Client) *resume.Checkpointer {
-	clientFor := func(podIP string) *sandboxdclient.Client {
-		if httpClient != nil {
-			return sandboxdclient.NewMTLS(podIP, httpClient)
-		}
-		return sandboxdclient.New(podIP, nil)
-	}
+	clientFor := workerClientFactory(httpClient)
 	policyFor := func(ctx context.Context, sid string) (resume.CheckpointPolicy, error) {
 		var s corev1alpha1.Session
 		if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: sid}, &s); err != nil {
@@ -425,33 +423,44 @@ func configPolicyForSession(ctx context.Context, c client.Client, ns string, s *
 	}
 }
 
-func templateSpecFromCRD(t *corev1alpha1.SandboxTemplate) *resume.TemplateSpec {
+// toTemplateSpec maps the workload half of a SandboxTemplate/AppTemplate spec into a
+// resume.TemplateSpec. The two CRDs carry identical workload field shapes (image,
+// cmd, env, ports, iam, idle, checkpoint, health), so both mappers share this one
+// body — only the source object differs.
+func toTemplateSpec(image string, cmd, env []string, ports []corev1alpha1.PortMap,
+	iam *corev1alpha1.IAMSpec, idle corev1alpha1.IdlePolicy, ckptInterval int,
+	health *corev1alpha1.Health) *resume.TemplateSpec {
 	ts := &resume.TemplateSpec{
-		Image: t.Spec.Image,
-		Cmd:   t.Spec.Cmd,
-		Env:   t.Spec.Env,
-		Ports: portsFromCRD(t.Spec.Ports),
+		Image: image,
+		Cmd:   cmd,
+		Env:   env,
+		Ports: portsFromCRD(ports),
 	}
-	if t.Spec.IAM != nil {
-		ts.IAMRoleARN = t.Spec.IAM.RoleARN
+	if iam != nil {
+		ts.IAMRoleARN = iam.RoleARN
 	}
 	// Record the resolved idle/checkpoint policy so the KV due-indexes are
 	// maintained without a hot-path lookup (PRD-control-plane-scalability).
-	ts.IdleTimeoutSeconds = t.Spec.Idle.TimeoutSeconds
-	ts.CheckpointIntervalSeconds = t.Spec.CheckpointIntervalSeconds
-	if t.Spec.Health != nil {
+	ts.IdleTimeoutSeconds = idle.TimeoutSeconds
+	ts.CheckpointIntervalSeconds = ckptInterval
+	if health != nil {
 		ts.Health = &sbxapi.Health{
-			RestartPolicy: t.Spec.Health.RestartPolicy,
-			Probe:         t.Spec.Health.Probe,
-			ProbePort:     t.Spec.Health.ProbePort,
-			ProbePath:     t.Spec.Health.ProbePath,
+			RestartPolicy: health.RestartPolicy,
+			Probe:         health.Probe,
+			ProbePort:     health.ProbePort,
+			ProbePath:     health.ProbePath,
 		}
 		// Map the template idle policy onto the worker's idle-timeout field.
-		if t.Spec.Idle.TimeoutSeconds > 0 {
-			ts.Health.IdleTimeoutSec = t.Spec.Idle.TimeoutSeconds
+		if idle.TimeoutSeconds > 0 {
+			ts.Health.IdleTimeoutSec = idle.TimeoutSeconds
 		}
 	}
 	return ts
+}
+
+func templateSpecFromCRD(t *corev1alpha1.SandboxTemplate) *resume.TemplateSpec {
+	return toTemplateSpec(t.Spec.Image, t.Spec.Cmd, t.Spec.Env, t.Spec.Ports,
+		t.Spec.IAM, t.Spec.Idle, t.Spec.CheckpointIntervalSeconds, t.Spec.Health)
 }
 
 // appSpecFromCRD maps an AppTemplate onto the same resume.TemplateSpec the resolver
@@ -459,29 +468,8 @@ func templateSpecFromCRD(t *corev1alpha1.SandboxTemplate) *resume.TemplateSpec {
 // (docs/PRD-arbitrary-image-sessions.md §13). AppTemplate has no worker-shape fields,
 // so only the workload subset is mapped.
 func appSpecFromCRD(a *corev1alpha1.AppTemplate) *resume.TemplateSpec {
-	ts := &resume.TemplateSpec{
-		Image: a.Spec.Image,
-		Cmd:   a.Spec.Cmd,
-		Env:   a.Spec.Env,
-		Ports: portsFromCRD(a.Spec.Ports),
-	}
-	if a.Spec.IAM != nil {
-		ts.IAMRoleARN = a.Spec.IAM.RoleARN
-	}
-	ts.IdleTimeoutSeconds = a.Spec.Idle.TimeoutSeconds
-	ts.CheckpointIntervalSeconds = a.Spec.CheckpointIntervalSeconds
-	if a.Spec.Health != nil {
-		ts.Health = &sbxapi.Health{
-			RestartPolicy: a.Spec.Health.RestartPolicy,
-			Probe:         a.Spec.Health.Probe,
-			ProbePort:     a.Spec.Health.ProbePort,
-			ProbePath:     a.Spec.Health.ProbePath,
-		}
-		if a.Spec.Idle.TimeoutSeconds > 0 {
-			ts.Health.IdleTimeoutSec = a.Spec.Idle.TimeoutSeconds
-		}
-	}
-	return ts
+	return toTemplateSpec(a.Spec.Image, a.Spec.Cmd, a.Spec.Env, a.Spec.Ports,
+		a.Spec.IAM, a.Spec.Idle, a.Spec.CheckpointIntervalSeconds, a.Spec.Health)
 }
 
 func portsFromCRD(in []corev1alpha1.PortMap) []sbxapi.PortMap {

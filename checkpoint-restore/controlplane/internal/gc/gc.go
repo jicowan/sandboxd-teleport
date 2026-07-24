@@ -251,7 +251,7 @@ func (c *Collector) workerHolds(ctx context.Context, pod, sid string) bool {
 	if err != nil {
 		return false
 	}
-	return w.State == resumeapi.WorkerBusy && w.SID == sid
+	return resumeapi.WorkerHolds(w, sid)
 }
 
 // reapSession removes a session's KV entry (+ indexes via DeleteSession), its CR
