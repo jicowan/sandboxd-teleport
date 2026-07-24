@@ -23,9 +23,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-// intstr8090 returns the sandboxd HTTP port as an IntOrString for probes.
-func intstr8090() intstr.IntOrString { return intstr.FromInt32(8090) }
-
 // intstrHealth returns the sandboxd plain-HTTP health port (kubelet probes hit this,
 // never the mTLS control API on :8090).
 func intstrHealth() intstr.IntOrString { return intstr.FromInt32(workerHealthPort) }

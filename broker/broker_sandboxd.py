@@ -239,14 +239,6 @@ def _mcp_method(body: bytes) -> Optional[str]:
     return msg.get("method") if isinstance(msg, dict) else None
 
 
-def _msg_id(body: bytes):
-    try:
-        msg = json.loads(body or b"{}")
-        return msg.get("id") if isinstance(msg, dict) else None
-    except ValueError:
-        return None
-
-
 def _is_initialize(body: bytes) -> bool:
     return _mcp_method(body) == "initialize"
 
@@ -276,23 +268,6 @@ def _rewrite_init_version(payload: bytes) -> bytes:
         return json.dumps(_fix(json.loads(text))).encode()
     except ValueError:
         return payload
-
-
-async def _warm(sid: str, pool: str, app_template: str) -> None:
-    """Background warm-on-initialize (O8): ask the router's generic /_warm
-    primitive to ensure the session is Running before the first tool call. This
-    is protocol-agnostic — the router just resumes the session and returns 204
-    (no MCP payload fabricated, no workload round trip). Fire-and-forget:
-    best-effort, all errors swallowed (a failed warm just means the first real
-    call pays the cold start, as before)."""
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0)) as client:
-            await client.post(
-                f"{ROUTER_URL}/_warm",
-                headers=_session_headers(sid, pool, app_template),
-            )
-    except Exception:
-        pass
 
 
 async def _forward(method: str, body: bytes, sid: str, pool: str, app_template: str,

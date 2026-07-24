@@ -16,7 +16,6 @@ type imageConfig struct {
 	Env        []string
 	WorkingDir string
 	User       string
-	Ref        string // fully-qualified image reference (for teleport identity)
 	Digest     string // image manifest digest (recorded in the snapshot manifest)
 }
 
