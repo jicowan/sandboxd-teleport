@@ -237,16 +237,37 @@ func (c *Client) dueEntries(ctx context.Context, zkey string, nowMillis int64) (
 	if err != nil {
 		return nil, err
 	}
+	if len(sids) == 0 {
+		return nil, nil
+	}
+	// Batch-load all due entries with one MGET instead of N sequential GETs (this runs
+	// on both the suspend and checkpoint sweepers every ~30s). Order matches sids.
+	keys := make([]string, len(sids))
+	for i, sid := range sids {
+		keys[i] = sessionKey(sid)
+	}
+	vals, err := c.rdb.MGet(ctx, keys...).Result()
+	if err != nil {
+		return nil, err
+	}
 	out := make([]*resumeapi.SessionEntry, 0, len(sids))
-	for _, sid := range sids {
-		e, gerr := c.GetSession(ctx, sid)
-		if errors.Is(gerr, ErrNotFound) {
-			c.rdb.ZRem(ctx, zkey, sid) // stale index member: prune
+	var stale []string
+	for i, v := range vals {
+		if v == nil { // entry gone: stale index member
+			stale = append(stale, sids[i])
 			continue
 		}
-		if gerr == nil {
-			out = append(out, e)
+		s, ok := v.(string)
+		if !ok {
+			continue
 		}
+		var e resumeapi.SessionEntry
+		if json.Unmarshal([]byte(s), &e) == nil {
+			out = append(out, &e)
+		}
+	}
+	if len(stale) > 0 {
+		c.rdb.ZRem(ctx, zkey, stale) // prune stale index members in one call
 	}
 	return out, nil
 }
@@ -262,9 +283,21 @@ func (c *Client) ListSessions(ctx context.Context) ([]*resumeapi.SessionEntry, e
 		if err != nil {
 			return nil, err
 		}
-		for _, k := range keys {
-			if e, gerr := c.GetSession(ctx, k[len("session:"):]); gerr == nil {
-				out = append(out, e)
+		// Batch-load each SCAN page with one MGET instead of a GET per key.
+		if len(keys) > 0 {
+			vals, gerr := c.rdb.MGet(ctx, keys...).Result()
+			if gerr != nil {
+				return nil, gerr
+			}
+			for _, v := range vals {
+				s, ok := v.(string)
+				if !ok {
+					continue // key vanished between SCAN and MGET
+				}
+				var e resumeapi.SessionEntry
+				if json.Unmarshal([]byte(s), &e) == nil {
+					out = append(out, &e)
+				}
 			}
 		}
 		cursor = cur
