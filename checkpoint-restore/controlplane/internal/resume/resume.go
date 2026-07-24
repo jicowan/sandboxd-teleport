@@ -347,9 +347,16 @@ func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint, appHint 
 		return "", metrics.KindColdStart, false, err // ErrNoCapacity -> 503 at the handler
 	}
 	wf.notify.PoolChanged(w.Pool) // idle->busy: refresh pool status
+	// Seed the Resuming CAS from the entry resume() already read; nil if it was
+	// absent (ErrNotFound) so casSessionSeed GETs/creates as before.
+	var coldSeed *resumeapi.SessionEntry
+	if curErr == nil {
+		coldSeed = cur
+	}
 	ip, err := wf.startAndBind(ctx, sid, w, bindSpec{
 		img: img, cmd: cmd, env: env, ports: ports, health: health, roleARN: roleARN,
 		idleTimeoutSeconds: idleTimeout, checkpointIntervalSeconds: ckptInterval,
+		seed: coldSeed, // the entry resume() already read (nil if it was absent)
 	})
 	if err != nil {
 		_ = wf.kv.ReleaseWorker(ctx, w.Pod, w.Pool)
@@ -375,6 +382,7 @@ func (wf *Workflow) resumeFromSnapshot(ctx context.Context, cur *resumeapi.Sessi
 		restore: true, img: cur.Image, ports: cur.Ports, health: cur.Health,
 		snapshot: cur.SnapshotURI, roleARN: cur.IAMRoleARN,
 		idleTimeoutSeconds: cur.IdleTimeoutSeconds, checkpointIntervalSeconds: cur.CheckpointIntervalSeconds,
+		seed: cur, // resume() already read this entry; seed the Resuming CAS
 	})
 	if err != nil {
 		_ = wf.kv.ReleaseWorker(ctx, w.Pod, w.Pool)
@@ -396,14 +404,20 @@ type bindSpec struct {
 	snapshot, roleARN         string
 	idleTimeoutSeconds        int
 	checkpointIntervalSeconds int
+	// seed is the SessionEntry the resume path already loaded (cur). When non-nil it
+	// seeds the FIRST (Resuming) CAS so startAndBind doesn't re-GET a key it just
+	// read. nil = load fresh. CAS-conflict retries always re-GET regardless, so this
+	// is a pure round-trip saving with no effect on correctness.
+	seed *resumeapi.SessionEntry
 }
 
 // startAndBind records Resuming, drives sandboxd /run (cold) or /restore (from a
 // snapshot), waits for ready, then records Running. sid is the sandbox id on the
 // worker (one per worker).
 func (wf *Workflow) startAndBind(ctx context.Context, sid string, w *resumeapi.WorkerEntry, b bindSpec) (string, error) {
-	// Record Resuming (CAS from whatever we last read; create if absent).
-	if err := wf.casSession(ctx, sid, func(e *resumeapi.SessionEntry) {
+	// Record Resuming (CAS from whatever we last read; create if absent). Seed the
+	// first attempt from the entry resume() already loaded to save one GET.
+	if err := wf.casSessionSeed(ctx, sid, b.seed, func(e *resumeapi.SessionEntry) {
 		e.State = resumeapi.StateResuming
 		e.Pool = w.Pool
 		e.WorkerPod = w.Pod
@@ -454,16 +468,30 @@ func (wf *Workflow) startAndBind(ctx context.Context, sid string, w *resumeapi.W
 // casSession loads the current entry (or a fresh one), applies mutate, and writes
 // with CAS, retrying on version conflict a bounded number of times.
 func (wf *Workflow) casSession(ctx context.Context, sid string, mutate func(*resumeapi.SessionEntry)) error {
+	return wf.casSessionSeed(ctx, sid, nil, mutate)
+}
+
+// casSessionSeed is casSession that may SEED its first attempt from an
+// already-loaded entry (seed), skipping the initial GET. On a CAS version conflict
+// it discards the seed and re-GETs, so correctness is identical to casSession — the
+// seed only removes a redundant round-trip when the caller already holds the entry.
+func (wf *Workflow) casSessionSeed(ctx context.Context, sid string, seed *resumeapi.SessionEntry, mutate func(*resumeapi.SessionEntry)) error {
 	const maxTries = 5
 	for i := 0; i < maxTries; i++ {
-		e, err := wf.kv.GetSession(ctx, sid)
-		if errors.Is(err, assign.ErrNotFound) {
-			e = &resumeapi.SessionEntry{SID: sid, Version: 0}
-		} else if err != nil {
-			return err
+		var e *resumeapi.SessionEntry
+		if i == 0 && seed != nil {
+			e = seed // use the caller's already-read entry for the first attempt
+		} else {
+			var err error
+			e, err = wf.kv.GetSession(ctx, sid)
+			if errors.Is(err, assign.ErrNotFound) {
+				e = &resumeapi.SessionEntry{SID: sid, Version: 0}
+			} else if err != nil {
+				return err
+			}
 		}
 		mutate(e)
-		err = wf.kv.PutSessionCAS(ctx, e)
+		err := wf.kv.PutSessionCAS(ctx, e)
 		if err == nil {
 			mirrorIfDurable(ctx, wf.mirror, e) // etcd mirror only on durability-critical transitions
 			return nil
