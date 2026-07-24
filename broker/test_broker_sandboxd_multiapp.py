@@ -32,8 +32,8 @@ def test_legacy_mode_unchanged():
     # header is ignored; env pool/app used; app_key empty
     assert b._resolve_app("anything", []) == ("", "aio-pool", "aio-app")
     # sid is principal-only and byte-identical to the pre-multi-app id
-    assert b._sid_for("jicowan", None) == b._sid_for("jicowan", None, app_key="")
-    assert b._sid_for("jicowan", None) == "sess-jicowan-93b7baf854168a42"
+    assert b._sid_for("jicowan") == b._sid_for("jicowan", app_key="")
+    assert b._sid_for("jicowan") == "sess-jicowan-93b7baf854168a42"
 
 
 def test_multiapp_resolution_and_entitlement():
@@ -68,13 +68,13 @@ def test_default_app_fills_missing_header():
 def test_sid_folds_app_no_collision():
     b = _load(apps_env=json.dumps({"aio": {"appTemplate": "aio-app", "pool": "p"},
                                    "devbox": {"appTemplate": "devbox-app", "pool": "p"}}))
-    s_aio = b._sid_for("jicowan", "m1", app_key="aio")
-    s_dev = b._sid_for("jicowan", "m1", app_key="devbox")
+    s_aio = b._sid_for("jicowan", app_key="aio")
+    s_dev = b._sid_for("jicowan", app_key="devbox")
     assert s_aio != s_dev, "different apps must map to different durable sessions"
     assert s_aio.startswith("sess-jicowan-aio-")
     assert s_dev.startswith("sess-jicowan-devbox-")
-    # stable across reconnects (same principal+app, slot 0, different mcp session)
-    assert b._sid_for("jicowan", "m1", app_key="aio") == b._sid_for("jicowan", "m2", app_key="aio")
+    # stable across reconnects: same (principal, app) always yields the same durable sid
+    assert b._sid_for("jicowan", app_key="aio") == b._sid_for("jicowan", app_key="aio")
     for s in (s_aio, s_dev):
         assert SID_RE.match(s), f"bad sandbox id: {s}"
 
