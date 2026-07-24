@@ -229,7 +229,7 @@ func (r *WarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	effReplicas := pool.Spec.Replicas
 	if r.KV != nil && pool.Spec.MinIdle > 0 {
 		if idle, total, cerr := r.KV.CountWorkers(ctx, pool.Name); cerr == nil {
-			busy := int32(total - idle)
+			busy := busyCount(idle, total)
 			if want := busy + pool.Spec.MinIdle; want > effReplicas {
 				effReplicas = want
 			}
@@ -472,9 +472,10 @@ func (r *WarmPoolReconciler) updateStatus(ctx context.Context, pool *corev1alpha
 	if r.KV != nil {
 		idle, total, err := r.KV.CountWorkers(ctx, pool.Name)
 		if err == nil {
+			busy := busyCount(idle, total)
 			pool.Status.Idle = int32(idle)
-			pool.Status.Busy = int32(total - idle)
-			metrics.SetPoolWorkers(pool.Name, idle, total-idle) // real-time gauge
+			pool.Status.Busy = busy
+			metrics.SetPoolWorkers(pool.Name, idle, int(busy)) // real-time gauge
 		}
 	}
 	setReadyCond(&pool.Status.Conditions, metav1.ConditionTrue, "Provisioned", "worker deployment reconciled")

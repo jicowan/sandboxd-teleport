@@ -58,29 +58,38 @@ func (s *s3Store) downloadPrefix(ctx context.Context, prefix, localDir string) e
 		return err
 	}
 	p := strings.TrimSuffix(prefix, "/") + "/"
-	lst, err := s.cl.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: &s.bucket, Prefix: &p})
+	// Paginate: ListObjectsV2 returns at most 1000 keys per page, so a single call
+	// silently truncates a large snapshot (partial restore). Walk every page.
+	pager := s3.NewListObjectsV2Paginator(s.cl, &s3.ListObjectsV2Input{Bucket: &s.bucket, Prefix: &p})
+	for pager.HasMorePages() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return err
+		}
+		for _, obj := range page.Contents {
+			if err := s.downloadOne(ctx, *obj.Key, localDir); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// downloadOne fetches a single object into localDir (named by its key's basename).
+func (s *s3Store) downloadOne(ctx context.Context, key, localDir string) error {
+	out, err := s.cl.GetObject(ctx, &s3.GetObjectInput{Bucket: &s.bucket, Key: &key})
+	if err != nil {
+		return fmt.Errorf("get %s: %w", key, err)
+	}
+	defer out.Body.Close()
+	name := key[strings.LastIndex(key, "/")+1:]
+	f, err := os.Create(filepath.Join(localDir, name))
 	if err != nil {
 		return err
 	}
-	for _, obj := range lst.Contents {
-		key := *obj.Key
-		out, err := s.cl.GetObject(ctx, &s3.GetObjectInput{Bucket: &s.bucket, Key: &key})
-		if err != nil {
-			return fmt.Errorf("get %s: %w", key, err)
-		}
-		name := key[strings.LastIndex(key, "/")+1:]
-		f, err := os.Create(filepath.Join(localDir, name))
-		if err != nil {
-			out.Body.Close()
-			return err
-		}
-		if _, err := f.ReadFrom(out.Body); err != nil {
-			f.Close()
-			out.Body.Close()
-			return err
-		}
-		f.Close()
-		out.Body.Close()
+	defer f.Close()
+	if _, err := f.ReadFrom(out.Body); err != nil {
+		return err
 	}
 	return nil
 }

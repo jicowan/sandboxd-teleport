@@ -27,6 +27,19 @@ import (
 // never the mTLS control API on :8090).
 func intstrHealth() intstr.IntOrString { return intstr.FromInt32(workerHealthPort) }
 
+// busyCount derives the busy-worker count from the pool's idle + all-set sizes,
+// floored at 0. Busy is not tracked directly — it's total(all-set) − idle(idle-set).
+// If KV ever drifts so the idle set exceeds the all-set (e.g. a stale idle member),
+// the raw subtraction goes NEGATIVE, which would under-provision effReplicas
+// (busy+minIdle) and mis-report status. The floor makes a transient drift fail safe
+// (never scale a pool below minIdle). See PRD-snapshot-fork.md fan-out hardening.
+func busyCount(idle, total int) int32 {
+	if busy := total - idle; busy > 0 {
+		return int32(busy)
+	}
+	return 0
+}
+
 // deploymentMatches reports whether the existing worker Deployment already has
 // the desired replicas and pod template (so we skip a no-op update).
 func deploymentMatches(existing, desired *appsv1.Deployment) bool {
