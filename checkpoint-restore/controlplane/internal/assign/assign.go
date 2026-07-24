@@ -25,7 +25,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strconv"
 	"time"
 
@@ -511,6 +510,3 @@ func (c *Client) CountWorkers(ctx context.Context, pool string) (idle, total int
 	}
 	return int(i), int(t), nil
 }
-
-// fmtAddr is a tiny helper so callers can build host:port without importing net.
-func Addr(host string, port int) string { return fmt.Sprintf("%s:%d", host, port) }

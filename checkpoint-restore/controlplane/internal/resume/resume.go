@@ -64,7 +64,6 @@ type SessionPlan struct {
 	Cmd          []string
 	Env          []string
 	Ports        []sbxapi.PortMap
-	Health       *sbxapi.Health
 	IAMRoleARN   string // session's assumable AWS role (from template or session)
 	// IdleTimeoutOverride is the session's spec.lifecycle.idleTimeoutSeconds (0 = none).
 	// When >0 it overrides the template's idle timeout for THIS session, so the value
@@ -295,7 +294,8 @@ func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint, appHint 
 		return "", metrics.KindColdStart, false, fmt.Errorf("resolve session plan: %w", err)
 	}
 	img := plan.Image
-	cmd, env, ports, health := plan.Cmd, plan.Env, plan.Ports, plan.Health
+	cmd, env, ports := plan.Cmd, plan.Env, plan.Ports
+	var health *sbxapi.Health // set from the resolved template below (no per-plan override)
 	roleARN := plan.IAMRoleARN
 	idleTimeout, ckptInterval := 0, 0
 	// Resolve the config template: a SandboxTemplate (dedicated pool, plan.TemplateName)
@@ -324,9 +324,7 @@ func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint, appHint 
 		if len(ports) == 0 {
 			ports = tmpl.Ports
 		}
-		if health == nil {
-			health = tmpl.Health
-		}
+		health = tmpl.Health // no per-plan health override; the template is the source
 		if roleARN == "" {
 			roleARN = tmpl.IAMRoleARN // session override else template default
 		}

@@ -30,11 +30,10 @@ type health struct {
 
 // runtime health state (not persisted; rebuilt on reconcile)
 type healthState struct {
-	ready        bool
-	restarts     int
-	lastReadyAt  time.Time
-	idle         bool
-	consecFail   int
+	ready       bool
+	restarts    int
+	lastReadyAt time.Time
+	idle        bool
 }
 
 func (s *server) supervise(interval time.Duration) {
@@ -72,10 +71,7 @@ func (s *server) checkOne(sb *sandbox) {
 		hs.ready = ok
 		if ok {
 			hs.lastReadyAt = time.Now()
-			hs.consecFail = 0
 			hs.idle = false
-		} else {
-			hs.consecFail++
 		}
 	}
 	// Idle detection: ready earlier but nothing recent.

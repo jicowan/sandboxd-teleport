@@ -128,15 +128,6 @@ func (c *Client) Reset(ctx context.Context, sandboxID string) error {
 	return c.do(ctx, http.MethodPost, "/reset", body, nil)
 }
 
-// Capacity reports whether the worker is busy (GET /capacity).
-func (c *Client) Capacity(ctx context.Context) (*sbxapi.CapacityResponse, error) {
-	var out sbxapi.CapacityResponse
-	if err := c.do(ctx, http.MethodGet, "/capacity", nil, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
 // WaitReady polls /status until ready==true, ctx expires, or the sandbox reaches
 // a terminal non-running state. It is the TTFB-clock gate for the caller (O8):
 // pass a context with the resume deadline.

@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"os"
 	"syscall"
-	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/mount"
@@ -39,22 +38,6 @@ func cdClient() (*containerd.Client, context.Context, error) {
 	}
 	ctx := namespaces.WithNamespace(context.Background(), containerdNS)
 	return cl, ctx, nil
-}
-
-// containerdAvailable reports whether the node containerd socket is reachable.
-func containerdAvailable() bool {
-	if _, err := os.Stat(containerdSock); err != nil {
-		return false
-	}
-	cl, err := containerd.New(containerdSock)
-	if err != nil {
-		return false
-	}
-	defer cl.Close()
-	ctx, cancel := context.WithTimeout(namespaces.WithNamespace(context.Background(), containerdNS), 3*time.Second)
-	defer cancel()
-	_, err = cl.Version(ctx)
-	return err == nil
 }
 
 // prepareRootfsContainerd pulls (if needed) + unpacks ref via the node
@@ -178,7 +161,6 @@ func imageConfigFromContainerd(ctx context.Context, ref string, img containerd.I
 		Env:        c.Env,
 		WorkingDir: wd,
 		User:       c.User,
-		Ref:        ref,
 		Digest:     img.Target().Digest.String(),
 	}, nil
 }
