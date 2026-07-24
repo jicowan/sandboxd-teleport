@@ -21,7 +21,7 @@ spec:
       openAPIV3Schema:
         description: |-
           AppTemplate is the Schema for the apptemplates API — the scheduling-free workload
-          half of a sandbox definition (docs/PRD-arbitrary-image-sessions.md §13.2).
+          half of a sandbox definition (docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13.2).
         properties:
           apiVersion:
             description: |-

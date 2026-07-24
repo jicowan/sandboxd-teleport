@@ -73,7 +73,7 @@ agentgateway, ingress) if not already up.
   (worker‑shape only) and runs whatever `AppTemplate` the session's `appRef` names; a
   dedicated pool pins one image and takes `poolRef`‑only sessions. See
   [docs/sandboxd/admin-guide-crds.md](../../../../docs/sandboxd/admin-guide-crds.md)
-  and [docs/PRD-arbitrary-image-sessions.md §13](../../../../docs/PRD-arbitrary-image-sessions.md).
+  and [docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13](../../../../docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md).
 - The resume/warm‑up deadline defaults to 90s (`SANDBOXD_RESUME_DEADLINE_SECONDS`) —
   must exceed AIO cold start.
 - A **private‑ECR** workload image fails at `/run` with `502` (containerd `401`)

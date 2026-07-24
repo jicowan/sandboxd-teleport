@@ -32,7 +32,7 @@ import (
 
 // sessionFinalizer guards KV cleanup on Session CR deletion: it holds the object in
 // the apiserver until the reconciler has released the session's worker binding and
-// deleted its authoritative Valkey entry (docs/PRD-snapshot-fork.md — CR-delete
+// deleted its authoritative Valkey entry (docs/sandboxd/PRD/PRD-snapshot-fork.md — CR-delete
 // cleanup gap). Without it, deleting a Session (or a ForkSet, which cascades to its
 // child Sessions) strands the worker as busy and the pool never scales back down.
 const sessionFinalizer = "core.sandboxd.io/session-kv-cleanup"
@@ -51,7 +51,7 @@ type SuspendController interface {
 }
 
 // SessionReconciler reconciles the on-demand suspend request on a Session
-// (docs/PRD-on-demand-suspend.md). It is the ONLY controller that watches Session
+// (docs/sandboxd/PRD/PRD-on-demand-suspend.md). It is the ONLY controller that watches Session
 // (Sessions are otherwise lazy-created + status-mirrored). It is deliberately
 // minimal: it acts only on the edge-triggered suspend request and touches nothing
 // else about the Session, so it never fights reactive resume or the durability

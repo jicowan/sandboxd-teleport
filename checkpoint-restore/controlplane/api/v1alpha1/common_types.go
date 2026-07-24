@@ -86,7 +86,7 @@ type LocalRef struct {
 // credentials endpoint on the interior gateway (the AWS SDK auto-refreshes them);
 // the credentials are per-session, never the worker's own identity, and survive
 // teleport. Empty/unset = the sandbox has no AWS identity. See
-// docs/PRD-sandbox-iam-credentials.md.
+// docs/sandboxd/PRD/PRD-sandbox-iam-credentials.md.
 type IAMSpec struct {
 	// roleArn is the ARN of the IAM role the sandbox may assume. Authorization for
 	// which sessions may use which role is enforced at the front door / control

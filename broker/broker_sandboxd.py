@@ -59,10 +59,10 @@ POOL = os.environ.get("SANDBOXD_POOL", "aio-pool")
 
 # The AppTemplate to run on a GENERIC pool (sent as X-Session-App). Empty ⇒ the pool
 # is DEDICATED and supplies its own image (classic behavior). Set this when SANDBOXD_POOL
-# is a generic pool. See docs/PRD-arbitrary-image-sessions.md §13.
+# is a generic pool. See docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13.
 APP = os.environ.get("SANDBOXD_APP", "")
 
-# Multi-app mode (docs/PRD-broker-multi-app.md, Level B). SANDBOXD_APPS is a JSON map
+# Multi-app mode (docs/sandboxd/PRD/PRD-broker-multi-app.md, Level B). SANDBOXD_APPS is a JSON map
 # of app-id -> {appTemplate, pool, group}, letting ONE broker front several sandbox
 # apps. The app-id arrives per request in the X-Sandbox-App header, which an
 # agentgateway per-app route injects (route /aio -> add X-Sandbox-App: aio). The broker

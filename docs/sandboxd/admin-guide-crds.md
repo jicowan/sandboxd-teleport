@@ -33,7 +33,7 @@ subresource; no printer columns.
 >   Session brings via `spec.appRef` (an [AppTemplate](#apptemplate-appt)). Reach for a
 >   generic pool first; stand up a dedicated pool only when one image earns its own
 >   warm fleet or a distinct capacity class. See
->   [PRD‑arbitrary‑image‑sessions §13](../PRD-arbitrary-image-sessions.md).
+>   [PRD‑arbitrary‑image‑sessions §13](PRD/PRD-arbitrary-image-sessions.md).
 >
 > Only the **workload** `image` is optional. A generic pool's template still needs a
 > resolvable **worker** image — set `workerImage` on the template (or an operator
@@ -105,7 +105,7 @@ scheduling‑free** — it has no `scheduling`/`resources`/`workerImage` fields,
 application *cannot* dictate worker placement (that's a pool property, by type). One
 AppTemplate is reusable across any generic pool (GPU, AZ‑pinned, standard). Has a
 `status` subresource; no printer columns. See
-[PRD‑arbitrary‑image‑sessions §13](../PRD-arbitrary-image-sessions.md).
+[PRD‑arbitrary‑image‑sessions §13](PRD/PRD-arbitrary-image-sessions.md).
 
 ### `.spec`
 
@@ -231,7 +231,7 @@ Printer columns: `Phase` (`.status.phase`), `Worker` (`.status.workerPodIP`).
 | `iam` | IAMSpec | No | Assume an AWS IAM role for this session's sandbox (`iam.roleArn`), overriding the app/pool template's `iam`. |
 | `lifecycle` | SessionLifecycle | No | Overrides template idle/TTL for this session. |
 | `forkFrom` | ForkProvenance | No | Set by the `ForkSet` controller on a fork child: `{baseRef, snapshotURI}` records the base it was seeded from (snapshot source; empty for image forks). Makes the child self‑describing and is the base‑reclaim ref‑count key. Not set by hand. |
-| `suspendRequest` | string | No | **Edge‑triggered, one‑shot** request to checkpoint+suspend this session **now** (docs/PRD-on-demand-suspend.md). Set it to a fresh **opaque token** (uuid/timestamp/etc.); when it differs from `status.lastSuspendHandled` the operator performs exactly one checkpoint→S3→Suspended→free‑worker, then sets the watermark equal. It is **not** a level‑triggered desired‑state — reactive resume (a request to the router) may bring the session back to Running afterward and will **not** re‑suspend it (the token is already handled). Wait for `status.lastSuspendHandled == spec.suspendRequest && status.snapshotURI != ""` to know the snapshot is durable (e.g. before promoting a `BaseSnapshot`). |
+| `suspendRequest` | string | No | **Edge‑triggered, one‑shot** request to checkpoint+suspend this session **now** (docs/sandboxd/PRD/PRD-on-demand-suspend.md). Set it to a fresh **opaque token** (uuid/timestamp/etc.); when it differs from `status.lastSuspendHandled` the operator performs exactly one checkpoint→S3→Suspended→free‑worker, then sets the watermark equal. It is **not** a level‑triggered desired‑state — reactive resume (a request to the router) may bring the session back to Running afterward and will **not** re‑suspend it (the token is already handled). Wait for `status.lastSuspendHandled == spec.suspendRequest && status.snapshotURI != ""` to know the snapshot is durable (e.g. before promoting a `BaseSnapshot`). |
 
 #### SessionLifecycle
 
@@ -279,7 +279,7 @@ kubectl get sess -n default
 ## ForkSet (`fork`)
 
 Fans out **N independent child `Session`s from one common source** in a single
-declarative object (docs/PRD-snapshot-fork.md). A `ForkSet` is to forked Sessions what
+declarative object (docs/sandboxd/PRD/PRD-snapshot-fork.md). A `ForkSet` is to forked Sessions what
 a `WarmPool` is to worker pods: the controller creates and owns N `Session` children
 (ownerRefs) and rolls their readiness up into `.status`. The **source** is selected by
 `baseRef` / `appRef` (mutually exclusive):
@@ -298,7 +298,7 @@ Setting both `baseRef` and `appRef` is rejected (`SourceConflict` condition); a 
 `appRef` AppTemplate fails fast (`AppUnresolved`). Fan‑out cold‑pull note: a large
 `appRef` ForkSet of a never‑seen image incurs up to N cold pulls — prefer the snapshot
 source for large fan‑outs. See
-[PRD‑arbitrary‑image‑sessions §13.6](../PRD-arbitrary-image-sessions.md).
+[PRD‑arbitrary‑image‑sessions §13.6](PRD/PRD-arbitrary-image-sessions.md).
 
 Has a `status` subresource. Printer columns: `Desired`, `Ready`, `Phase`.
 
@@ -384,7 +384,7 @@ cluster or per user.
 | Limit | Scope | Enforced by | Status |
 |-------|-------|-------------|--------|
 | **Per‑ForkSet `count` ≤ 256** | one object | CRD schema / apiserver (bypass‑proof) | **enforced** |
-| Total concurrent forks **per subject** | all a user's ForkSets | the caller's front door (e.g. the example broker's `fork_session`) — the operator can't see identity | not built (fan‑out quota; see [PRD‑broker‑fork‑session](../PRD-broker-fork-session.md)) |
+| Total concurrent forks **per subject** | all a user's ForkSets | the caller's front door (e.g. the example broker's `fork_session`) — the operator can't see identity | not built (fan‑out quota; see [PRD‑broker‑fork‑session](PRD/PRD-broker-fork-session.md)) |
 | Total concurrent forks **cluster‑wide** | whole cluster | would be an operator reconciler check (not admission‑time, so not bypass‑proof) | not built |
 
 So N separate ForkSets can still sum past 256 (e.g. 10 × 200). Bounding the **total**

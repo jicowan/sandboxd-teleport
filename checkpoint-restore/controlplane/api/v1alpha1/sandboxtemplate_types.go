@@ -29,7 +29,7 @@ type SandboxTemplateSpec struct {
 	// image is the OCI image run AS THE SANDBOX (nested gVisor workload), not the
 	// worker pod image.
 	//
-	// OPTIONAL as of the generic-pool model (docs/PRD-arbitrary-image-sessions.md §13):
+	// OPTIONAL as of the generic-pool model (docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13):
 	//   - SET   => a DEDICATED pool that runs ONLY this image (poolRef-only sessions
 	//              get it; this is the classic/original behavior — aio, redis, etc.).
 	//   - EMPTY => a GENERIC pool: worker-shape (scheduling/resources) only, running

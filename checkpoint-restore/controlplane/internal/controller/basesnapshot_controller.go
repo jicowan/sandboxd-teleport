@@ -38,7 +38,7 @@ import (
 // baseSnapshotFinalizer ensures a base's bases/<id>/ S3 objects are reclaimed when
 // its CR is deleted — including a pinned base deleted directly (the reaper only
 // reclaims S3 for bases IT deletes on unpinned+unreferenced). Without it, deleting
-// a promoted base CR orphans its S3 objects (docs/PRD-snapshot-fork.md §5.4).
+// a promoted base CR orphans its S3 objects (docs/sandboxd/PRD/PRD-snapshot-fork.md §5.4).
 const baseSnapshotFinalizer = "sandboxd.io/base-snapshot-s3"
 
 // snapDirOf returns the "<...>/<sid>/snap-N" directory of a snapshot URI (strips a
@@ -54,7 +54,7 @@ func snapDirOf(uri string) string {
 }
 
 // BaseSnapshotReconciler promotes a suspended session's snapshot into a fork-stable
-// base (copy-on-promote) and records the restore identity (docs/PRD-snapshot-fork.md
+// base (copy-on-promote) and records the restore identity (docs/sandboxd/PRD/PRD-snapshot-fork.md
 // §5.1). It does NOT reclaim bases — that is the GC base reaper (§5.4), gated on
 // pinned==false + refCount==0.
 type BaseSnapshotReconciler struct {

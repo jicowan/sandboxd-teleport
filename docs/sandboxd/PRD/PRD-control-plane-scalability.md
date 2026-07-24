@@ -2,7 +2,7 @@
 
 Status: **Proposed** (not scheduled — analysis + plan; nothing built). Decision‑ready.
 Grounded in the shipped code in this repository. Related:
-[architecture-sandboxd.md](sandboxd/architecture-sandboxd.md),
+[architecture-sandboxd.md](../architecture-sandboxd.md),
 [PRD-durable-assignment-state.md](PRD-durable-assignment-state.md).
 
 ## 1. Summary

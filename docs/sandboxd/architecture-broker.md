@@ -276,8 +276,8 @@ relayed verbatim, so token‑by‑token streaming reaches the client. A `DELETE`
 the MCP endpoint is a **no‑op** returning `204`: it does *not* destroy the durable
 session — the session idle‑suspends to storage and teleport‑resumes later.
 
-See [PRD-broker-multi-app.md](../PRD-broker-multi-app.md) and
-[PRD-arbitrary-image-sessions.md](../PRD-arbitrary-image-sessions.md) §13 for the
+See [PRD-broker-multi-app.md](PRD/PRD-broker-multi-app.md) and
+[PRD-arbitrary-image-sessions.md](PRD/PRD-arbitrary-image-sessions.md) §13 for the
 generic‑pool + AppTemplate design behind these headers.
 
 ### The broker is protocol‑generic toward the control plane

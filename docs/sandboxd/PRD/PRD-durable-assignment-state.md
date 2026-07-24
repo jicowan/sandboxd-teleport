@@ -1,7 +1,7 @@
 # PRD — durable assignment state (Kubernetes as truth, Valkey as cache)
 
 Status: **Implemented + verified live** (2026‑07‑08, operator `v17`). Related:
-[architecture-sandboxd.md](sandboxd/architecture-sandboxd.md).
+[architecture-sandboxd.md](../architecture-sandboxd.md).
 
 > **Update (2026‑07‑08, operator v19):** the mirror was narrowed to **durability‑
 > critical transitions only** to relieve etcd write pressure

@@ -6,7 +6,7 @@
 # prefix (copy-on-promote). That decoupling is load-bearing:
 #   - the base survives even if the origin session re-checkpoints, resets, or is GC'd;
 #   - the orphan-S3 GC pass only sweeps sandboxes/, never bases/, so a base can't be
-#     reaped as an orphan (docs/PRD-snapshot-fork.md §5.1/§5.4).
+#     reaped as an orphan (docs/sandboxd/PRD/PRD-snapshot-fork.md §5.1/§5.4).
 #
 # The source session MUST be Suspended-with-snapshot when this reconciles, or it goes
 # Failed with "source session not Suspended-with-snapshot" (retry after suspend).

@@ -27,7 +27,7 @@ import (
 // resources/workerImage here — so an application, by construction (the type has no
 // field to set), CANNOT dictate worker placement. Placement is a POOL property
 // carried by the SandboxTemplate a WarmPool references; an app runs on whatever
-// generic pool's workers it is assigned to (docs/PRD-arbitrary-image-sessions.md §13).
+// generic pool's workers it is assigned to (docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13).
 //
 // A Session references an AppTemplate via spec.appRef to run that workload on a
 // GENERIC pool (a WarmPool whose SandboxTemplate leaves image empty). This lets many
@@ -87,7 +87,7 @@ type AppTemplateStatus struct {
 // +kubebuilder:resource:shortName=appt
 
 // AppTemplate is the Schema for the apptemplates API — the scheduling-free workload
-// half of a sandbox definition (docs/PRD-arbitrary-image-sessions.md §13.2).
+// half of a sandbox definition (docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13.2).
 type AppTemplate struct {
 	metav1.TypeMeta `json:",inline"`
 

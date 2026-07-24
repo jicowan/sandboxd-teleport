@@ -22,11 +22,11 @@ import (
 )
 
 // ForkSetSpec fans out N independent Session children from ONE common source
-// (docs/PRD-snapshot-fork.md). The source is selected by baseRef / appRef:
+// (docs/sandboxd/PRD/PRD-snapshot-fork.md). The source is selected by baseRef / appRef:
 //   - baseRef SET          -> fork-from-snapshot: children restore from the
 //     BaseSnapshot (carries its own image; works on any pool).
 //   - appRef SET           -> fork-from-app: children cold-start an AppTemplate on a
-//     GENERIC pool (docs/PRD-arbitrary-image-sessions.md §13.6).
+//     GENERIC pool (docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13.6).
 //   - both UNSET           -> fork-from-image: children cold-start from a DEDICATED
 //     pool's own SandboxTemplate image (the original behavior).
 //
@@ -48,14 +48,14 @@ type ForkSetSpec struct {
 	// so a ForkSet can fan out onto a GENERIC pool (whose SandboxTemplate pins no
 	// image). Mutually exclusive with baseRef. When both baseRef and appRef are unset,
 	// this is an image-source ForkSet on a DEDICATED pool (children cold-start from the
-	// pool's own SandboxTemplate image). See docs/PRD-arbitrary-image-sessions.md §13.6.
+	// pool's own SandboxTemplate image). See docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13.6.
 	// +optional
 	AppRef *LocalRef `json:"appRef,omitempty"`
 
 	// count is the number of fork children (N) to create.
 	//
 	// The maximum is the operator's ABSOLUTE, bypass-proof fan-out guardrail
-	// (docs/PRD-snapshot-fork.md §6): a hard cap enforced by the apiserver via the
+	// (docs/sandboxd/PRD/PRD-snapshot-fork.md §6): a hard cap enforced by the apiserver via the
 	// CRD schema, so it holds for EVERY caller — a direct `kubectl apply` as much as
 	// the example broker. It bounds blast radius (one ForkSet = up to N workers). It
 	// is intentionally a fixed cap, not per-subject quota: per-identity limits are

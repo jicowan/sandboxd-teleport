@@ -30,7 +30,7 @@ type SessionSpec struct {
 	// pool a worker is claimed from). On a DEDICATED pool (its SandboxTemplate pins an
 	// image) poolRef alone runs that image. On a GENERIC pool (its SandboxTemplate has
 	// no image — worker-shape only) the pool supplies only capacity and the workload
-	// comes from appRef below (docs/PRD-arbitrary-image-sessions.md §13). poolRef is
+	// comes from appRef below (docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13). poolRef is
 	// effectively always required — an appRef/image session still needs a pool to run
 	// on.
 	// +optional
@@ -47,7 +47,7 @@ type SessionSpec struct {
 	// (image + cmd/env/ports/health/idle/checkpoint/iam), DECOUPLED from poolRef
 	// (capacity + placement). This is how a session runs a workload on a GENERIC pool
 	// (a WarmPool whose SandboxTemplate has no image): the pool supplies worker-shape,
-	// the AppTemplate supplies what to run (docs/PRD-arbitrary-image-sessions.md §13).
+	// the AppTemplate supplies what to run (docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13).
 	// An AppTemplate cannot specify scheduling — placement is always the pool's.
 	// Resolution precedence: image > appRef > poolRef's own (dedicated-pool) image.
 	// Mutually exclusive with image. Additive/optional: inert unless set, so classic
@@ -86,12 +86,12 @@ type SessionSpec struct {
 	// source, the base it was seeded from. Set by the ForkSet controller; empty for
 	// normal and image-source sessions. It makes a child self-describing (a rebuild
 	// knows its base) and is the ref-count decrement key for base reclaim
-	// (docs/PRD-snapshot-fork.md §5.4).
+	// (docs/sandboxd/PRD/PRD-snapshot-fork.md §5.4).
 	// +optional
 	ForkFrom *ForkProvenance `json:"forkFrom,omitempty"`
 
 	// suspendRequest is an EDGE-TRIGGERED, one-shot request to checkpoint+suspend
-	// this session now (docs/PRD-on-demand-suspend.md). Set it to a fresh OPAQUE
+	// this session now (docs/sandboxd/PRD/PRD-on-demand-suspend.md). Set it to a fresh OPAQUE
 	// token (uuid/timestamp/etc.); when it differs from status.lastSuspendHandled the
 	// operator performs exactly one checkpoint->S3->Suspended->free-worker, then sets
 	// the watermark equal. It is NOT a level-triggered desired-state: reactive resume
@@ -102,7 +102,7 @@ type SessionSpec struct {
 	SuspendRequest string `json:"suspendRequest,omitempty"`
 }
 
-// ForkProvenance records a fork child's origin (docs/PRD-snapshot-fork.md §5.5).
+// ForkProvenance records a fork child's origin (docs/sandboxd/PRD/PRD-snapshot-fork.md §5.5).
 type ForkProvenance struct {
 	// baseRef names the BaseSnapshot this fork was seeded from (snapshot source).
 	// Empty for an image-source fork.
@@ -124,7 +124,7 @@ type SessionLifecycle struct {
 	// idleAction overrides the template idle action for this session: suspend
 	// (checkpoint->S3, free worker), reset (discard state, free worker), or none.
 	// Lets an ephemeral fork choose reset-on-idle without a dedicated pool
-	// (docs/PRD-snapshot-fork.md §5.3). Empty = inherit the template's action.
+	// (docs/sandboxd/PRD/PRD-snapshot-fork.md §5.3). Empty = inherit the template's action.
 	// +kubebuilder:validation:Enum=suspend;reset;none
 	// +optional
 	IdleAction string `json:"idleAction,omitempty"`
@@ -185,7 +185,7 @@ type SessionStatus struct {
 	LastActiveAt *metav1.Time `json:"lastActiveAt,omitempty"`
 
 	// lastSuspendHandled is the watermark for the on-demand suspend request
-	// (docs/PRD-on-demand-suspend.md): the spec.suspendRequest token the operator
+	// (docs/sandboxd/PRD/PRD-on-demand-suspend.md): the spec.suspendRequest token the operator
 	// most recently COMPLETED — set only after the checkpoint is durably in S3 and
 	// the session is Suspended. A requester waits for
 	// status.lastSuspendHandled == spec.suspendRequest (&& snapshotURI != "") to know

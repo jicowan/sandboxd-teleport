@@ -51,7 +51,7 @@ Claude Code ──HTTPS MCP + OAuth──▶ agentgateway ──▶ broker ─�
 - **broker** (`broker/broker_sandboxd.py`) — re‑validates the JWT, enforces the
   group, derives a durable per‑user (per‑app) session id, and **transparently
   proxies MCP** to the sandboxd router. Supports several sandbox "apps" behind one
-  broker (see [docs/PRD-broker-multi-app.md](./docs/PRD-broker-multi-app.md)).
+  broker (see [docs/sandboxd/PRD/PRD-broker-multi-app.md](./docs/sandboxd/PRD/PRD-broker-multi-app.md)).
 - **Keycloak** — OIDC provider (`sandbox` realm; public client `aio-sandbox-client`).
 
 The front door is documented in `docs/sandboxd/` (broker end‑user / admin /

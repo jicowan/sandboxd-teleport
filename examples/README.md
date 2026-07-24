@@ -9,4 +9,4 @@ Worked examples of the two shapes of workload sandboxd runs.
 
 For the concepts behind these, see [docs/sandboxd/](../docs/sandboxd/) — especially
 [architecture-sandboxd.md](../docs/sandboxd/architecture-sandboxd.md) and, for the
-ForkSet design, [docs/PRD-snapshot-fork.md](../docs/PRD-snapshot-fork.md).
+ForkSet design, [docs/sandboxd/PRD/PRD-snapshot-fork.md](../docs/sandboxd/PRD/PRD-snapshot-fork.md).

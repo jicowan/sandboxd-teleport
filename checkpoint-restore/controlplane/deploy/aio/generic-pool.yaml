@@ -1,5 +1,5 @@
 # Generic pool + AppTemplates for the multi-app front door
-# (docs/PRD-arbitrary-image-sessions.md §13, docs/PRD-broker-multi-app.md).
+# (docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13, docs/sandboxd/PRD/PRD-broker-multi-app.md).
 #
 # The SandboxTemplate here carries ONLY worker-shape (scheduling/resources/
 # workerImage) and NO image -> a GENERIC pool. Sessions bring their workload via

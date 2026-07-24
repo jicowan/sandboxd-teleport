@@ -108,7 +108,7 @@ var (
 
 	// WorkerReclaimedTotal counts stuck-busy worker bindings returned to the idle
 	// pool by the reclaim sweep, by reason (no-sid|orphan|suspended|rebound). See
-	// docs/DESIGN-worker-binding-reclaim.md.
+	// docs/sandboxd/PRD/DESIGN-worker-binding-reclaim.md.
 	WorkerReclaimedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "sandboxd_worker_reclaimed_total",
 		Help: "Stuck-busy worker bindings reclaimed to idle, by reason (no-sid|orphan|suspended|rebound).",

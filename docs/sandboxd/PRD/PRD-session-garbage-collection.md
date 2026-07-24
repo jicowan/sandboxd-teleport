@@ -3,8 +3,8 @@
 Status: **Implemented + verified live** (2026‑07‑09, operator `v22`). Related:
 [PRD-control-plane-scalability.md](PRD-control-plane-scalability.md),
 [PRD-durable-assignment-state.md](PRD-durable-assignment-state.md),
-[architecture-sandboxd.md](sandboxd/architecture-sandboxd.md),
-[admin-guide-crds.md](sandboxd/admin-guide-crds.md).
+[architecture-sandboxd.md](../architecture-sandboxd.md),
+[admin-guide-crds.md](../admin-guide-crds.md).
 
 > **As built (2026‑07‑09, operator v22).** The `gc.Collector`
 > (`internal/gc/gc.go`) now reaps the whole session footprint across four passes:

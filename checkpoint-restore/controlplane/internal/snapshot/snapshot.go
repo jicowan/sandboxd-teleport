@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package snapshot implements copy-on-promote and reclaim for fork base snapshots
-// (docs/PRD-snapshot-fork.md §5.1/§5.4). A base is an S3 server-side copy of a
+// (docs/sandboxd/PRD/PRD-snapshot-fork.md §5.1/§5.4). A base is an S3 server-side copy of a
 // session's checkpoint into a fork-stable bases/<id>/ prefix, distinct from the
 // per-session sandboxes/<sid>/ space the GC orphan pass sweeps — so a base's
 // lifetime is decoupled from the origin session and structurally exempt from
@@ -32,7 +32,7 @@ import (
 )
 
 // BasePrefix is the S3 key prefix all base snapshots live under. The GC orphan-S3
-// pass sweeps sandboxes/ only and never this prefix (docs/PRD-snapshot-fork.md §5.4).
+// pass sweeps sandboxes/ only and never this prefix (docs/sandboxd/PRD/PRD-snapshot-fork.md §5.4).
 const BasePrefix = "bases/"
 
 // S3API is the subset of the S3 client copy-on-promote + reclaim need. Injectable

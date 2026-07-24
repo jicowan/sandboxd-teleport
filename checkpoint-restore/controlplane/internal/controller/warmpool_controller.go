@@ -61,12 +61,12 @@ const (
 
 // LabelForkSet marks a Session as a child of a ForkSet (value = ForkSet name), so
 // the ForkSet controller can enumerate its children for readiness rollup and
-// scale-down reaping (docs/PRD-snapshot-fork.md §5.2).
+// scale-down reaping (docs/sandboxd/PRD/PRD-snapshot-fork.md §5.2).
 const LabelForkSet = "sandboxd.io/forkset"
 
 // LabelForkBase marks a snapshot-source fork child with the BaseSnapshot name it
 // was seeded from, so the base reaper can derive a base's refCount by listing its
-// not-yet-materialized children (docs/PRD-snapshot-fork.md §5.4).
+// not-yet-materialized children (docs/sandboxd/PRD/PRD-snapshot-fork.md §5.4).
 const LabelForkBase = "sandboxd.io/fork-base"
 
 // podDeletionCostAnnotation and the idle/busy cost values drive graceful

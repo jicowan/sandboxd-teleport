@@ -172,7 +172,7 @@ func BuildSuspender(c client.Client, kv *assign.Client, namespace string, httpCl
 // applyLifecycleOverride layers a Session's spec.lifecycle over the template-resolved
 // idle policy. Both the timeout AND the action are overridable per session:
 // SessionLifecycle.IdleAction is what lets an ephemeral fork choose reset-on-idle (or
-// a durable fork choose suspend) WITHOUT a dedicated pool (docs/PRD-snapshot-fork.md
+// a durable fork choose suspend) WITHOUT a dedicated pool (docs/sandboxd/PRD/PRD-snapshot-fork.md
 // §5.3/§5.5) — a ForkSet sets it once and every child honors it. An empty
 // field/zero timeout means "inherit the template", so classic sessions are unchanged.
 func applyLifecycleOverride(pol resume.IdlePolicy, lc corev1alpha1.SessionLifecycle) resume.IdlePolicy {
@@ -312,7 +312,7 @@ func poolTemplate(ctx context.Context, c client.Client, ns, pool string) (*corev
 
 // poolIsGeneric reports whether a pool is GENERIC (its SandboxTemplate pins no image,
 // so it runs whatever workload a session brings) vs. DEDICATED (image set, single-image
-// only). See docs/PRD-arbitrary-image-sessions.md §13.
+// only). See docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13.
 func poolIsGeneric(ctx context.Context, c client.Client, ns, pool string) (bool, error) {
 	t, err := poolTemplate(ctx, c, ns, pool)
 	if err != nil {
@@ -323,7 +323,7 @@ func poolIsGeneric(ctx context.Context, c client.Client, ns, pool string) (bool,
 
 // resolveWorkloadSource resolves a session's WORKLOAD source into the plan
 // (plan.Image / plan.AppName / plan.TemplateName) and enforces the generic/dedicated
-// admission rules (docs/PRD-arbitrary-image-sessions.md §13.3). This is the
+// admission rules (docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13.3). This is the
 // authoritative chokepoint — the operator must resolve the workload before /run, so
 // these rules cannot be bypassed by any create path (broker, self-service, kubectl):
 //
@@ -465,7 +465,7 @@ func templateSpecFromCRD(t *corev1alpha1.SandboxTemplate) *resume.TemplateSpec {
 
 // appSpecFromCRD maps an AppTemplate onto the same resume.TemplateSpec the resolver
 // consumes, so an appRef workload resolves identically to a SandboxTemplate one
-// (docs/PRD-arbitrary-image-sessions.md §13). AppTemplate has no worker-shape fields,
+// (docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13). AppTemplate has no worker-shape fields,
 // so only the workload subset is mapped.
 func appSpecFromCRD(a *corev1alpha1.AppTemplate) *resume.TemplateSpec {
 	return toTemplateSpec(a.Spec.Image, a.Spec.Cmd, a.Spec.Env, a.Spec.Ports,

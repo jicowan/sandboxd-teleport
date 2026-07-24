@@ -12,7 +12,7 @@ own entitlement.
 > **Prerequisite:** the generic pool exists (`aio-generic-pool` — a `WarmPool` whose
 > `SandboxTemplate` has no image; see
 > [admin-guide-crds.md](admin-guide-crds.md) and
-> [PRD-arbitrary-image-sessions.md §13](../PRD-arbitrary-image-sessions.md)). Apps run
+> [PRD-arbitrary-image-sessions.md §13](PRD/PRD-arbitrary-image-sessions.md)). Apps run
 > on it; you don't create a pool per app.
 
 There are **four** places to touch. Only step 4 (Keycloak group) is optional.

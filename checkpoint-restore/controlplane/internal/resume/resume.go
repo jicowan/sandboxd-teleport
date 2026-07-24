@@ -70,7 +70,7 @@ type SessionPlan struct {
 	// written into the KV entry (and thus the suspend:due deadline that schedules the
 	// idle sweep) matches what the session asked for — e.g. a ForkSet's per-fork
 	// idleTimeoutSeconds. Without it a fork would inherit the pool template's timeout
-	// and its worker would free on the wrong schedule (docs/PRD-snapshot-fork.md §5.3).
+	// and its worker would free on the wrong schedule (docs/sandboxd/PRD/PRD-snapshot-fork.md §5.3).
 	IdleTimeoutOverride int
 }
 
@@ -152,7 +152,7 @@ type Workflow struct {
 }
 
 // WithAppLookup wires the AppTemplate resolver used when a plan carries AppName
-// (a Session's appRef → AppTemplate; docs/PRD-arbitrary-image-sessions.md §13).
+// (a Session's appRef → AppTemplate; docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13).
 // Optional: when unset, a plan.AppName is treated as unresolvable (an error at
 // cold start), so appRef sessions require this to be wired. Returns wf for chaining.
 func (wf *Workflow) WithAppLookup(l TemplateLookup) *Workflow {
@@ -333,7 +333,7 @@ func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint, appHint 
 	}
 	// Per-session idle-timeout override (spec.lifecycle.idleTimeoutSeconds) wins over
 	// the template — this is what makes a ForkSet's per-fork timeout drive the KV
-	// deadline + idle sweep (docs/PRD-snapshot-fork.md §5.3). Applies to inline-image
+	// deadline + idle sweep (docs/sandboxd/PRD/PRD-snapshot-fork.md §5.3). Applies to inline-image
 	// sessions too (no template, so it's the only source).
 	if plan.IdleTimeoutOverride > 0 {
 		idleTimeout = plan.IdleTimeoutOverride

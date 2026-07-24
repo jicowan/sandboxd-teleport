@@ -379,7 +379,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// ForkSet fan-out (docs/PRD-snapshot-fork.md): a ForkSet mints N child Sessions
+	// ForkSet fan-out (docs/sandboxd/PRD/PRD-snapshot-fork.md): a ForkSet mints N child Sessions
 	// from a common source — an image (cold-start from a pool) or a BaseSnapshot
 	// (restore from a promoted checkpoint). Eager children are materialized via the
 	// resume workflow.
@@ -438,7 +438,7 @@ func main() {
 	// once the manager starts.
 	discovery.TerminateSuspender = suspender
 
-	// On-demand suspend (docs/PRD-on-demand-suspend.md): a SessionReconciler watches
+	// On-demand suspend (docs/sandboxd/PRD/PRD-on-demand-suspend.md): a SessionReconciler watches
 	// Session.spec.suspendRequest and, on a new edge-triggered token, drives the same
 	// suspender to checkpoint+suspend once, then advances status.lastSuspendHandled.
 	// This is the trigger the example broker's fork_session composes.

@@ -138,7 +138,7 @@ func (s *Suspender) SweepOnce(ctx context.Context) (int, error) {
 }
 
 // SuspendNow performs an on-demand checkpoint+suspend of a single session
-// (docs/PRD-on-demand-suspend.md): checkpoint -> S3 -> mark Suspended -> free the
+// (docs/sandboxd/PRD/PRD-on-demand-suspend.md): checkpoint -> S3 -> mark Suspended -> free the
 // worker, using the exact same path the idle sweeper uses (suspendOne with
 // action=suspend). It is the exported, request-driven entry point the
 // SessionReconciler calls when it observes a new spec.suspendRequest.

@@ -29,7 +29,7 @@ import (
 // chain (the operator's Pod Identity). Copy-on-promote needs s3:GetObject on
 // sandboxes/* (read the source), s3:PutObject on bases/* (write the copy), and the
 // reaper needs s3:ListBucket + s3:DeleteObject on bases/* — a superset of the GC's
-// sandboxes/*-only policy, provisioned out-of-band (docs/PRD-snapshot-fork.md §10).
+// sandboxes/*-only policy, provisioned out-of-band (docs/sandboxd/PRD/PRD-snapshot-fork.md §10).
 func BuildSnapshotStore(ctx context.Context, bucket string) (*snapshot.Store, error) {
 	cfg, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {

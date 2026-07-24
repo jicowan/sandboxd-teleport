@@ -79,7 +79,7 @@ type ResumeRequest struct {
 	// AppTemplate to run on a GENERIC pool. When set on lazy Session creation, the
 	// operator sets Spec.AppRef so the workload comes from that AppTemplate (the pool
 	// supplies only capacity). Empty ⇒ classic behavior (a dedicated pool's own image).
-	// Ignored once the session exists. See docs/PRD-arbitrary-image-sessions.md §13.
+	// Ignored once the session exists. See docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13.
 	App string `json:"app,omitempty"`
 }
 

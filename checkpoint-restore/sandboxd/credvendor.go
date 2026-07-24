@@ -27,7 +27,7 @@ import (
 // the result, and refreshes before expiry. The credentials are never checkpointed
 // (they live only here, in the worker); on teleport the endpoint is rebuilt on the
 // new worker and the SDK simply re-fetches — so AWS access survives restore with
-// no baked-in secrets. See docs/PRD-sandbox-iam-credentials.md.
+// no baked-in secrets. See docs/sandboxd/PRD/PRD-sandbox-iam-credentials.md.
 type credVendor struct {
 	assume     assumeFunc    // injectable for tests; real impl calls STS
 	tokenKey   []byte        // HMAC key: per-session auth token = HMAC(key, sid)

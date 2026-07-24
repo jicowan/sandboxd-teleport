@@ -11,8 +11,8 @@ again. On‑demand checkpoints are GC'd identically to any suspended‑session s
 Commits `73d225a` (PRD) + `021ae1e` (impl). Related:
 [PRD-snapshot-fork.md](PRD-snapshot-fork.md) (the primary consumer),
 [PRD-durable-assignment-state.md](PRD-durable-assignment-state.md),
-[architecture-sandboxd.md](sandboxd/architecture-sandboxd.md),
-[admin-guide-crds.md](sandboxd/admin-guide-crds.md).
+[architecture-sandboxd.md](../architecture-sandboxd.md),
+[admin-guide-crds.md](../admin-guide-crds.md).
 
 ## 1. Summary
 
