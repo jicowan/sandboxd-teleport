@@ -33,7 +33,7 @@ import (
 )
 
 // BaseReaper maintains each BaseSnapshot's refCount and reclaims a base once it is
-// unpinned + unreferenced + past a grace (docs/PRD-snapshot-fork.md §5.4). It is
+// unpinned + unreferenced + past a grace (docs/sandboxd/PRD/PRD-snapshot-fork.md §5.4). It is
 // deliberately conservative: CR-existence is the retention guarantee, refCount only
 // GATES reclaim, and reclaim errs toward over-retention. A missed count never frees
 // a base early because reclaim also requires the grace to elapse from the moment

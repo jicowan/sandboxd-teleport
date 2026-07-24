@@ -11,7 +11,7 @@
 #
 # The trainer holds the N session ids from status.forks and drives each by
 # X-Session-ID straight to the router (no broker — the broker's one-session-per-user
-# model is for interactive callers, not fan-out; see docs/PRD-snapshot-fork.md §5.7).
+# model is for interactive callers, not fan-out; see docs/sandboxd/PRD/PRD-snapshot-fork.md §5.7).
 apiVersion: core.sandboxd.io/v1alpha1
 kind: ForkSet
 metadata: { name: rl-trials, namespace: default }

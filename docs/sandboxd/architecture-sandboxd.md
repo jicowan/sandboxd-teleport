@@ -123,7 +123,7 @@ Workload resolution precedence for a session: inline `spec.image` > `appRef`
 (AppTemplate) > the pool's own dedicated image. **Placement is always a pool property**
 — an app can't request scheduling. To keep warm headroom, `minIdle` autoscaling raises
 the effective replica count to `max(spec.replicas, busy + minIdle)`. See
-[PRD‑arbitrary‑image‑sessions §13](../PRD-arbitrary-image-sessions.md).
+[PRD‑arbitrary‑image‑sessions §13](PRD/PRD-arbitrary-image-sessions.md).
 
 **Track live workers (discovery).** A pod informer scoped to the worker label
 (`sandboxd.io/app=worker`) writes a `worker:<pod>` entry into Valkey when a worker
@@ -164,7 +164,7 @@ records that token in `status.lastSuspendHandled`. It's **one‑shot per token**
 on the change, not continuously), so it never fights a concurrent resume — the session
 can be brought back to `Running` afterward and won't be re‑suspended until you issue a
 *new* token. This is the declarative "save now" primitive
-([PRD-on-demand-suspend.md](../PRD-on-demand-suspend.md)); the example broker's
+([PRD-on-demand-suspend.md](PRD/PRD-on-demand-suspend.md)); the example broker's
 `fork_session` builds on it.
 
 **Reclaim dead sessions (garbage collection, optional).** A session's footprint is
@@ -196,7 +196,7 @@ ordinary session addressed by its own `X-Session-ID`. The source is either a
 or a pool image/AppTemplate (all children **cold‑start** independently). A `BaseSnapshot`
 is a promoted "golden" checkpoint, copied to a fork‑stable `bases/` S3 prefix (kept out
 of the orphan‑S3 sweep, with finalizer‑backed cleanup and reference counting). See
-[PRD-snapshot-fork.md](../PRD-snapshot-fork.md).
+[PRD-snapshot-fork.md](PRD/PRD-snapshot-fork.md).
 
 Every assignment‑table write uses the compare‑and‑swap discipline noted above — that,
 plus leader election on the reconcile loops, is what lets you run multiple operator
@@ -302,7 +302,7 @@ template sets `iam.roleArn`.
   checkpointed — only the *ability to fetch* teleports.
 - Enabled by the operator flag `--cred-token-secret` (fleet HMAC key from a Secret)
   + per‑pool `SandboxTemplate.spec.iam.roleArn` (a `Session.spec.iam.roleArn`
-  overrides it). See [PRD-sandbox-iam-credentials.md](../PRD-sandbox-iam-credentials.md).
+  overrides it). See [PRD-sandbox-iam-credentials.md](PRD/PRD-sandbox-iam-credentials.md).
 
 ## Session lifecycle (state machine)
 
@@ -368,7 +368,7 @@ Consistency: KV is authoritative during normal operation; **etcd is authoritativ
 on recovery** (a wiped cache is rebuilt from it). The mirror is best‑effort (a
 transient etcd error never fails the resume/suspend that already committed to KV;
 it self‑corrects on the next transition). See
-[PRD-durable-assignment-state.md](../PRD-durable-assignment-state.md).
+[PRD-durable-assignment-state.md](PRD/PRD-durable-assignment-state.md).
 
 ## Scheduling model
 
@@ -419,7 +419,7 @@ Designed so per‑session/churn cost doesn't grow with fleet size:
 Watch `sandboxd_sweep_duration_seconds` / `sandboxd_sweep_due` (enable
 `--metrics-bind-address`): rising duration or due≈total signals the indexing is no
 longer keeping up. Full analysis + remaining options:
-[PRD-control-plane-scalability.md](../PRD-control-plane-scalability.md).
+[PRD-control-plane-scalability.md](PRD/PRD-control-plane-scalability.md).
 
 ## Trust boundaries and what's next
 
@@ -460,7 +460,7 @@ longer keeping up. Full analysis + remaining options:
   may author AppTemplates* and *which images* are allowed. In the reference front door
   that's gated by the broker's per‑app group entitlement; a self‑service /
   caller‑supplied‑image path would need the registry/signature policy sketched in
-  [PRD‑arbitrary‑image‑sessions.md](../PRD-arbitrary-image-sessions.md).
+  [PRD‑arbitrary‑image‑sessions.md](PRD/PRD-arbitrary-image-sessions.md).
 - **Single worker namespace:** the operator assumes one namespace
   (`--resume-namespace`) for templates/pools/sessions and worker‑pod prune, and KV
   keys carry no namespace. Multi‑namespace (per‑tenant) workers are a known future

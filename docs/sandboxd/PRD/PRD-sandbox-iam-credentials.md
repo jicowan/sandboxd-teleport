@@ -1,7 +1,7 @@
 # PRD — per‑session IAM credentials for sandboxes
 
 Status: **Implemented + verified live** (2026‑07‑08, operator `v16`, worker `v51`).
-Related: [architecture-sandboxd.md](sandboxd/architecture-sandboxd.md),
+Related: [architecture-sandboxd.md](../architecture-sandboxd.md),
 [PRD-arbitrary-image-sessions.md](PRD-arbitrary-image-sessions.md) (same authz class).
 
 > **As built (differences from the design, all found via live testing):**

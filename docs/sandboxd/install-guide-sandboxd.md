@@ -390,7 +390,7 @@ sessions — then arm reaping with `SANDBOXD_GC_DRY_RUN=0` (or `--gc-dry-run=fal
 
 Let sandboxes assume an AWS IAM role scoped to their session (standard AWS SDK,
 no workload code change), teleport‑safe and never the worker's own identity. Off
-unless configured. See [PRD-sandbox-iam-credentials.md](../PRD-sandbox-iam-credentials.md).
+unless configured. See [PRD-sandbox-iam-credentials.md](PRD/PRD-sandbox-iam-credentials.md).
 
 > **Why an HMAC key?** The worker runs a tiny credential vendor on the sandbox's
 > interior network; the sandbox's AWS SDK fetches its session credentials from it,

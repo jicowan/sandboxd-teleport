@@ -23,7 +23,7 @@ metadata:
 data:
   config.yaml: |
     # yaml-language-server: $schema=https://agentgateway.dev/schema/config
-    # MULTI-APP front door (docs/PRD-broker-multi-app.md). Per app: a data-path route
+    # MULTI-APP front door (docs/sandboxd/PRD/PRD-broker-multi-app.md). Per app: a data-path route
     # (/aio/mcp, /everything/mcp) that injects X-Sandbox-App and proxies to the broker,
     # PLUS an explicit well-known route so RFC 9728 OAuth discovery
     # (/.well-known/oauth-protected-resource/<app>/mcp) returns THAT app's resource.

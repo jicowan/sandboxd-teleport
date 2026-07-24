@@ -1,5 +1,5 @@
 """Tests for the broker's multi-app resolution + session-id folding
-(docs/PRD-broker-multi-app.md, Level B). Self-contained: run with `python3
+(docs/sandboxd/PRD/PRD-broker-multi-app.md, Level B). Self-contained: run with `python3
 test_broker_sandboxd_multiapp.py` (no pytest needed). Reloads broker_sandboxd
 under different env to exercise legacy vs multi-app config.
 """

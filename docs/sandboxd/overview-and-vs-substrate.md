@@ -74,7 +74,7 @@ checkpoint to fork from).
 A pool is **dedicated** (its `SandboxTemplate` pins one image) or **generic** (image
 empty — it runs whatever workload a Session brings via `appRef`), so one pool's
 capacity can host many workloads without a warm pool per image. See
-[PRD‑arbitrary‑image‑sessions §13](../PRD-arbitrary-image-sessions.md).
+[PRD‑arbitrary‑image‑sessions §13](PRD/PRD-arbitrary-image-sessions.md).
 
 ### Notable capabilities
 

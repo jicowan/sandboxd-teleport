@@ -3,7 +3,7 @@
 Status: **Implemented** (2026‑07‑08, operator `v15` + worker `v43`). Companion to
 [PRD-graceful-scale-in.md](PRD-graceful-scale-in.md): scale‑in ordering picks
 *which* worker dies; this makes a worker's death *lossless* when it holds a
-session. Related: [architecture-sandboxd.md](sandboxd/architecture-sandboxd.md).
+session. Related: [architecture-sandboxd.md](../architecture-sandboxd.md).
 
 > **As built** (Design A, with two refinements to §5.3/§5):
 > - **No `preStop` hook.** The worker image is distroless (no shell), and an

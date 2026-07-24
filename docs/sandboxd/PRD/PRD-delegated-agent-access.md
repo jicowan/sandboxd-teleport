@@ -2,8 +2,8 @@
 
 Status: **Proposed** (not scheduled). Decision‑ready spec; grounded in the shipped
 code in this repository. Related:
-[architecture-sandboxd.md](sandboxd/architecture-sandboxd.md),
-[architecture-broker.md](sandboxd/architecture-broker.md),
+[architecture-sandboxd.md](../architecture-sandboxd.md),
+[architecture-broker.md](../architecture-broker.md),
 [PRD-sandbox-iam-credentials.md](PRD-sandbox-iam-credentials.md) (the AWS analog).
 
 > **Update (2026‑07‑09):** investigated "can the router pass an optional JWT to the
@@ -300,7 +300,7 @@ exchange to get the audience right).
 ### 5.7 What lives in the broker vs. agentgateway
 
 The front door is already two components with a clean split
-([architecture-broker.md](sandboxd/architecture-broker.md)): **agentgateway** (the
+([architecture-broker.md](../architecture-broker.md)): **agentgateway** (the
 internet‑facing MCP‑aware edge) and the **broker** (internal, session‑aware). The
 principle for placing this work: **agentgateway does coarse, stateless, edge‑global
 policy; the broker does per‑session/per‑pool context that only it has.**

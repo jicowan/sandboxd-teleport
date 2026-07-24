@@ -4,7 +4,7 @@ Status: **Proposed** (decision‑ready; grounded in `broker/broker_sandboxd.py` 
 shipped control plane). **Scope: reference / example, not core product** — see §1.
 Depends on: [PRD-on-demand-suspend.md](PRD-on-demand-suspend.md) (the suspend trigger
 this composes) and [PRD-snapshot-fork.md](PRD-snapshot-fork.md) (the ForkSet/BaseSnapshot
-primitives). Related: [architecture-broker.md](sandboxd/architecture-broker.md).
+primitives). Related: [architecture-broker.md](../architecture-broker.md).
 
 ## 1. Scope: this is an EXAMPLE, not the product
 

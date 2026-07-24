@@ -84,7 +84,7 @@ func main() {
 	// Per-session AWS credential vendor (opt-in): enabled when a fleet token key is
 	// configured. Serves temporary role credentials to the sandbox on the interior
 	// gateway so the workload can assume its session's IAM role. See
-	// docs/PRD-sandbox-iam-credentials.md.
+	// docs/sandboxd/PRD/PRD-sandbox-iam-credentials.md.
 	if key := os.Getenv("SANDBOXD_CRED_TOKEN_KEY"); key != "" {
 		assume, err := stsAssumeFunc(context.Background())
 		if err != nil {

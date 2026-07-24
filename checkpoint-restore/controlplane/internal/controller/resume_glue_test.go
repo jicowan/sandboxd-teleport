@@ -29,7 +29,7 @@ import (
 )
 
 // configPolicyForSession is the shared workload-config resolver used by the suspend
-// and checkpoint paths (docs/PRD-arbitrary-image-sessions.md §13): the idle/checkpoint
+// and checkpoint paths (docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13): the idle/checkpoint
 // policy follows image > appRef > pool's own SandboxTemplate. These specs pin that
 // precedence so an appRef/generic-pool session resolves policy identically to a
 // dedicated-pool session — and prove the classic and inline-image paths are UNCHANGED
@@ -128,7 +128,7 @@ var _ = Describe("configPolicyForSession precedence", func() {
 // applyLifecycleOverride: a Session's spec.lifecycle overrides the template-resolved
 // idle policy for BOTH timeout and action. The action override is what lets a ForkSet
 // make ephemeral (reset) or durable (suspend) forks without a dedicated pool
-// (docs/PRD-snapshot-fork.md §5.3/§5.5) — the regression that stranded fork workers
+// (docs/sandboxd/PRD/PRD-snapshot-fork.md §5.3/§5.5) — the regression that stranded fork workers
 // because the sweeper ignored SessionLifecycle.IdleAction.
 var _ = Describe("applyLifecycleOverride", func() {
 	base := resume.IdlePolicy{TimeoutSeconds: 600, Action: "suspend"} // template default
@@ -154,7 +154,7 @@ var _ = Describe("applyLifecycleOverride", func() {
 })
 
 // resolveWorkloadSource enforces the generic/dedicated admission at the operator's
-// authoritative chokepoint (docs/PRD-arbitrary-image-sessions.md §13.3). These specs
+// authoritative chokepoint (docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13.3). These specs
 // pin the accept/reject matrix so a dedicated pool stays single-image and a generic
 // pool only runs foreign workloads — the Stage 2b guarantee.
 var _ = Describe("resolveWorkloadSource generic/dedicated admission", func() {

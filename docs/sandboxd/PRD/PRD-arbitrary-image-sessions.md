@@ -2,7 +2,7 @@
 
 Status: **Proposed** (not scheduled). This is a decision‑ready product spec; we
 implement only if demand materializes. Author‑of‑record: platform team. Grounded
-in the original control-plane design (`delete_me/checkpoint-restore-docs/PRD-control-plane.md`
+in the original control-plane design (`delete_me/checkpoint-restore-docs/sandboxd/PRD/PRD-control-plane.md`
 §4.4 and the O6a/O6b/O6c decision items — retained as history) and the shipped code
 in this repository.
 

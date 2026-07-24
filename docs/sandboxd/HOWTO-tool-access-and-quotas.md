@@ -188,7 +188,7 @@ That makes the real quota levers these three — use them, not a session count:
    capped at **256** by the CRD schema (`kubebuilder:validation:Maximum`), so one fan‑out
    can't spawn unbounded sessions regardless of caller. (Per‑subject fork quota is a
    caller/front‑door concern, not enforced here — see
-   [PRD-snapshot-fork.md](../PRD-snapshot-fork.md).)
+   [PRD-snapshot-fork.md](PRD/PRD-snapshot-fork.md).)
 
 > **`SANDBOXD_MAX_SESSIONS_PER_USER` is currently read but NOT enforced** (each
 > principal already maps to one durable session per app, so there's nothing to count).

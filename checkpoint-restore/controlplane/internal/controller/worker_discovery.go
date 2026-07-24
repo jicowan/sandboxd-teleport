@@ -63,7 +63,7 @@ type WorkerDiscoveryReconciler struct {
 	// sweep returns it to the idle pool. It MUST exceed the resume deadline so an
 	// in-flight claim->bind (worker marked busy before its session entry exists)
 	// is never mistaken for a leak. 0 disables reclaim. See
-	// docs/DESIGN-worker-binding-reclaim.md.
+	// docs/sandboxd/PRD/DESIGN-worker-binding-reclaim.md.
 	ReclaimGrace time.Duration
 	// Now is the clock (injectable for tests); defaults to time.Now.
 	Now func() time.Time
@@ -231,7 +231,7 @@ func (r *WorkerDiscoveryReconciler) pruneStaleWorkers(ctx context.Context, pods 
 // reclaimReason classifies why a busy binding is anomalous, or "" if it is healthy
 // (its session is live and bound to THIS pod). The pod is assumed to exist + be
 // Ready (dead pods are handled by PruneStaleWorkers). See the reclaim rule in
-// docs/DESIGN-worker-binding-reclaim.md §4.1.
+// docs/sandboxd/PRD/DESIGN-worker-binding-reclaim.md §4.1.
 func (r *WorkerDiscoveryReconciler) reclaimReason(ctx context.Context, w *resumeapi.WorkerEntry) string {
 	if w.SID == "" {
 		return "no-sid" // busy with no session id at all — never a valid claim
@@ -260,7 +260,7 @@ func (r *WorkerDiscoveryReconciler) reclaimReason(ctx context.Context, w *resume
 // only after the anomaly has persisted past ReclaimGrace with an unchanged worker
 // version (so an in-flight claim->bind is never reclaimed). It moves such workers
 // busy->idle via ReleaseWorker. Returns the number reclaimed. No-op if
-// ReclaimGrace <= 0. See docs/DESIGN-worker-binding-reclaim.md.
+// ReclaimGrace <= 0. See docs/sandboxd/PRD/DESIGN-worker-binding-reclaim.md.
 func (r *WorkerDiscoveryReconciler) ReclaimOrphanBindings(ctx context.Context) (int, error) {
 	if r.ReclaimGrace <= 0 {
 		return 0, nil

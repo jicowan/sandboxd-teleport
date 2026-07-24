@@ -17,7 +17,7 @@ the branch-from-a-common-state idea also underpins SWE-agent-style env fan-out,
 [arXiv:2602.11210](https://arxiv.org/html/2602.11210v3).)
 
 That maps 1:1 onto sandboxd's `ForkSet` (see
-[docs/PRD-snapshot-fork.md](../../docs/PRD-snapshot-fork.md)):
+[docs/sandboxd/PRD/PRD-snapshot-fork.md](../../docs/sandboxd/PRD/PRD-snapshot-fork.md)):
 
 | RL concept | sandboxd |
 |---|---|
@@ -37,7 +37,7 @@ distinct env sessions at once. So the trainer holds the N fork session ids (from
 `ForkSet.status.forks`) and addresses each by **`X-Session-ID`** straight to the
 router, which resolves each id to its worker independently. The router is a plain
 1:1 session→worker proxy — no fan-out/broadcast in the data plane; parallelism is the
-trainer's job (open N streams). See [PRD §5.7](../../docs/PRD-snapshot-fork.md).
+trainer's job (open N streams). See [PRD §5.7](../../docs/sandboxd/PRD/PRD-snapshot-fork.md).
 
 The env here also speaks **plain HTTP** (`/step`, `/state`, `/reset`), not MCP — the
 router is protocol-agnostic and forwards any path to the workload port, so RL needs
@@ -259,7 +259,7 @@ kubectl delete session rl-golden -n default
 ## Findings — control-plane issues surfaced by this example
 
 Running this example live surfaced two control-plane gaps (being fixed; tracked in
-[docs/PRD-snapshot-fork.md](../../docs/PRD-snapshot-fork.md)):
+[docs/sandboxd/PRD/PRD-snapshot-fork.md](../../docs/sandboxd/PRD/PRD-snapshot-fork.md)):
 
 1. **CR deletion doesn't release the KV worker binding.** Deleting a `ForkSet` (or a
    child `Session` CR) removes the CRs but leaves the authoritative Valkey

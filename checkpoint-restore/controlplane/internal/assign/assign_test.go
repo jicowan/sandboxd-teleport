@@ -229,7 +229,7 @@ func sids(es []*resumeapi.SessionEntry) []string {
 }
 
 // TestDiscoveryUpsertCannotResurrectBusyWorker reproduces the fork-fan-out
-// double-booking race (docs/PRD-snapshot-fork.md): worker-discovery re-registers a
+// double-booking race (docs/sandboxd/PRD/PRD-snapshot-fork.md): worker-discovery re-registers a
 // pod as idle (a pod event firing in the window after a claim) MUST NOT overwrite a
 // busy binding or re-add the pod to the idle set — else a second claim SPOPs the same
 // worker and two sessions land on it.

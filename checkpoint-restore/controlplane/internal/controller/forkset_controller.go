@@ -44,7 +44,7 @@ import (
 type Materializer func(ctx context.Context, sid, subject, pool string) error
 
 // ForkSetReconciler fans a ForkSet out into N child Session CRs and rolls their
-// readiness up into status (docs/PRD-snapshot-fork.md §5.2). This increment
+// readiness up into status (docs/sandboxd/PRD/PRD-snapshot-fork.md §5.2). This increment
 // implements the IMAGE source (baseRef unset): children are plain pool-backed
 // Sessions that cold-start (/run) via the normal resume path. The snapshot source
 // (baseRef set) is surfaced as a not-yet-implemented condition.

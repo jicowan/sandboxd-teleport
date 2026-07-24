@@ -3,10 +3,10 @@
 Status: **Implemented + verified live** (2026‑07‑19, operator `v28` + worker
 `sandboxd:v52`). Both sources shipped: image (cold‑start fan‑out) and snapshot
 (copy‑on‑promote → restore‑from‑base). Related:
-[architecture-sandboxd.md](sandboxd/architecture-sandboxd.md),
+[architecture-sandboxd.md](../architecture-sandboxd.md),
 [PRD-session-garbage-collection.md](PRD-session-garbage-collection.md),
 [PRD-durable-assignment-state.md](PRD-durable-assignment-state.md),
-[admin-guide-crds.md](sandboxd/admin-guide-crds.md).
+[admin-guide-crds.md](../admin-guide-crds.md).
 
 > **As built (2026‑07‑19).** Two CRDs — `ForkSet` (the one→N fan‑out parent, owns
 > N child `Session`s; `baseRef` optional selects snapshot vs image) and

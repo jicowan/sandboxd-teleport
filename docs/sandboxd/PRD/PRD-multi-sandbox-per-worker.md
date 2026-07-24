@@ -6,7 +6,7 @@ the operator assignment code — the feasibility analysis below cites what actua
 exists today, not guesses.
 
 Related: [[sandboxd-generic-pools]], [PRD-arbitrary-image-sessions.md §13](./PRD-arbitrary-image-sessions.md),
-[architecture-sandboxd.md](./sandboxd/architecture-sandboxd.md) (worker-vs-sandbox model).
+[architecture-sandboxd.md](../architecture-sandboxd.md) (worker-vs-sandbox model).
 
 ## 1. The idea & why it's compelling
 

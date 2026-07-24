@@ -22,7 +22,7 @@ import (
 )
 
 // BaseSnapshotSpec declares a forkable "golden" checkpoint, decoupled from any one
-// session's mutable snapshotURI lineage (docs/PRD-snapshot-fork.md §5.1). The
+// session's mutable snapshotURI lineage (docs/sandboxd/PRD/PRD-snapshot-fork.md §5.1). The
 // controller resolves the source snapshot, S3 server-side-copies it to a fork-stable
 // bases/<name>/ prefix (copy-on-promote), and records the restore identity in status.
 type BaseSnapshotSpec struct {
@@ -70,7 +70,7 @@ type BaseSnapshotStatus struct {
 	// refCount is the number of holds keeping the base alive: forks that have not yet
 	// completed their first restore, plus explicit pins. A fork needs the base only
 	// for its first restore, so this drops as forks materialize. Reclaim is eligible
-	// only when pinned==false AND refCount==0 (docs/PRD-snapshot-fork.md §5.4).
+	// only when pinned==false AND refCount==0 (docs/sandboxd/PRD/PRD-snapshot-fork.md §5.4).
 	// +optional
 	RefCount int32 `json:"refCount"`
 
