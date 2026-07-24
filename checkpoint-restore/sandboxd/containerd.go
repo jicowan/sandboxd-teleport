@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"syscall"
 
 	containerd "github.com/containerd/containerd/v2/client"
@@ -32,13 +33,37 @@ const (
 	snapshotter    = "overlayfs"
 )
 
+// A single long-lived containerd client is reused across all /run + teardown ops.
+// containerd.Client is goroutine-safe and intended to be held for the process
+// lifetime; dialing a fresh gRPC connection per operation (as before) added a
+// connect + handshake to every sandbox lifecycle. Lazily created under cdMu, and
+// re-dialed if a prior handle went bad (its connection is checked with IsServing).
+var (
+	cdMu   sync.Mutex
+	cdConn *containerd.Client
+)
+
+// cdClient returns the shared containerd client (dialing once, lazily) and a
+// namespaced context. Callers MUST NOT Close the returned client — it is shared and
+// lives for the process lifetime.
 func cdClient() (*containerd.Client, context.Context, error) {
+	ctx := namespaces.WithNamespace(context.Background(), containerdNS)
+	cdMu.Lock()
+	defer cdMu.Unlock()
+	if cdConn != nil {
+		// Reuse only if the connection is still healthy; otherwise drop + re-dial.
+		if ok, err := cdConn.IsServing(ctx); err == nil && ok {
+			return cdConn, ctx, nil
+		}
+		_ = cdConn.Close()
+		cdConn = nil
+	}
 	cl, err := containerd.New(containerdSock)
 	if err != nil {
 		return nil, nil, fmt.Errorf("containerd dial: %w", err)
 	}
-	ctx := namespaces.WithNamespace(context.Background(), containerdNS)
-	return cl, ctx, nil
+	cdConn = cl
+	return cdConn, ctx, nil
 }
 
 // prepareRootfsContainerd pulls (if needed) + unpacks ref via the node
@@ -49,7 +74,7 @@ func prepareRootfsContainerd(ref, destRootfs, snapKey string) (*imageConfig, err
 	if err != nil {
 		return nil, err
 	}
-	defer cl.Close()
+	// NOTE: cl is the shared long-lived client — do NOT Close it.
 
 	// Authenticate the pull for private registries. containerd's default resolver
 	// is anonymous (fine for public ghcr/docker-hub images, and for cache hits on
@@ -173,6 +198,6 @@ func teardownRootfsContainerd(destRootfs, snapKey string) {
 	if err != nil {
 		return
 	}
-	defer cl.Close()
+	// NOTE: cl is the shared long-lived client — do NOT Close it.
 	cl.SnapshotService(snapshotter).Remove(ctx, snapKey)
 }

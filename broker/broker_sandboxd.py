@@ -143,12 +143,27 @@ _jwks_client = PyJWKClient(
 )
 
 
+# One shared httpx client for ALL proxying to the router, reused across requests so
+# keep-alive connections are pooled (the router is a single stable Service URL) —
+# instead of a fresh client + TCP handshake per MCP call. Created on startup, closed
+# on shutdown. MUST NOT be closed per-request in _forward.
+_router_client: Optional[httpx.AsyncClient] = None
+
+
 @app.on_event("startup")
-def _warm_jwks():
+async def _startup():
+    global _router_client
+    _router_client = httpx.AsyncClient(timeout=httpx.Timeout(300.0))
     try:
         _jwks_client.get_signing_keys()
     except Exception:
         pass
+
+
+@app.on_event("shutdown")
+async def _shutdown():
+    if _router_client is not None:
+        await _router_client.aclose()
 
 
 def _signing_key(token: str):
@@ -292,7 +307,7 @@ async def _forward(method: str, body: bytes, sid: str, pool: str, app_template: 
     if client_mcp_session:
         headers["Mcp-Session-Id"] = client_mcp_session
     rewrite = method == "POST" and _is_initialize(body)
-    client = httpx.AsyncClient(timeout=httpx.Timeout(300.0))
+    client = _router_client  # shared, pooled; never closed per-request
     req = client.build_request(method, f"{ROUTER_URL}/mcp",
                                content=body if method == "POST" else None, headers=headers)
     resp = await client.send(req, stream=True)
@@ -307,7 +322,6 @@ async def _forward(method: str, body: bytes, sid: str, pool: str, app_template: 
     if rewrite:
         raw = await resp.aread()
         await resp.aclose()
-        await client.aclose()
         return Response(content=_rewrite_init_version(raw), status_code=resp.status_code,
                         headers=relay_headers, media_type=resp.headers.get("content-type"))
 
@@ -316,8 +330,7 @@ async def _forward(method: str, body: bytes, sid: str, pool: str, app_template: 
             async for chunk in resp.aiter_raw():
                 yield chunk
         finally:
-            await resp.aclose()
-            await client.aclose()
+            await resp.aclose()  # close the response, NOT the shared client
 
     return StreamingResponse(_gen(), status_code=resp.status_code,
                              headers=relay_headers, media_type=resp.headers.get("content-type"))
