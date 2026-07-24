@@ -182,8 +182,8 @@ func (v *credVendor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // awsEnvForSession returns the env vars to inject into the sandbox so its AWS SDK
 // fetches from the vendor. host is the vendor address the sandbox routes to
-// (credVendorIP = 169.254.170.23, an AWS-allow-listed container-creds host);
-// port is where the vendor listens.
+// (credVendorIP = 169.254.170.2, an AWS-allow-listed container-creds host — see
+// the credVendorIP const for why .2 and not .23); port is where the vendor listens.
 func (v *credVendor) awsEnvForSession(sid, host string, port int, region string) []string {
 	env := []string{
 		fmt.Sprintf("AWS_CONTAINER_CREDENTIALS_FULL_URI=http://%s:%d/creds/%s", host, port, sid),

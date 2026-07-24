@@ -277,7 +277,7 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 502, "pull: "+err.Error())
 		return
 	}
-	lg("pulled+flattened in %s (digest=%s)", time.Since(t0), ic.Digest)
+	lg("pulled+snapshot prepared in %s (digest=%s)", time.Since(t0), ic.Digest)
 	// Networking: if ports requested + sandbox netstack path available, build the
 	// veth/interior-netns and point the spec at it. Default host-port = container-port.
 	netnsPath := ""

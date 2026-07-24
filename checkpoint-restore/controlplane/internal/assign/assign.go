@@ -231,8 +231,8 @@ func (c *Client) CheckpointDue(ctx context.Context, nowMillis int64) ([]*resumea
 // dueEntries reads sids scored <= nowMillis from a due-index ZSET and loads their
 // entries. Stale index members (entry gone) are pruned opportunistically.
 func (c *Client) dueEntries(ctx context.Context, zkey string, nowMillis int64) ([]*resumeapi.SessionEntry, error) {
-	sids, err := c.rdb.ZRangeByScore(ctx, zkey, &redis.ZRangeBy{
-		Min: "-inf", Max: strconv.FormatInt(nowMillis, 10),
+	sids, err := c.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
+		Key: zkey, Start: "-inf", Stop: strconv.FormatInt(nowMillis, 10), ByScore: true,
 	}).Result()
 	if err != nil {
 		return nil, err
