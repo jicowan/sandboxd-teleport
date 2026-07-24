@@ -1,0 +1,35 @@
+# APP FORK — fan out N INDEPENDENTLY-initialized RL environments (no golden state).
+#
+# Each fork cold-starts the rl-env AppTemplate fresh on the rl-pool: N parallel
+# environments that DON'T share a frozen moment — each has its own boot id, its own
+# step=0 start. This is the "ephemeral environment, created fresh per rollout and
+# discarded after the episode" pattern
+# (https://northflank.com/blog/reinforcement-learning-agents-in-secure-sandboxes):
+# use it when the common start is just "freshly booted", or when you WANT independent
+# initialization across trials. No BaseSnapshot, no pinning, no ref-count — the cheap
+# path.
+#
+# The trainer holds the N session ids from status.forks and drives each by
+# X-Session-ID straight to the router (no broker — the broker's one-session-per-user
+# model is for interactive callers, not fan-out; see docs/PRD-snapshot-fork.md §5.7).
+apiVersion: core.sandboxd.io/v1alpha1
+kind: ForkSet
+metadata: { name: rl-trials, namespace: default }
+spec:
+  appRef: { name: rl-env }      # image source on a GENERIC pool: cold-start this app.
+                                # (baseRef omitted => not a snapshot fork.)
+  pool: rl-pool                 # placement + capacity
+  count: 8                      # N independent environments (hard cap 256 per ForkSet)
+  namePrefix: rl-trials         # deterministic child ids: sess-fork-rl-trials-{0..7}
+  activation: Lazy              # born Absent; each cold-starts on first contact. This
+                                # drives TEMPORAL OVERSUBSCRIPTION — N forks don't all pin a
+                                # worker at once, so a small pool cycles through many trials
+                                # (with idleAction below freeing workers between episodes).
+                                # Use Eager to pre-warm all N up front (needs ~N workers).
+  subject: trainer-a            # owner (attribution + future per-subject fan-out quota)
+  lifecycle:
+    idleAction: reset           # ephemeral: a finished/idle rollout is torn down leaving
+                                # NO snapshot (throwaway trial) and its worker freed for the
+                                # next fork — K rollouts leave no S3 litter.
+    idleTimeoutSeconds: 60      # short so the demo frees workers promptly; raise for
+                                # long-horizon episodes.

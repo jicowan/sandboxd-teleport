@@ -1,0 +1,47 @@
+# SNAPSHOT FORK, step 3 of 3 — fan out N forks from the golden BaseSnapshot.
+#
+# Each fork /restores the IDENTICAL golden RAM+FS state (same `sum`, same `boot` id as
+# the base) onto its own worker, then diverges independently — "fork from a known
+# point rather than rebuilding from scratch". This is the canonical RL parallel-rollout:
+# reach a common state once, branch K ways to explore K different action sequences,
+# compare outcomes.
+#
+# Isolation is automatic: each fork has a distinct session id -> distinct worker ->
+# distinct interior netns/IP -> distinct sandboxes/<forkId>/ checkpoint lineage, so
+# "a single failed rollout" can't corrupt a sibling. A fork touches the base ONLY for
+# its first restore (thereafter its own lineage), so the base's refCount drops as forks
+# materialize; the base is retained while pinned or still referenced.
+#
+# TEMPORAL OVERSUBSCRIPTION (the RL scaling model). activation: Lazy means forks are
+# born Suspended and materialize (restore) only when the trainer first drives them —
+# so N forks do NOT all pin a worker at once. Combined with checkpoint-when-done
+# (idleAction: suspend, or an explicit suspendRequest per fork — see the README), a
+# SMALL pool cycles through MANY rollouts: run an episode, checkpoint it (freeing the
+# worker), the next fork materializes on the freed worker. This is how RL fleets run
+# far more environments than they have workers, and it avoids a big simultaneous
+# restore burst.
+#
+# Requires rl-golden-v1 to be Ready (status.ready: true). The trainer reads
+# status.forks and drives each fork by X-Session-ID directly to the router.
+apiVersion: core.sandboxd.io/v1alpha1
+kind: ForkSet
+metadata: { name: rl-rollouts, namespace: default }
+spec:
+  baseRef: { name: rl-golden-v1 }   # snapshot source: restore from this base.
+                                     # (baseRef carries its own image — works on any pool.)
+  pool: rl-pool                      # placement (must be runsc-compatible with the base)
+  count: 8                           # N forks of the identical golden state
+  namePrefix: rl-rollouts            # child ids: sess-fork-rl-rollouts-{0..7}
+  activation: Lazy                   # born Suspended; each restores on first contact
+                                     # (drives temporal oversubscription — see header).
+  subject: trainer-a
+  lifecycle:
+    idleAction: suspend              # checkpoint-when-done: an idle rollout is checkpointed
+                                     # to its OWN sandboxes/<forkId>/ lineage and its worker
+                                     # freed for the next fork; it teleport-resumes on the
+                                     # next request. (Use `reset` for throwaway rollouts that
+                                     # need no saved state — frees the worker without a
+                                     # snapshot.) A suspended fork's snapshot can itself be
+                                     # promoted to a new BaseSnapshot (nested fork trees).
+    idleTimeoutSeconds: 60           # short so the demo frees workers promptly; raise for
+                                     # long-horizon episodes.

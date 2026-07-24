@@ -1,0 +1,23 @@
+# SNAPSHOT FORK, step 1 of 3 — the GOLDEN source session.
+#
+# Fork-from-snapshot amortizes an EXPENSIVE-to-reach common state: drive one
+# environment to a known point ONCE, then fan out N copies that all start from that
+# identical RAM+FS state and diverge — "snapshot that state at checkpoints, allowing
+# the environment to fork from a known point rather than rebuilding from scratch"
+# (the RL rollout pattern). Here the "expensive state" is simply some accumulated
+# `sum`; in a real env it's a loaded model, a primed cache, a repo cloned + deps
+# installed, or an agent 20 steps into a task.
+#
+# This manifest just DECLARES the source session (appRef rl-env on rl-pool). A
+# declaratively-created Session does NOT auto-start — it materializes on first router
+# contact. The README walks: apply -> /_warm -> drive to a golden `sum` -> suspend.
+apiVersion: core.sandboxd.io/v1alpha1
+kind: Session
+metadata: { name: rl-golden, namespace: default }
+spec:
+  poolRef: { name: rl-pool }    # capacity + placement (generic pool)
+  appRef:  { name: rl-env }     # workload to run on it
+  subject: trainer-a
+  # suspendRequest is set later (README step) to an opaque token to checkpoint+suspend
+  # this session on demand, producing the snapshot the BaseSnapshot promotes.
+  # suspendRequest: "golden-v1"

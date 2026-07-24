@@ -1,0 +1,30 @@
+# A GENERIC pool to place RL forks on — worker-shape only (no image), so it runs
+# whatever workload a session/fork brings via appRef (the rl-env AppTemplate) or a
+# BaseSnapshot's own image. This is the same generic-pool model the on-demand
+# multi-app example uses; capacity is decoupled from workload.
+#
+# Size `replicas` to your fan-out: a ForkSet of N eager forks needs ~N idle workers
+# at once (each fork = one worker), so replicas should cover your largest concurrent
+# batch (production RL runs hundreds–tens of thousands of parallel envs; this example
+# stays small). A fork that can't get an idle worker gets 503/Retry-After until one
+# frees — idle rollouts reset and free theirs (idleAction: reset).
+---
+apiVersion: core.sandboxd.io/v1alpha1
+kind: SandboxTemplate
+metadata: { name: rl-generic, namespace: default }
+spec:
+  # NO image => generic pool (worker-shape only). Only the WORKER image is set; the
+  # workload comes from the fork's appRef / base. Set workerImage to YOUR pushed
+  # sandboxd worker image (carries the pinned runsc); omit to use the operator's
+  # --worker-image default.
+  # workerImage: <your-registry>/sandboxd:<tag>
+  resources:
+    requests: { cpu: "250m", memory: "512Mi" }
+  scheduling:
+    nodeSelector: { sandbox: gvisor }
+    tolerations: [{ key: sandbox, operator: Equal, value: gvisor, effect: NoSchedule }]
+---
+apiVersion: core.sandboxd.io/v1alpha1
+kind: WarmPool
+metadata: { name: rl-pool, namespace: default }
+spec: { templateRef: { name: rl-generic }, replicas: 4, minIdle: 2 }

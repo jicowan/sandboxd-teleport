@@ -65,10 +65,10 @@ checkpoint-restore/         sandboxd itself
   controlplane/             operator + router (Go) + CRDs + deploy manifests
     deploy/                 control-plane, aio pool/app, SPIRE, smoke manifests
   sandboxd/                 the worker agent (Go) + runsc
-  docs/                     pre-build design notes (ARCHITECTURE, TDD, runbooks)
 broker/                     the reference front-door broker (broker_sandboxd.py)
 deploy/                     shared front-door infra: Keycloak realm, agentgateway
                             (+ its ingress)
+examples/                   worked examples: on-demand multi-app + forkset (RL fan-out)
 docs/sandboxd/              ← primary docs (product + front door)
 docs/                       PRDs + design notes
 ```

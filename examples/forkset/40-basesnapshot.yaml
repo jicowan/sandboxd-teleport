@@ -1,0 +1,23 @@
+# SNAPSHOT FORK, step 2 of 3 — promote the golden session to a BaseSnapshot.
+#
+# Once rl-golden is Suspended WITH a snapshot (README step 1), this promotes it into
+# a forkable "golden" artifact: the BaseSnapshotReconciler S3 server-side-COPIES the
+# source checkpoint from sandboxes/rl-golden/… to a fork-stable bases/rl-golden-v1/…
+# prefix (copy-on-promote). That decoupling is load-bearing:
+#   - the base survives even if the origin session re-checkpoints, resets, or is GC'd;
+#   - the orphan-S3 GC pass only sweeps sandboxes/, never bases/, so a base can't be
+#     reaped as an orphan (docs/PRD-snapshot-fork.md §5.1/§5.4).
+#
+# The source session MUST be Suspended-with-snapshot when this reconciles, or it goes
+# Failed with "source session not Suspended-with-snapshot" (retry after suspend).
+apiVersion: core.sandboxd.io/v1alpha1
+kind: BaseSnapshot
+metadata: { name: rl-golden-v1, namespace: default }
+spec:
+  sourceSessionRef: { name: rl-golden }   # the Suspended session to promote
+  pinned: true                            # keep it forkable indefinitely (never auto-
+                                          # reclaimed while true). Set false to let it be
+                                          # reclaimed once no fork still needs it
+                                          # (refCount 0 + past grace).
+# status (populated by the operator) will show:
+#   snapshotURI: bases/rl-golden-v1/snap-…   ready: true   refCount: <holds>

@@ -63,6 +63,15 @@ the reference for each layer. For *how it all fits*, read
 [architecture-sandboxd.md](architecture-sandboxd.md) and
 [architecture-broker.md](architecture-broker.md) first.
 
+## Worked examples
+
+- **On‑demand / multi‑app** (request→response): a generic pool running MCP apps behind
+  the reference front door — `checkpoint-restore/controlplane/deploy/aio/`.
+- **[ForkSet / RL fan‑out](../../examples/forkset/)** (parallel rollouts): fan out N
+  isolated environments from one source — cold‑start (independent trials) or a golden
+  snapshot (branch‑from‑a‑known‑state) — driven directly against the router. Shows the
+  `Lazy` + checkpoint‑when‑done (temporal oversubscription) pattern.
+
 ## Proposals (not yet scheduled)
 
 | Document | Status | What it covers |
@@ -75,7 +84,7 @@ the reference for each layer. For *how it all fits*, read
 | [PRD-durable-assignment-state.md](../PRD-durable-assignment-state.md) | **Implemented** | Make Kubernetes (`Session.status` in etcd) the durable source of truth and Valkey a rebuildable cache, so a Valkey restart doesn't orphan S3 checkpoints / lose the session index. |
 | [PRD-control-plane-scalability.md](../PRD-control-plane-scalability.md) | **Implemented** (hot paths) | Removed the control plane's O(N)-on-a-timer sweeper scans and bounded the etcd status-mirror write rate under session churn (indexed O(due) sweeps, mirror only durability-critical transitions, O(1) per-pool counts). Remaining follow-ups gated on real load. |
 | [PRD-session-garbage-collection.md](../PRD-session-garbage-collection.md) | **Implemented** | Reap a dead session's whole footprint (S3 snapshot + Valkey entry + `Session` CR) across all dead-session classes: TTL, abandoned (dead-worker zombie), orphan-S3, orphan-CR. Ownership-aware CR deletion; dry-run-first. |
-| [PRD-snapshot-fork.md](../PRD-snapshot-fork.md) | **Implemented** | **ForkSet:** fan out N independent sessions from one common source — a **snapshot** (`BaseSnapshot` copy-on-promote → restore, identical RAM+FS state) or an **image** (cold-start, independent per-boot init), via optional `baseRef`. RL parallel rollouts / branch-from-common-start. Live-verified (operator v28 / worker v52); finalizer-backed base reclaim + refCount; no router change. |
+| [PRD-snapshot-fork.md](../PRD-snapshot-fork.md) | **Implemented** | **ForkSet:** fan out N independent sessions from one common source — a **snapshot** (`BaseSnapshot` copy-on-promote → restore, identical RAM+FS state) or an **image** (cold-start, independent per-boot init), via optional `baseRef`. RL parallel rollouts / branch-from-common-start. Live-verified; finalizer-backed base reclaim + refCount; no router change. Fan-out hardening in operator **v42** (worker double-booking, CR-delete worker release, per-fork idle policy, pool-count fix — see the PRD's As-built update). Worked example: [`examples/forkset/`](../../examples/forkset/). |
 | [PRD-on-demand-suspend.md](../PRD-on-demand-suspend.md) | **Implemented** | Declarative, edge-triggered checkpoint+suspend on request via `Session.spec.suspendRequest` (opaque token) + `status.lastSuspendHandled` watermark. The "save my state now" primitive; a `SessionReconciler` performs one suspend per token, never fighting reactive resume. Live-verified (operator v29). |
 | [PRD-broker-fork-session.md](../PRD-broker-fork-session.md) | Proposed | The **example** broker's `fork_session` MCP tool composing the CRDs (suspendRequest → BaseSnapshot → ForkSet → return ids; increment 2 = per-call `target` routing to a fork by id). Reference/example scope — the product API is the CRDs. Depends on on-demand-suspend. |
 
