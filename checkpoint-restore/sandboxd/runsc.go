@@ -6,21 +6,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
 
 // runscDriver drives the pinned runsc binary against a per-sandboxd state root.
 // Flags encode everything the spikes proved necessary:
-//   --network=none, -overlay2=root:self (atomic mem+fs), no -direct on overlay.
+//
+//	--network=sandbox (checkpointable netstack), -overlay2=root:dir=<per-sandbox>
+//	(writable upper outside the rootfs; see base/overlayDir), --directfs=false.
 type runscDriver struct {
 	bin      string // path to the pinned runsc binary
 	root     string // runsc state -root (owned by this worker)
 	debugDir string // where sentry/gofer --debug-log files land
 	network  string // runsc --network mode: "host" | "sandbox" | "none"
+	ver      string // pinned runsc version, resolved ONCE at startup (immutable binary)
 	// streamConsole streams the nested workload's own stdout/stderr to sandboxd
 	// stdout (→ kubectl logs). OFF by default (SANDBOXD_STREAM_CONSOLE=1): the
 	// workload console is UNTRUSTED, attacker-controlled output — see
@@ -38,6 +43,16 @@ func newRunsc(bin, root string) *runscDriver {
 		streamConsole: os.Getenv("SANDBOXD_STREAM_CONSOLE") == "1",
 	}
 	os.MkdirAll(d.debugDir, 0o755)
+	// Resolve the pinned runsc version ONCE (the binary is immutable for the
+	// process lifetime). Doing it here — instead of forking `runsc --version` on
+	// every /run, /restore (3×), and /version request — both removes per-request
+	// process spawns and lets us surface a failure loudly: a silently-empty version
+	// would make the restore version-guard (main.go) treat a genuine runsc mismatch
+	// as "no version recorded" and restore anyway (a teleport-safety hole).
+	d.ver = d.resolveVersion()
+	if d.ver == "" {
+		log.Printf("WARN: `runsc --version` returned no version; checkpoint/restore version-guard is DISABLED (mismatched restores will not be refused). Check the pinned runsc binary at %s", bin)
+	}
 	return d
 }
 
@@ -58,16 +73,14 @@ func (r *runscDriver) base(id string) []string {
 	//   checkpoint/restore/state/delete for a given container.
 	// --network: sandbox netstack (checkpointable) via the veth/interior-netns.
 	// --directfs=false: directfs needs /proc/self/uid_map (absent nested).
-	overlay := "root:self"
-	if id != "" {
-		od := r.overlayDir(id)
-		os.MkdirAll(od, 0o755)
-		overlay = "root:dir=" + od
-	}
+	// Every per-container op passes a non-empty id, so the overlay upper is always
+	// a per-sandbox host dir (root:dir=); there is no root:self path.
+	od := r.overlayDir(id)
+	os.MkdirAll(od, 0o755)
 	flags := []string{
 		"-root", r.root,
 		"--network=" + r.network,
-		"-overlay2=" + overlay,
+		"-overlay2=root:dir=" + od,
 		"--directfs=false",
 		"--log", r.debugDir + "/runsc.log",
 	}
@@ -322,7 +335,6 @@ func (r *runscDriver) createStart(id, bundle string) error {
 	return r.runDetached(id, log, "run", "-bundle", bundle, "-pid-file", pid, "-detach", id)
 }
 
-
 // Checkpoint the sandbox to imageDir (single atomic mem+fs image via overlay).
 // When compress is true, the pages file is compressed (flate-best-speed): ~6.5x
 // smaller on disk/S3 at the cost of foreground (eager) page-load on restore
@@ -401,14 +413,20 @@ func (r *runscDriver) delete(id string) error {
 }
 
 // version returns the pinned runsc version string (recorded in snapshot manifests
-// so restores can refuse a version mismatch).
-func (r *runscDriver) version() string {
-	out, _, _ := func() (string, string, error) {
-		cmd := exec.Command(r.bin, "--version")
-		var o, e bytes.Buffer
-		cmd.Stdout, cmd.Stderr = &o, &e
-		err := cmd.Run()
-		return o.String(), e.String(), err
-	}()
-	return out
+// so restores can refuse a version mismatch). It is resolved once at startup and
+// cached (the binary is immutable for the process lifetime).
+func (r *runscDriver) version() string { return r.ver }
+
+// resolveVersion execs `runsc --version` once. On error it logs and returns "" —
+// the caller (newRunsc) warns that the version-guard is disabled rather than
+// silently persisting an empty version.
+func (r *runscDriver) resolveVersion() string {
+	cmd := exec.Command(r.bin, "--version")
+	var o, e bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &o, &e
+	if err := cmd.Run(); err != nil {
+		log.Printf("WARN: runsc --version failed: %v (stderr: %s)", err, strings.TrimSpace(e.String()))
+		return ""
+	}
+	return o.String()
 }
