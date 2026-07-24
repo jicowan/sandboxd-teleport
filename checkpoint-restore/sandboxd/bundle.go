@@ -3,8 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 // imageConfig is the subset of the OCI image config sandboxd needs to build a
@@ -51,13 +54,49 @@ func writeOCISpec(bundle string, ic *imageConfig, cmdOverride, envOverride []str
 		}
 	}
 
-	uid, gid := 0, 0
+	uid, gid := parseUser(ic.User)
 	spec := ociSpec(args, env, firstNonEmpty(ic.WorkingDir, "/"), uid, gid, netnsPath)
 	b, err := json.MarshalIndent(spec, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(bundle, "config.json"), b, 0o644)
+}
+
+// parseUser resolves an image's USER (imageConfig.User) into a numeric uid/gid for
+// the OCI spec's process.user. It honors the NUMERIC forms the OCI config commonly
+// carries — "" / "0" / "1000" / "1000:1000" / "1000:mygroup" (numeric uid, best-
+// effort numeric gid) — so an image that declares `USER 1000` no longer silently
+// runs as root inside the sandbox.
+//
+// It deliberately does NOT resolve a NAMED user/group (e.g. "nginx"): that needs an
+// /etc/passwd + /etc/group lookup in the image rootfs, with checkpoint/restore edge
+// cases, for a low‑severity item (the workload is already gVisor‑isolated — root in
+// the guest is not host root). A named/unparseable user falls back to root (0,0),
+// which is the prior behavior, and logs it once so the limitation is visible.
+// (docs: GitHub issue "imageConfig.User ignored".)
+func parseUser(user string) (uid, gid int) {
+	if user == "" {
+		return 0, 0 // no USER declared → root, as before
+	}
+	u, g, _ := strings.Cut(user, ":")
+	n, err := strconv.Atoi(u)
+	if err != nil {
+		// named user (e.g. "nginx") — resolving it needs /etc/passwd; fall back to root.
+		log.Printf("WARN: image USER %q is not numeric; running the sandbox as root (named-user resolution is not supported)", user)
+		return 0, 0
+	}
+	uid = n
+	if g != "" {
+		if gn, gerr := strconv.Atoi(g); gerr == nil {
+			gid = gn
+		} else {
+			gid = uid // named group → default gid to uid (best effort; no /etc/group lookup)
+		}
+	} else {
+		gid = uid // "uid" with no group → gid = uid (OCI/Docker default)
+	}
+	return uid, gid
 }
 
 // writeResolvIntoRootfs writes /etc/resolv.conf directly into the (writable

@@ -11,11 +11,16 @@ assume sandboxd is used with it.
 What's the SAME as broker_mcp.py (the front-door half — auth is identical):
   1. OAuth2 resource server: validate the passed-through user JWT against
      Keycloak's JWKS (iss, aud, exp, azp).
-  2. Identity + group-gate: read the principal + groups; require REQUIRED_GROUP.
-  3. Per-user quota: cap concurrent sessions per principal (broker is the only
-     place sessions originate, so the cap can't be bypassed).
-  4. TRANSPARENT MCP proxy: forward every method (incl. initialize) to the
+  2. Identity + group-gate: read the principal + groups; require REQUIRED_GROUP
+     (and, in multi-app mode, the selected app's own required group).
+  3. TRANSPARENT MCP proxy: forward every method (incl. initialize) to the
      sandbox's own MCP server, relaying its Mcp-Session-Id (supports stateful servers).
+
+There is no per-user session *count* quota: a session id is derived from the
+(user, app) pair, so a principal maps to exactly one durable session per app — the
+bound is structural (# apps entitled), not a counter. Real quota levers live
+elsewhere: per-app Keycloak group entitlement, WarmPool capacity, and the ForkSet
+count cap. (See docs/sandboxd/HOWTO-tool-access-and-quotas.md.)
 
 What's DIFFERENT (the backend half — no claim):
   - No SandboxClaim / no k8s client. sandboxd state is portable, so ANY worker in
@@ -125,12 +130,6 @@ EXPECTED_AUDIENCE = os.environ.get("AIO_EXPECTED_AUDIENCE", "sandbox-router")
 GATEWAY_AZP = os.environ.get("AIO_GATEWAY_AZP", "aio-sandbox-client")
 REQUIRED_GROUP = os.environ.get("AIO_REQUIRED_GROUP", "sandbox-users")
 
-# Per-user quota. With principal-derived session ids one user maps to one durable
-# session, so the "quota" here bounds distinct sessions we mint per principal.
-# 1 = one durable session per user (the substrate "one actor per user" model);
-# >1 allows a user to run multiple named sessions. 0 disables the cap.
-MAX_SESSIONS_PER_USER = int(os.environ.get("SANDBOXD_MAX_SESSIONS_PER_USER", "1"))
-
 JWKS_URL = f"{OIDC_ISSUER}/protocol/openid-connect/certs"
 ADVERTISED_PROTOCOL_VERSION = os.environ.get("AIO_MCP_PROTOCOL_VERSION", "2025-11-25")
 
@@ -203,17 +202,15 @@ def _authenticate(authorization: Optional[str]) -> AuthContext:
 
 # ---- session identity ----
 
-def _sid_for(principal: str, mcp_session_id: Optional[str], slot: int = 0, app_key: str = "") -> str:
-    """Derive a stable, DNS-safe session id from the principal (one durable
-    session per user; teleportable across MCP reconnects). With
-    MAX_SESSIONS_PER_USER>1, `slot` distinguishes a user's concurrent sessions
-    (keyed off the MCP session id). `app_key` (multi-app mode) folds the selected
-    app into BOTH the hash and the human-readable prefix so a user's different apps
-    get DISTINCT durable sessions (sess-<user>-<app>-<hash>) that never clobber each
-    other; empty app_key keeps the legacy principal-only id byte-for-byte. The
-    control plane treats this string as the opaque session id / sandbox id (must
-    match ^[a-z0-9][a-z0-9-]{0,62}$)."""
-    base = principal if slot == 0 else f"{principal}:{mcp_session_id or slot}"
+def _sid_for(principal: str, app_key: str = "") -> str:
+    """Derive a stable, DNS-safe session id from the principal: ONE durable session
+    per (user, app), teleportable across MCP reconnects. `app_key` (multi-app mode)
+    folds the selected app into BOTH the hash and the human-readable prefix so a
+    user's different apps get DISTINCT durable sessions (sess-<user>-<app>-<hash>)
+    that never clobber each other; empty app_key keeps the legacy principal-only id
+    byte-for-byte. The control plane treats this string as the opaque session id /
+    sandbox id (must match ^[a-z0-9][a-z0-9-]{0,62}$)."""
+    base = principal
     if app_key:
         base = f"{app_key}:{base}"
     h = hashlib.sha256(base.encode()).hexdigest()[:16]
@@ -355,7 +352,7 @@ async def mcp(
     # (slot 0 = one durable session per user+app, teleport-safe across reconnects).
     # It is INDEPENDENT of the MCP-protocol Mcp-Session-Id, which is owned by the
     # sandbox's own MCP server and passed through transparently by _forward.
-    sid = _sid_for(auth.principal, mcp_session_id, app_key=app_key)
+    sid = _sid_for(auth.principal, app_key=app_key)
 
     # TRANSPARENT PROXY: forward EVERY method (incl. initialize + notifications) to
     # the sandbox's MCP server, so stateful servers keep their protocol session and
@@ -381,7 +378,7 @@ async def mcp_get(
     auth = await run_in_threadpool(_authenticate, authorization)
     accept = request.headers.get("accept", "text/event-stream")
     app_key, pool, app_template = _resolve_app(sandbox_app, auth.groups)
-    sid = _sid_for(auth.principal, mcp_session_id, app_key=app_key)
+    sid = _sid_for(auth.principal, app_key=app_key)
     return await _forward("GET", b"", sid, pool, app_template, "", accept,
                           client_mcp_session=mcp_session_id)
 
