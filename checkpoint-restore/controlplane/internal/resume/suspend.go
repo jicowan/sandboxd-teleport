@@ -323,6 +323,9 @@ func (s *Suspender) ReleaseForDelete(ctx context.Context, sid string) error {
 }
 
 // casSession mirrors the resume workflow's CAS-with-retry.
+// TECH-DEBT (R5, issue #8): duplicated with Workflow.casSessionSeed (resume.go) and
+// checkpointOne (checkpoint.go); consolidation deferred — see the note on
+// casSessionSeed for why.
 func (s *Suspender) casSession(ctx context.Context, sid string, mutate func(*resumeapi.SessionEntry)) error {
 	const maxTries = 5
 	for i := 0; i < maxTries; i++ {

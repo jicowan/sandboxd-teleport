@@ -475,6 +475,13 @@ func (wf *Workflow) casSession(ctx context.Context, sid string, mutate func(*res
 // already-loaded entry (seed), skipping the initial GET. On a CAS version conflict
 // it discards the seed and re-GETs, so correctness is identical to casSession — the
 // seed only removes a redundant round-trip when the caller already holds the entry.
+//
+// TECH-DEBT (R5, issue #8): this GET->mutate->PutSessionCAS->retry-on-conflict loop
+// is duplicated in Suspender.casSession (suspend.go) and checkpointOne (checkpoint.go).
+// Consolidation was deliberately deferred: the three differ in not-found handling
+// (here: create fresh; suspend: error; checkpoint: re-check Running-on-same-worker),
+// and this is the single-writer CAS discipline the whole control plane depends on, so
+// a shared helper needs the full CAS-conflict test matrix before it's worth the risk.
 func (wf *Workflow) casSessionSeed(ctx context.Context, sid string, seed *resumeapi.SessionEntry, mutate func(*resumeapi.SessionEntry)) error {
 	const maxTries = 5
 	for i := 0; i < maxTries; i++ {

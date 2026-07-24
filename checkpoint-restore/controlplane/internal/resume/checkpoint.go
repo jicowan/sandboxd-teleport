@@ -119,6 +119,9 @@ func (c *Checkpointer) checkpointOne(ctx context.Context, e *resumeapi.SessionEn
 	// Seed the first CAS attempt from the entry the sweeper already loaded (e);
 	// only re-GET on an actual version conflict. Correctness is unchanged: the CAS
 	// version guard + the State/WorkerPod re-check below still gate every write.
+	// TECH-DEBT (R5, issue #8): this CAS-retry loop duplicates Workflow.casSessionSeed
+	// (resume.go) and Suspender.casSession (suspend.go); consolidation deferred — see
+	// the note on casSessionSeed.
 	const maxTries = 5
 	cur := e
 	for i := 0; i < maxTries; i++ {
