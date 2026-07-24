@@ -42,18 +42,11 @@ func writeOCISpec(bundle string, ic *imageConfig, cmdOverride, envOverride []str
 	}
 	env = append(env, envOverride...)
 
-	// DNS: when networked, write /etc/resolv.conf directly INTO the rootfs. We do
-	// NOT bind-mount it via the OCI spec: runsc requires a bind mount's TARGET file
-	// to pre-exist in the rootfs, and /etc/resolv.conf usually doesn't, so the bind
-	// fails ("open .../rootfs/etc/resolv.conf: no such file or directory"). The
-	// rootfs is the writable containerd overlay and /etc exists in real images, so
-	// a direct write is the robust path. bundle/rootfs is passed in as rootfsDir.
-	if netnsPath != "" {
-		if err := writeResolvIntoRootfs(filepath.Join(bundle, "rootfs")); err != nil {
-			return fmt.Errorf("resolv.conf: %w", err)
-		}
-	}
-
+	// DNS (/etc/resolv.conf) is written directly into the rootfs by the CALLER, not
+	// here: on /run by prepareRootfsContainerd (which must run on the same mount-ns
+	// OS thread that set the rootfs up), and on /restore by an explicit
+	// writeResolvIntoRootfs after the rootfs is rebuilt. Writing it here too was a
+	// redundant second write of the same file to the same path (bundle/rootfs).
 	uid, gid := parseUser(ic.User)
 	spec := ociSpec(args, env, firstNonEmpty(ic.WorkingDir, "/"), uid, gid, netnsPath)
 	b, err := json.MarshalIndent(spec, "", "  ")

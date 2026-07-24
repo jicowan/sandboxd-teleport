@@ -209,6 +209,12 @@ func (r *WorkerDiscoveryReconciler) PruneStaleWorkers(ctx context.Context) (int,
 	if err != nil {
 		return 0, err
 	}
+	return r.pruneStaleWorkers(ctx, pods), nil
+}
+
+// pruneStaleWorkers is PruneStaleWorkers over a pre-fetched pod list, so the
+// periodic loop can share one ListWorkerPods scan with ReclaimOrphanBindings.
+func (r *WorkerDiscoveryReconciler) pruneStaleWorkers(ctx context.Context, pods []string) int {
 	pruned := 0
 	for _, podName := range pods {
 		var pod corev1.Pod
@@ -219,7 +225,7 @@ func (r *WorkerDiscoveryReconciler) PruneStaleWorkers(ctx context.Context) (int,
 			pruned++
 		}
 	}
-	return pruned, nil
+	return pruned
 }
 
 // reclaimReason classifies why a busy binding is anomalous, or "" if it is healthy
@@ -259,13 +265,22 @@ func (r *WorkerDiscoveryReconciler) ReclaimOrphanBindings(ctx context.Context) (
 	if r.ReclaimGrace <= 0 {
 		return 0, nil
 	}
-	now := r.now()
-	log := logf.FromContext(ctx).WithName("worker-reclaim")
-
 	pods, err := r.KV.ListWorkerPods(ctx)
 	if err != nil {
 		return 0, err
 	}
+	return r.reclaimOrphanBindings(ctx, pods), nil
+}
+
+// reclaimOrphanBindings is ReclaimOrphanBindings over a pre-fetched pod list, so the
+// periodic loop can share one ListWorkerPods scan with PruneStaleWorkers.
+func (r *WorkerDiscoveryReconciler) reclaimOrphanBindings(ctx context.Context, pods []string) int {
+	if r.ReclaimGrace <= 0 {
+		return 0
+	}
+	now := r.now()
+	log := logf.FromContext(ctx).WithName("worker-reclaim")
+
 	seen := make(map[string]bool, len(pods))
 	reclaimed := 0
 	for _, pod := range pods {
@@ -311,7 +326,7 @@ func (r *WorkerDiscoveryReconciler) ReclaimOrphanBindings(ctx context.Context) (
 			delete(r.anomalous, pod)
 		}
 	}
-	return reclaimed, nil
+	return reclaimed
 }
 
 func (r *WorkerDiscoveryReconciler) now() time.Time {
@@ -339,15 +354,20 @@ func (r *WorkerDiscoveryReconciler) StartPruneLoop(ctx context.Context, interval
 		case <-ctx.Done():
 			return nil
 		case <-t.C:
-			if n, err := r.PruneStaleWorkers(ctx); err != nil {
-				log.Error(err, "prune stale workers")
-			} else if n > 0 {
+			// One ListWorkerPods scan per tick, shared by both sweeps (they iterate
+			// the same worker:* keyspace).
+			pods, err := r.KV.ListWorkerPods(ctx)
+			if err != nil {
+				log.Error(err, "list worker pods")
+				continue
+			}
+			if n := r.pruneStaleWorkers(ctx, pods); n > 0 {
 				log.Info("pruned stale worker entries", "count", n)
 			}
-			if n, err := r.ReclaimOrphanBindings(ctx); err != nil {
-				log.Error(err, "reclaim orphaned worker bindings")
-			} else if n > 0 {
-				log.Info("reclaimed orphaned worker bindings", "count", n)
+			if r.ReclaimGrace > 0 {
+				if n := r.reclaimOrphanBindings(ctx, pods); n > 0 {
+					log.Info("reclaimed orphaned worker bindings", "count", n)
+				}
 			}
 		}
 	}

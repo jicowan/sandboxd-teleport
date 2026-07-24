@@ -298,7 +298,8 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 500, "network: "+err.Error())
 			return
 		}
-		// DNS is injected as an OCI bind mount by writeOCISpec (netnsPath!="" ).
+		// DNS (/etc/resolv.conf) was already written into the rootfs by
+		// prepareRootfsContainerd on the correct mount-ns thread; nothing to do here.
 		netnsPath = interiorNetNSPath
 		lg("network up: %s:%v -> %s", s.podIP, req.Ports, interiorIP)
 	}
@@ -379,9 +380,12 @@ func (s *server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	prefix := fmt.Sprintf("sandboxes/%s/%s", req.SandboxID, snapID)
 	lg("uploading %d bytes -> s3://%s/%s", sz, s.bucket, prefix)
 	tu := time.Now()
-	if err := s.s3.uploadDir(opCtx(), imgDir, prefix); err != nil {
-		lg("S3 upload FAILED: %v", err)
-		writeErr(w, 502, "upload: "+err.Error())
+	upCtx, upCancel := opCtx()
+	upErr := s.s3.uploadDir(upCtx, imgDir, prefix)
+	upCancel()
+	if upErr != nil {
+		lg("S3 upload FAILED: %v", upErr)
+		writeErr(w, 502, "upload: "+upErr.Error())
 		return
 	}
 	sb.Snapshot = prefix
@@ -448,10 +452,13 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	lg("base rootfs from %s in %s", req.Image, time.Since(tp))
 	imgDir := filepath.Join(s.work, "img", id)
 	td := time.Now()
-	if err := s.s3.downloadPrefix(opCtx(), req.Snapshot, imgDir); err != nil {
-		lg("S3 download FAILED: %v", err)
+	dlCtx, dlCancel := opCtx()
+	dlErr := s.s3.downloadPrefix(dlCtx, req.Snapshot, imgDir)
+	dlCancel()
+	if dlErr != nil {
+		lg("S3 download FAILED: %v", dlErr)
 		s.cleanupArtifacts(id)
-		writeErr(w, 502, "download: "+err.Error())
+		writeErr(w, 502, "download: "+dlErr.Error())
 		return
 	}
 	lg("downloaded checkpoint (%d bytes) in %s", dirSize(imgDir), time.Since(td))
@@ -581,9 +588,12 @@ func (s *server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 	}
 	snapID := fmt.Sprintf("snap-%d", time.Now().UnixNano())
 	prefix := fmt.Sprintf("sandboxes/%s/%s", req.SandboxID, snapID)
-	if err := s.s3.uploadDir(opCtx(), imgDir, prefix); err != nil {
-		lg("upload FAILED: %v", err)
-		writeErr(w, 502, "upload: "+err.Error())
+	suCtx, suCancel := opCtx()
+	suErr := s.s3.uploadDir(suCtx, imgDir, prefix)
+	suCancel()
+	if suErr != nil {
+		lg("upload FAILED: %v", suErr)
+		writeErr(w, 502, "upload: "+suErr.Error())
 		return
 	}
 	// free the worker
