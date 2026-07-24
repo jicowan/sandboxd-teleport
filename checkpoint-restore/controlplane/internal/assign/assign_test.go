@@ -142,6 +142,39 @@ func TestSuspendDueIndex(t *testing.T) {
 	}
 }
 
+// TestSuspendDuePrunesStaleIndexMember guards the dueEntries MGET path: a due-index
+// member whose session:<sid> entry no longer exists (deleted out-of-band) must be
+// skipped AND pruned from the index, not returned.
+func TestSuspendDuePrunesStaleIndexMember(t *testing.T) {
+	ctx := context.Background()
+	c := newTestClient(t)
+	now := int64(1_000_000_000_000)
+
+	// One real due session + one whose entry we then delete, leaving a stale index ref.
+	must(t, c.PutSessionCAS(ctx, &resumeapi.SessionEntry{
+		SID: "real", State: resumeapi.StateRunning, LastActiveAt: now - 100_000, IdleTimeoutSeconds: 30,
+	}))
+	must(t, c.PutSessionCAS(ctx, &resumeapi.SessionEntry{
+		SID: "ghost", State: resumeapi.StateRunning, LastActiveAt: now - 100_000, IdleTimeoutSeconds: 30,
+	}))
+	// Delete the ghost's entry directly (bypassing DeleteSession) so its due-index
+	// member is left dangling — exactly the stale case dueEntries must tolerate.
+	must(t, c.rdb.Del(ctx, sessionKey("ghost")).Err())
+
+	due, err := c.SuspendDue(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 1 || due[0].SID != "real" {
+		t.Fatalf("want only [real] (ghost skipped), got %v", sids(due))
+	}
+	// The stale member must have been pruned from the index, so a second sweep is clean.
+	due2, _ := c.SuspendDue(ctx, now)
+	if len(due2) != 1 || due2[0].SID != "real" {
+		t.Fatalf("after prune want [real], got %v", sids(due2))
+	}
+}
+
 func TestStampActiveSlidesDeadline(t *testing.T) {
 	ctx := context.Background()
 	c := newTestClient(t)
