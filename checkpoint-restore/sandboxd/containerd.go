@@ -4,8 +4,9 @@ package main
 // ourselves. sandboxd connects to the node containerd over the mounted socket,
 // Pull+Unpack (once, node-level, shared across all worker pods, survives worker
 // restart), then Prepare a per-sandbox overlay snapshot and mount it as the
-// bundle rootfs. runsc -overlay2=root:self layers on top, so the workload's
-// writes go to runsc's own filestore and the shared snapshot lower stays clean.
+// bundle rootfs. runsc -overlay2=root:dir=<per-sandbox host dir> layers on top, so
+// the workload's writes go to runsc's own filestore (outside the rootfs — see
+// runsc.go base()/overlayDir) and the shared snapshot lower stays clean.
 //
 // Replaces the go-containerregistry pull + 8.9GB flatten + hostPath cache: no
 // parallel copy, no walk/hardlink; containerd already has the layers unpacked in

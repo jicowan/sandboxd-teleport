@@ -77,7 +77,7 @@ func ensureInteriorNetNS() error {
 }
 
 // ensureCredVendorAddr pins the credential-vendor IP (credVendorIP =
-// 169.254.170.23, the AWS-allow-listed container-creds address) as a /32 on `lo`
+// 169.254.170.2, the AWS-allow-listed container-creds address) as a /32 on `lo`
 // in the POD netns, so the vendor can bind it at worker boot — independent of the
 // per-session veth. The sandbox reaches it via its default route (-> host veth ->
 // forwarded to this local lo address; ip_forward is enabled). This /32 survives
