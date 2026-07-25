@@ -85,6 +85,78 @@ sandboxd router (control plane)  →  resume/route → sandbox (runs the app's M
 > keep agentgateway the single public entry point (a NetworkPolicy restricting the
 > broker Service to agentgateway is a reasonable hardening step).
 
+### Swim lane — agentgateway ↔ Keycloak ↔ broker
+
+The one-time OAuth discovery + login, then the per-request auth + proxy flow (the two
+JWKS fetches are cached, so steady state doesn't hit Keycloak per request; the double
+JWT verification at agentgateway *and* broker is intentional defense-in-depth). The
+router→sandbox resume/teleport is folded into the broker lane's right edge.
+
+```
+ MCP CLIENT            AGENTGATEWAY            KEYCLOAK              BROKER (+ router)
+ (Claude)              (:3000)                 (realm "sandbox")    (broker_sandboxd.py)
+    │                      │                       │                      │
+    │  PHASE 1 — OAuth discovery + login (once)    │                      │
+    │                      │                       │                      │
+    │ GET /.well-known/    │                       │                      │
+    │ oauth-protected-     │                       │                      │
+    │ resource/aio/mcp     │                       │                      │
+    │─────────────────────▶│                       │                      │
+    │  RFC 9728 metadata   │                       │                      │
+    │  (authz server =     │                       │                      │
+    │◀─────────────────────│  Keycloak)            │                      │
+    │                      │                       │                      │
+    │  auth-code + PKCE (browser login)            │                      │
+    │─────────────────────────────────────────────▶│                     │
+    │  access token (JWT: aud=sandbox-router,      │                      │
+    │  azp=aio-sandbox-client, groups[])           │                      │
+    │◀─────────────────────────────────────────────│                     │
+    │                      │                       │                      │
+    │══ PHASE 2 — per MCP request ══════════════════════════════════════ │
+    │                      │                       │                      │
+    │ POST /aio/mcp        │                       │                      │
+    │ Bearer <JWT>         │                       │                      │
+    │─────────────────────▶│                       │                      │
+    │                      │ fetch JWKS (cached)   │                      │
+    │                      │──────────────────────▶│                      │
+    │                      │◀──────────────────────│ signing keys         │
+    │                      │ [verify iss+aud+sig]  │                      │
+    │                      │ [tool allowlist;      │                      │
+    │                      │  hide unauth tools]   │                      │
+    │                      │                       │                      │
+    │        (if tool not permitted for groups)    │                      │
+    │◀─────────────────────│ filtered tools/list   │                      │
+    │                      │  or -32602 on call    │                      │
+    │                      │                       │                      │
+    │                      │ inject X-Sandbox-App: aio                     │
+    │                      │ forward SAME JWT (passthrough)                │
+    │                      │──────────────────────────────────────────────▶│
+    │                      │                       │ fetch JWKS (cached)  │
+    │                      │                       │◀─────────────────────│
+    │                      │                       │─────────────────────▶│ keys
+    │                      │                       │  [RE-verify iss,aud, │
+    │                      │                       │   azp, base group]   │
+    │                      │                       │  [resolve app →      │
+    │                      │                       │   pool+AppTemplate;  │
+    │                      │                       │   enforce app group] │
+    │                      │                       │                      │
+    │                      │   (if lacks app's required group)            │
+    │                      │◀─────────────────────────────────────────────│ 403
+    │◀─────────────────────│ 403                   │                      │
+    │                      │                       │                      │
+    │                      │                       │   sid = sess-<user>- │
+    │                      │                       │   <app>-<sha256[:16]>│
+    │                      │                       │   proxy → router     │
+    │                      │                       │   (X-Session-ID/     │
+    │                      │                       │    Pool/App) ──▶ [router→sandbox]
+    │                      │                       │   ◀── resp + Mcp-Session-Id
+    │◀─────────────────────│◀──────────────────────────────────────────────│ MCP response
+    │  MCP response        │  relayed unchanged    │  (Mcp-Session-Id      │
+    │  (+ Mcp-Session-Id)  │                       │   relayed verbatim)   │
+    │                      │                       │                      │
+    ▼                      ▼                       ▼                      ▼
+```
+
 ## Keycloak (identity)
 
 Defined by `deploy/00-keycloak-realm.yaml` (a `KeycloakRealmImport` CR in the
