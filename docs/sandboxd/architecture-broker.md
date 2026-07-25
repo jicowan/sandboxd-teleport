@@ -114,7 +114,7 @@ Deployment `agentgateway`, Service `agentgateway-svc`). A single HTTP listener o
 port `3000` with **one route per app** — a data route (`/aio/mcp`,
 `/everything/mcp`, …) and a matching OAuth discovery route
 (`/.well-known/oauth-protected-resource/<app>/mcp`) for each. There is **no
-catch‑all `/` route** anymore.
+catch‑all `/` route**.
 
 Each data route:
 
@@ -251,7 +251,7 @@ This is deliberate: it lets **stateful MCP servers** — ones that issue and the
 require their own `Mcp-Session-Id` — work through the front door, not just AIO.
 Forwarding `initialize` also **warms** the session (it triggers the resume /
 cold‑start on first contact), so there is no separate synthetic‑initialize or
-fire‑and‑forget `/_warm` path anymore.
+fire‑and‑forget `/_warm` path.
 
 > **Two orthogonal session ids.** `X-Session-ID` is the **control‑plane routing**
 > id the broker derives per (user, app); it never leaves the platform. `Mcp-Session-Id`
@@ -310,7 +310,7 @@ deliberately swappable.
   It does *not* re‑check the tool allowlist — that's agentgateway's job.
 - **Control plane:** today the router trusts the `X-Session-ID` header it receives.
   That's acceptable because only the broker can reach it in‑cluster; hardening this
-  seam with mTLS + NetworkPolicy is the planned P1.5 phase (see
+  seam with mTLS + NetworkPolicy is planned but not implemented (see
   [architecture-sandboxd.md](architecture-sandboxd.md)).
 
 See [admin-guide-broker.md](admin-guide-broker.md) for how to install and operate
