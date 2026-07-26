@@ -25,6 +25,13 @@ import (
 // SandboxTemplateSpec is an operator-authored blueprint for what to run as a
 // sandbox. Its image/cmd/env/ports/health map directly onto sandboxd's /run body
 // (see TDD §3.1); idle policy maps onto the worker supervisor + /suspend|/reset.
+//
+// Health CONSISTENCY guardrail (issue #2): a health probe is NOT required (portless
+// batch/exec/headless workloads are valid and become Ready when their process runs;
+// a generic pool has no workload at all). What IS refused is an INCONSISTENT probe:
+// a tcp/http probe with no port to probe would never succeed and wedge the session.
+// The rule only fires when a probe type is set; then a probe port is mandatory.
+// +kubebuilder:validation:XValidation:rule="!has(self.health) || !has(self.health.probe) || !(self.health.probe in ['tcp','http']) || (has(self.health.probePort) && self.health.probePort > 0)",message="a tcp/http health probe requires health.probePort > 0"
 type SandboxTemplateSpec struct {
 	// image is the OCI image run AS THE SANDBOX (nested gVisor workload), not the
 	// worker pod image.

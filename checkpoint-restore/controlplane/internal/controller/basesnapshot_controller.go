@@ -95,6 +95,11 @@ func (r *BaseSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			}
 			controllerutil.RemoveFinalizer(&base, baseSnapshotFinalizer)
 			if err := r.Update(ctx, &base); err != nil {
+				// Benign 409 (CR changed under us on delete) — requeue quietly, don't
+				// log an ERROR + stack trace (issue #4).
+				if apierrors.IsConflict(err) {
+					return ctrl.Result{Requeue: true}, nil
+				}
 				return ctrl.Result{}, err
 			}
 			log.Info("reclaimed base snapshot on delete", "base", base.Name)

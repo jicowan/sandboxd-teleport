@@ -150,6 +150,11 @@ spec:
             required:
             - image
             type: object
+            x-kubernetes-validations:
+            - message: a tcp/http health probe requires health.probePort > 0
+              rule: '!has(self.health) || !has(self.health.probe) || !(self.health.probe
+                in [''tcp'',''http'']) || (has(self.health.probePort) && self.health.probePort
+                > 0)'
           status:
             description: status defines the observed state of AppTemplate
             properties:

@@ -387,9 +387,30 @@ func (wf *Workflow) resumeFromSnapshot(ctx context.Context, cur *resumeapi.Sessi
 	if err != nil {
 		_ = wf.kv.ReleaseWorker(ctx, w.Pod, w.Pool)
 		wf.notify.PoolChanged(w.Pool)
+		// Roll the entry BACK to Suspended (issue #1a follow-up). startAndBind's first
+		// CAS already flipped it to Resuming; if we leave it there after a failed
+		// restore (e.g. a transient image-pull/S3 error), the entry is stuck Resuming
+		// with a snapshotURI — the NEXT resume skips the restore branch (which keys on
+		// State==Suspended) and falls through to the cold-start plan, which for a
+		// snapshot-fork on a generic pool errors "pool is generic, nothing to run".
+		// Restoring Suspended+snapshotURI lets the next request simply retry the restore.
+		wf.rollbackToSuspended(ctx, cur.SID)
 		return "", err
 	}
 	return ip, nil
+}
+
+// rollbackToSuspended CAS-reverts a session that startAndBind left in Resuming back to
+// Suspended (keeping its snapshotURI), but ONLY if it is still Resuming and still has a
+// snapshotURI — so a concurrent resume that already advanced it is never disturbed.
+// Best-effort: a failure here just leaves the healer (#1a) to reconcile it later.
+func (wf *Workflow) rollbackToSuspended(ctx context.Context, sid string) {
+	_ = wf.casSession(ctx, sid, func(e *resumeapi.SessionEntry) {
+		if e.State == resumeapi.StateResuming && e.SnapshotURI != "" {
+			e.State = resumeapi.StateSuspended
+			e.WorkerPod, e.WorkerPodIP = "", ""
+		}
+	})
 }
 
 // bindSpec is what to bind onto the claimed worker (grouped to keep startAndBind's

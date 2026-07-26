@@ -210,13 +210,15 @@ var _ = Describe("ForkSet Controller (image source)", func() {
 			Ready: true, Phase: corev1alpha1.BaseSnapshotReady,
 			SnapshotURI: "bases/base-ready/snap-100",
 			Image:       "ghcr.io/agent-infra/sandbox:latest",
+			Ports:       testPorts(),
+			Health:      testHealth(), // #2: a Ready base must carry health or forks wedge
 		}
 		Expect(k8sClient.Status().Update(ctx, base)).To(Succeed())
 
 		// Snapshot-source forks now require the target pool to resolve to a template.
 		Expect(k8sClient.Create(ctx, &corev1alpha1.SandboxTemplate{
 			ObjectMeta: metav1.ObjectMeta{Name: "aio-tmpl-e", Namespace: ns},
-			Spec:       corev1alpha1.SandboxTemplateSpec{Image: "ghcr.io/agent-infra/sandbox:latest"},
+			Spec:       corev1alpha1.SandboxTemplateSpec{Image: "ghcr.io/agent-infra/sandbox:latest", Ports: testPorts(), Health: testHealth()},
 		})).To(Succeed())
 		Expect(k8sClient.Create(ctx, &corev1alpha1.WarmPool{
 			ObjectMeta: metav1.ObjectMeta{Name: "aio-pool", Namespace: ns},
@@ -257,7 +259,7 @@ var _ = Describe("ForkSet Controller (image source)", func() {
 		ctx := context.Background()
 		Expect(k8sClient.Create(ctx, &corev1alpha1.AppTemplate{
 			ObjectMeta: metav1.ObjectMeta{Name: "fs-app", Namespace: ns},
-			Spec:       corev1alpha1.AppTemplateSpec{Image: "docker.io/library/redis:7-alpine"},
+			Spec:       corev1alpha1.AppTemplateSpec{Image: "docker.io/library/redis:7-alpine", Ports: testPorts(), Health: testHealth()},
 		})).To(Succeed())
 		fs := &corev1alpha1.ForkSet{
 			ObjectMeta: metav1.ObjectMeta{Name: "batch-app", Namespace: ns},

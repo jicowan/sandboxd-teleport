@@ -76,6 +76,22 @@ checkpoint, restore, suspend, and inspect nested gVisor sandboxes on a worker po
 }
 ```
 
+**Readiness modes.** A sandbox reports **ready** (`/status` `ready:true`, which the
+operator's resume waits on) in one of two ways:
+
+- **Probe mode** — a `tcp`/`http` `probe` **with** a `probePort`: ready when the probe
+  succeeds against the workload port. Use for network services (the AIO sandbox, MCP
+  servers, redis, …).
+- **Process‑readiness mode** — **no usable probe** (`probe` empty/`none`, or no ports):
+  ready as soon as the container is **running**. This is for **portless / batch / exec /
+  headless** workloads that expose nothing to probe (a one‑shot job, an
+  exec‑driven sandbox). Without this such a workload would never report ready and its
+  session would stall in `Resuming` — process‑readiness is the correct contract when
+  there is no service to probe.
+
+A probe is therefore **optional**. The only invalid combination is a `tcp`/`http` probe
+**without** a `probePort` (it could never succeed) — rejected at CRD admission.
+
 ---
 
 ## POST /run

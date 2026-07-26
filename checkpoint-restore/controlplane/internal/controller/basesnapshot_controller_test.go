@@ -37,6 +37,7 @@ import (
 	"github.com/jicowan/aio-sandbox/controlplane/internal/assign"
 	"github.com/jicowan/aio-sandbox/controlplane/internal/snapshot"
 	"github.com/jicowan/aio-sandbox/shared/resumeapi"
+	"github.com/jicowan/aio-sandbox/shared/sbxapi"
 )
 
 // fakeSnapS3 supports List/Copy/Delete over an in-memory keyspace for snapshot tests.
@@ -78,6 +79,7 @@ var _ = Describe("BaseSnapshot Controller (copy-on-promote)", func() {
 		Expect(kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{
 			SID: "sess-origin", State: resumeapi.StateSuspended, Pool: "aio-pool",
 			Image: "ghcr.io/agent-infra/sandbox:latest", SnapshotURI: "sandboxes/sess-origin/snap-100",
+			Ports: []sbxapi.PortMap{{Container: 8080, Host: 8080}}, Health: &sbxapi.Health{Probe: "http", ProbePort: 8080},
 		})).To(Succeed())
 
 		s3f := &fakeSnapS3{objects: map[string]bool{
@@ -151,6 +153,7 @@ var _ = Describe("BaseSnapshot Controller (copy-on-promote)", func() {
 		Expect(kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{
 			SID: "sess-fin", State: resumeapi.StateSuspended, Pool: "aio-pool",
 			Image: "img", SnapshotURI: "sandboxes/sess-fin/snap-9",
+			Ports: []sbxapi.PortMap{{Container: 8080, Host: 8080}}, Health: &sbxapi.Health{Probe: "http", ProbePort: 8080},
 		})).To(Succeed())
 
 		s3f := &fakeSnapS3{objects: map[string]bool{

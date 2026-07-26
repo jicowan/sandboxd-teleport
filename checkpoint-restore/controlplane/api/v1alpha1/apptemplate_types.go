@@ -34,6 +34,14 @@ import (
 // apps share one pool's capacity without a dedicated WarmPool per image. The fields
 // mirror the workload subset of SandboxTemplateSpec so the resolver treats them
 // identically.
+//
+// Health CONSISTENCY guardrail (issue #2): a health probe is NOT required — a
+// portless batch/exec/headless workload is legitimate and becomes Ready when its
+// process is running (see the worker's readiness handling). What IS refused is an
+// INCONSISTENT probe: a tcp/http probe with no port to probe against would never
+// succeed and wedge the session. So the rule only fires when a probe type is set:
+// then a probe port is mandatory. No probe (or probe: none) is allowed.
+// +kubebuilder:validation:XValidation:rule="!has(self.health) || !has(self.health.probe) || !(self.health.probe in ['tcp','http']) || (has(self.health.probePort) && self.health.probePort > 0)",message="a tcp/http health probe requires health.probePort > 0"
 type AppTemplateSpec struct {
 	// image is the OCI image run AS THE SANDBOX (nested gVisor workload).
 	// +kubebuilder:validation:Required

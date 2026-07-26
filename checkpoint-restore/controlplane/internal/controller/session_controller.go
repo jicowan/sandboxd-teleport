@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,6 +30,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/jicowan/aio-sandbox/controlplane/api/v1alpha1"
+	"github.com/jicowan/aio-sandbox/controlplane/internal/resume"
 )
 
 // sessionFinalizer guards KV cleanup on Session CR deletion: it holds the object in
@@ -94,6 +97,12 @@ func (r *SessionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			}
 			controllerutil.RemoveFinalizer(&s, sessionFinalizer)
 			if err := r.Update(ctx, &s); err != nil {
+				// A 409 here just means the CR changed under us (common on delete
+				// races) — requeue quietly and recompute; don't log it at ERROR with a
+				// stack trace (issue #4). NotFound = already gone = done.
+				if apierrors.IsConflict(err) {
+					return ctrl.Result{Requeue: true}, nil
+				}
 				return ctrl.Result{}, client.IgnoreNotFound(err)
 			}
 			log.Info("released session KV footprint on delete", "session", s.Name)
@@ -104,6 +113,11 @@ func (r *SessionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// --- Live path: ensure the finalizer is present so a future delete cleans up. ---
 	if controllerutil.AddFinalizer(&s, sessionFinalizer) {
 		if err := r.Update(ctx, &s); err != nil {
+			// Conflict = the CR changed under us; requeue quietly (issue #4) rather
+			// than surfacing a benign 409 as an ERROR + stack trace.
+			if apierrors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
 		// Re-fetch on the next reconcile with the finalizer persisted; continue this
@@ -122,6 +136,16 @@ func (r *SessionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// then gone again), it no-ops and returns nil, and we still advance the watermark
 	// so the one-shot request is considered satisfied at this token.
 	if err := r.Suspend.SuspendNow(ctx, s.Name); err != nil {
+		// Transitional state (Resuming/Suspending): nothing was checkpointed, so the
+		// request is NOT satisfied — do NOT advance the watermark (issue #1b: advancing
+		// here would falsely report "suspend completed" for a session wedged in
+		// Resuming whose sandbox never got checkpointed). Requeue and retry once the
+		// state settles; surface an in-progress condition, not a failure.
+		if errors.Is(err, resume.ErrSuspendTransient) {
+			r.setSuspendCond(ctx, &s, metav1.ConditionFalse, "SuspendPending",
+				"session is transitioning (Resuming/Suspending); will retry")
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
 		// Leave the watermark unchanged so the request is retried; surface a condition.
 		r.setSuspendCond(ctx, &s, metav1.ConditionFalse, "SuspendFailed", err.Error())
 		return ctrl.Result{}, err // requeue with backoff

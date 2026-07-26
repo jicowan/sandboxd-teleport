@@ -133,6 +133,52 @@ func TestResumeReleasesWorkerOnRunFailure(t *testing.T) {
 	}
 }
 
+// TestResumeRollsBackToSuspendedOnRestoreFailure: a Suspended session with a
+// snapshotURI whose /restore FAILS must be rolled BACK to Suspended (not left in
+// Resuming). Otherwise the next resume skips the restore branch (which keys on
+// State==Suspended) and falls through to the cold-start plan — which for a
+// snapshot-fork on a generic pool errors "pool is generic, nothing to run". This is
+// the root-cause fix for the snapshot-fork re-resume-after-failed-restore bug.
+func TestResumeRollsBackToSuspendedOnRestoreFailure(t *testing.T) {
+	ctx := context.Background()
+	kv := testKV(t)
+	kv.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w1", Pool: "p", PodIP: "10.0.0.1", State: resumeapi.WorkerIdle})
+	// A suspended snapshot-fork-style entry: has a snapshotURI, no appRef/image plan.
+	kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{
+		SID: "fork1", State: resumeapi.StateSuspended, Pool: "p",
+		Image: "img:1", SnapshotURI: "sandboxes/fork1/snap-1",
+	})
+	// Worker whose /restore fails (e.g. transient image pull / S3 error).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(502)
+		w.Write([]byte(`{"error":"pull failed"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	wf := New(kv, lookupImage("x"), clientForStub(srv), planTemplate("p", "tmpl"),
+		Options{ResumeDeadline: time.Second, PollInterval: 5 * time.Millisecond})
+	if _, err := wf.Resume(ctx, "fork1", "alice", "", ""); err == nil {
+		t.Fatal("expected restore failure")
+	}
+	// The entry must be back to Suspended with its snapshotURI, worker cleared — so the
+	// next request retries the restore instead of stalling in Resuming.
+	e, err := kv.GetSession(ctx, "fork1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.State != resumeapi.StateSuspended {
+		t.Fatalf("expected rollback to Suspended, got %q", e.State)
+	}
+	if e.SnapshotURI == "" || e.WorkerPodIP != "" {
+		t.Fatalf("rollback must keep snapshotURI + clear worker: %+v", e)
+	}
+	// worker released back to idle too
+	idle, _ := kv.IdleWorkers(ctx, "p")
+	if len(idle) != 1 || idle[0] != "w1" {
+		t.Fatalf("worker not released: %v", idle)
+	}
+}
+
 // stubWorkerRestore serves /restore + /status; records whether /restore (not
 // /run) was called.
 func stubWorkerRestore(t *testing.T, gotRestore *bool) *httptest.Server {

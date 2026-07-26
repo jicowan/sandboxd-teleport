@@ -53,7 +53,7 @@ var _ = Describe("WarmPool Controller", func() {
 
 		tmpl := &corev1alpha1.SandboxTemplate{
 			ObjectMeta: metav1.ObjectMeta{Name: "tmpl-a", Namespace: ns},
-			Spec:       corev1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+			Spec:       corev1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim", Ports: testPorts(), Health: testHealth()},
 		}
 		Expect(k8sClient.Create(ctx, tmpl)).To(Succeed())
 
@@ -120,7 +120,7 @@ var _ = Describe("WarmPool Controller", func() {
 
 		tmpl := &corev1alpha1.SandboxTemplate{
 			ObjectMeta: metav1.ObjectMeta{Name: "tmpl-mi", Namespace: ns},
-			Spec:       corev1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+			Spec:       corev1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim", Ports: testPorts(), Health: testHealth()},
 		}
 		Expect(k8sClient.Create(ctx, tmpl)).To(Succeed())
 		pool := &corev1alpha1.WarmPool{
@@ -158,7 +158,7 @@ var _ = Describe("WarmPool Controller", func() {
 
 		tmpl := &corev1alpha1.SandboxTemplate{
 			ObjectMeta: metav1.ObjectMeta{Name: "tmpl-dc", Namespace: ns},
-			Spec:       corev1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim"},
+			Spec:       corev1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim", Ports: testPorts(), Health: testHealth()},
 		}
 		Expect(k8sClient.Create(ctx, tmpl)).To(Succeed())
 		pool := &corev1alpha1.WarmPool{
