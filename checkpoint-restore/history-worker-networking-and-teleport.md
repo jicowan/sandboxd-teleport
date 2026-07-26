@@ -499,3 +499,113 @@ could resurrect a claimed/deleted worker into the idle set. #2 and #3 are missin
 delete-time and per-session-override plumbing that only a fan-out (many short-lived,
 declaratively-managed sessions) exercises hard. Fixed in operator **v42**; verified
 live end-to-end (app fork + snapshot fork, distinct workers, idle-free, clean delete).
+
+## Robustness issues surfaced during the memory-reserve battery (2026-07-26, operator v50→v53, worker v66)
+
+Running the full teleport/OOM/forkset battery for the worker-memory-reserve feature
+(agent OOM-protection) surfaced several control-plane robustness gaps. The ones fixed on
+the `feat/robustness-followups` branch are below; genuinely-out-of-scope items are logged
+as follow-ups at the end. NOTE: much of the *noise* during this battery was environmental
+— a transient **SPIRE-agent disruption** (~21:45) on one node crashed the v66 workers at
+startup (`mTLS init: X509Source ... context deadline exceeded`, exit 1), and a restarted
+worker loses its `/work` scratch + in-flight state, cascading into empty-S3 suspends,
+`checkpoint.img: no such file` restore failures, orphaned worker bindings, and intermittent
+Valkey/CoreDNS timeouts. Those were NOT code bugs; they made the real bugs harder to see.
+
+**#1 — Split-brain: KV wedged `Resuming` when a cold-start outran the resume deadline.**
+`startAndBind` (`resume.go`) sets the KV entry `Resuming`, calls the worker `/run` (or
+`/restore`), waits `WaitReady`, then sets `Running`. If the cold-start (image pull + boot;
+the AIO image is ~2m36s vs the 90s default `--resume-deadline-seconds`) outran the
+deadline, the operator's context expired and it returned 502 **without** writing
+`Running` — but the worker kept going and the sandbox actually came up. The KV entry then
+sat `Resuming` forever: every `/_warm` 502'd though the workload was up, and — worse — a
+subsequent on-demand suspend (`SuspendNow`) is idempotent-by-state and used to treat *any*
+non-`Running` state as "already satisfied", returning nil so `SessionReconciler` advanced
+`status.lastSuspendHandled` — **falsely reporting "suspend completed"** for a session that
+was never checkpointed. **Fixes:** (a) `SuspendNow` now returns `ErrSuspendTransient` for
+transitional states (`Resuming`/`Suspending`); the reconciler treats it as `SuspendPending`
+→ requeue **without** advancing the watermark, so it never lies (issue #1b). (b) A new
+`ResumingHealer` sweeper (`selfheal.go`, `ResumingHealSweeper` in `resume_glue.go`, wired
+in `cmd/main.go`, grace = 2×resume deadline) reconciles a stuck‑`Resuming` entry against
+the worker's real `/status`: adopt→`Running` if the sandbox is actually running, else (see
+#2) roll back. Regressions: `TestSuspendNowTransientOnResuming`, `...SatisfiedStates`,
+`TestHealerPromotesRunningSandbox`, `...IgnoresNonResuming`. *Live evidence:* forced a
+>90s AIO cold-start, watched the entry wedge `Resuming` while the sandbox ran, then the
+healer adopt it to `Running` and the withheld suspend complete honestly.
+
+**#2 — Failed restore left the entry stuck `Resuming` → snapshot-fork re-resume broke.**
+The nastier consequence of #1's state machine. When a *restore* (`resumeFromSnapshot`)
+failed (a transient docker.io image‑tag resolve / S3 download hiccup), the error path
+released the worker but **never rolled the entry back** — it stayed `Resuming` with its
+`snapshotURI` intact. The next resume checks `State==Suspended && SnapshotURI!=""` for the
+restore branch; seeing `Resuming` it **skipped restore and fell through to the cold-start
+plan**, which for a snapshot-fork child (poolRef=generic pool, `forkFrom` but no `appRef`)
+errored `pool "X" is generic ... needs an appRef; a poolRef-only session has nothing to
+run`. So a durable (`idleAction: suspend`) snapshot-fork couldn't teleport-resume after its
+first idle-suspend — but only when a restore had failed first. The error was a *symptom of
+the un-rolled-back Resuming state*, not the re-resume/plan logic. **Fix (two layers):**
+(a) inline — `resumeFromSnapshot` calls `rollbackToSuspended` (CAS `Resuming`+snapshotURI →
+`Suspended`, clear worker) on failure, so the next request retries the restore; (b)
+backstop — the `ResumingHealer` rolls a stuck‑`Resuming`‑**with‑snapshotURI** entry back to
+`Suspended` when the worker `/status` is 404/unreachable (previously it only "left for
+retry"). Regressions: `TestResumeRollsBackToSuspendedOnRestoreFailure`,
+`TestHealerRollsBackFailedRestore`, `TestHealerRollsBackNotRunningWithSnapshot`. *Live
+evidence:* healer logged `rolled back to Suspended for restore retry` on the worker 404,
+then the fork re-resumed and restored its **preserved diverged state** (sum=50, same boot).
+
+**#3 — A health-less workload wedged `Resuming` forever (readiness had no PROCESS mode).**
+The supervisor (`supervisor.go`) only set `hs.ready` when `Probe∈{tcp,http} && len(Ports)>0`;
+a workload with no probe/port never became ready, so `WaitReady`/resume timed out and the
+KV entry wedged `Resuming`. Initial instinct was an admission rule *requiring* a probe, but
+that wrongly outlaws legitimate **portless/batch/exec/headless** workloads (they have no
+service to probe). **Fix:** worker readiness now has two modes — PROBE (tcp/http + port) vs
+PROCESS ("running == ready" when there's no usable probe), via `usesProbe(health,nPorts)`.
+Portless workloads reach `Running` instead of wedging. A **consistency-only** CEL rule on
+AppTemplate + SandboxTemplate rejects only the genuinely-broken case (a tcp/http probe with
+**no** `probePort`), never the absence of a probe. Regressions: `TestUsesProbe` (worker),
+`health_cel_test.go` (envtest accept/reject), and the existing fixtures gained health where
+they model dedicated/service workloads. *Live evidence:* a portless busybox AppTemplate
+warmed to `Running` (previously 502/`Resuming`); CEL rejected a portless-but-http-probe
+template at admission.
+
+**#4 — Benign optimistic-concurrency 409s logged at ERROR with a stack trace.**
+`SessionReconciler` and `BaseSnapshotReconciler` returned the standard k8s 409 ("the object
+has been modified; please apply your changes to the latest version") from their
+finalizer/status `Update` calls as a plain error, so controller-runtime logged it at ERROR
+with a full stack trace on every CR-churn race — alarming noise that repeatedly looked like
+a real failure during testing. **Fix:** detect `apierrors.IsConflict` on those Update paths
+and requeue quietly (`ctrl.Result{Requeue:true}`) instead of returning the error. (Several
+status writes already did this; extended to the finalizer-Update + basesnapshot delete
+paths.) Not a correctness bug — a requeue always resolved it — purely log hygiene.
+
+**Not platform bugs (recorded for honesty):** direct `redis-cli DEL` of a `session:` key
+orphans the running sandbox (no legitimate actor does this — use CR delete); reusing
+session ids while duplicates ran; aggressive client timeouts interrupting cold-starts. All
+self-inflicted during exploratory testing.
+
+**Follow-ups (NOT fixed here — separate branches):**
+- **Image restore re-resolves the base image TAG against the registry every time.** A
+  restore must pull the base OCI image for the rootfs (the checkpoint holds only RAM +
+  overlay diff), and `prepareRootfsContainerd` calls containerd `Pull` with a **tag**, so
+  containerd does a registry manifest resolve **even when the layers are cached** — the
+  intermittent docker.io `failed to resolve reference ... i/o timeout` seen throughout.
+  Fix: pin base images by **digest** in the checkpoint/`BaseSnapshot` restore path (fully
+  cache-served, no registry round-trip); or a registry mirror; or an offline-first
+  skip-pull-when-unpacked check.
+- **Session finalizer `ReleaseForDelete` wedges when the bound worker is gone.** Deleting a
+  Session whose KV entry points at a now-absent worker retried `delete session ... context
+  deadline exceeded` forever (had to strip the finalizer manually). It should treat an
+  unreachable/absent worker as already-released and proceed with KV cleanup + finalizer
+  removal.
+- **Intermittent worker-pod DNS/egress + SPIRE-SVID acquisition reliability.** The SPIRE
+  agent restart that crashed the v66 workers, plus one-off CoreDNS UDP timeouts, point at
+  worker-node network/SPIRE robustness worth hardening (NodeLocal DNS cache? SVID fetch
+  retry/backoff before the worker exits 1?).
+
+**Verified live end-to-end after the fixes** (operator v53, worker v66, memory-limited
+pools): agent OOM-protection (bomb killed in its own cgroup, agent survives), teleport of
+the `everything` app and the **AIO** sandbox (in-`/home/gem` marker byte-identical across
+workers; the 159 MB AIO checkpoint restored on a different worker; per-sandbox mem limit
+`1879048192` intact through teleport), app-fork + snapshot-fork (identical golden state,
+independent divergence; suspended snapshot-fork re-resume preserved its diverged state),
+and the four robustness fixes above each verified on the cluster.

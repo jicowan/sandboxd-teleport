@@ -29,6 +29,19 @@ import (
 	"github.com/jicowan/aio-sandbox/shared/resumeapi"
 )
 
+// ErrSuspendTransient is returned by SuspendNow when the session is in a
+// TRANSITIONAL state (Resuming/Suspending) and therefore cannot be checkpointed
+// right now — as opposed to a genuinely-satisfied state (already Suspended/Absent,
+// or no live worker) where the request's intent already holds.
+//
+// The distinction matters for the on-demand-suspend watermark (issue #1b): the
+// SessionReconciler must NOT advance status.lastSuspendHandled on this error, or it
+// would report "suspend completed" for a session that was never checkpointed (e.g. a
+// session wedged in Resuming because its cold-start outran the resume deadline — the
+// sandbox is actually running on the worker but KV still says Resuming). Treat it as
+// a retryable no-progress result: requeue, leave the watermark unchanged.
+var ErrSuspendTransient = errors.New("session in a transitional state; suspend not yet possible")
+
 // IdlePolicy is the per-session idle behavior the suspender needs, resolved from
 // the SandboxTemplate/Session by the operator. TimeoutSeconds<=0 means never
 // auto-suspend.
@@ -143,21 +156,31 @@ func (s *Suspender) SweepOnce(ctx context.Context) (int, error) {
 // action=suspend). It is the exported, request-driven entry point the
 // SessionReconciler calls when it observes a new spec.suspendRequest.
 //
-// Idempotent by state: if the session is not currently Running (already Suspended/
-// Suspending/Absent, or no live worker), there is nothing to checkpoint and it
-// returns nil — the caller treats the request as already satisfied and advances the
-// watermark. Any real checkpoint error is returned so the caller can leave the
-// watermark unchanged and retry.
+// Idempotent by state, with a THREE-way outcome (issue #1b):
+//   - Running -> checkpoint+suspend; return nil on success (watermark advances).
+//   - Genuinely satisfied (Suspended, Absent, or not-found in KV) -> return nil; the
+//     request's intent already holds, so the caller advances the watermark.
+//   - TRANSITIONAL (Resuming/Suspending) -> return ErrSuspendTransient; nothing was
+//     checkpointed, so the caller must NOT advance the watermark (it would falsely
+//     report completion). The caller requeues and retries once the state settles.
+// Any real checkpoint error is returned too, so the caller leaves the watermark
+// unchanged and retries.
 func (s *Suspender) SuspendNow(ctx context.Context, sid string) error {
 	e, err := s.kv.GetSession(ctx, sid)
 	if err != nil {
 		if errors.Is(err, assign.ErrNotFound) {
-			return nil // no such session in KV -> nothing to suspend
+			return nil // no such session in KV -> nothing to suspend (satisfied)
 		}
 		return err
 	}
+	// Transitional states: the session is mid-flight (Resuming from a cold-start/
+	// restore, or already Suspending). Nothing to checkpoint yet, but the request is
+	// NOT satisfied — signal a retryable no-progress so the watermark stays put.
+	if e.State == resumeapi.StateResuming || e.State == resumeapi.StateSuspending {
+		return ErrSuspendTransient
+	}
 	if e.State != resumeapi.StateRunning || e.WorkerPodIP == "" {
-		return nil // not Running -> already at/below the requested state
+		return nil // Suspended/Absent (or no worker) -> already at/below the request
 	}
 	if err := s.suspendOne(ctx, e, "suspend"); err != nil {
 		metrics.SuspendsTotal.WithLabelValues("suspend", metrics.OutcomeError).Inc()

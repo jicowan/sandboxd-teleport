@@ -86,14 +86,28 @@ func (s *server) checkOne(sb *sandbox) {
 		s.putHealthState(sb.ID, hs)
 	}
 
-	// Readiness probe (needs the sandbox network path).
-	if sb.Health.Probe != "" && len(sb.Ports) > 0 {
+	// Readiness.
+	//
+	// Two modes (issue #2 fix — don't wedge portless workloads):
+	//   - PROBE mode: a tcp/http probe against a port → ready iff the probe passes.
+	//   - PROCESS mode: no usable probe (probe empty/"none", or no ports to probe) →
+	//     ready as soon as the container is RUNNING. A batch/exec/headless sandbox has
+	//     no service to probe; without this it would never report ready, so the
+	//     operator's WaitReady/resume would time out and the KV entry would wedge in
+	//     Resuming (the root cause behind #1/#2). "Running == ready" is the correct
+	//     readiness contract for a workload that exposes nothing to probe.
+	if usesProbe(sb.Health, len(sb.Ports)) {
 		ok := s.probe(sb)
 		hs.ready = ok
 		if ok {
 			hs.lastReadyAt = time.Now()
 			hs.idle = false
 		}
+	} else {
+		// PROCESS mode: st == "running" here (checked above), so it's ready.
+		hs.ready = true
+		hs.lastReadyAt = time.Now()
+		hs.idle = false
 	}
 	// Idle detection: ready earlier but nothing recent.
 	if sb.Health.IdleTimeoutSec > 0 && !hs.lastReadyAt.IsZero() {
@@ -102,6 +116,15 @@ func (s *server) checkOne(sb *sandbox) {
 		}
 	}
 	s.putHealthState(sb.ID, hs)
+}
+
+// usesProbe reports whether a sandbox should be gated on an active readiness PROBE
+// (tcp/http against a port) vs. PROCESS-readiness ("running == ready"). Only a real
+// probe type (tcp|http) WITH at least one port uses the probe; everything else
+// (probe empty/"none", or no ports — a batch/exec/headless workload) is ready as soon
+// as it runs. Extracted for unit-testing the #2 readiness-mode decision. See checkOne.
+func usesProbe(h health, numPorts int) bool {
+	return (h.Probe == "tcp" || h.Probe == "http") && numPorts > 0
 }
 
 // probe returns true if the workload answers on its probe port (interior IP).

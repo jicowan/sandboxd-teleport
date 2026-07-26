@@ -461,6 +461,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Stuck-Resuming self-heal (issue #1a): adopt sessions wedged in KV state
+	// `Resuming` whose sandbox is actually running on the worker (a cold-start that
+	// outran the resume deadline). Grace = 2x the resume deadline so a legitimately
+	// in-flight resume is never disturbed (well past when the operator would have
+	// given up). Only promotes when the worker's /status confirms the sandbox running.
+	resumingHealGrace := 2 * time.Duration(resumeDeadlineSec) * time.Second
+	healer := controller.BuildResumingHealer(mgr.GetClient(), kv, resumeNamespace, workerHTTPClient, resumingHealGrace).WithNotifier(poolNotifier)
+	if err := controller.AddResumingHealSweeper(mgr, healer, sweepInterval); err != nil {
+		setupLog.Error(err, "Failed to add resuming-heal sweeper")
+		os.Exit(1)
+	}
+
 	// Checkpoint GC (P4): reap TTL-expired + orphaned S3 checkpoints. Opt-in
 	// (deletes data) and needs the operator's scoped S3 role (list+delete on
 	// sandboxes/* only; worker keeps read/write, no delete).

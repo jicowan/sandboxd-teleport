@@ -243,3 +243,60 @@ func TestMirrorDeleteOnReset(t *testing.T) {
 		t.Fatalf("reset should Delete the durable record once; got %d", m.deletes)
 	}
 }
+
+// --- #1b: SuspendNow three-way outcome (transitional vs satisfied vs checkpoint) ---
+
+// TestSuspendNowTransientOnResuming: a session stuck Resuming must return
+// ErrSuspendTransient (NOT nil) so the reconciler does not advance the watermark and
+// falsely report "suspend completed" for a session that was never checkpointed.
+func TestSuspendNowTransientOnResuming(t *testing.T) {
+	ctx := context.Background()
+	kv := testKV(t)
+	kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{
+		SID: "sr", State: resumeapi.StateResuming, Pool: "p", WorkerPodIP: "10.0.0.9",
+	})
+	var gotSuspend bool
+	srv := stubSuspendWorker(t, "unused", &gotSuspend)
+	s := NewSuspender(kv, clientForStub(srv), nil, SuspendOptions{})
+
+	err := s.SuspendNow(ctx, "sr")
+	if err != ErrSuspendTransient {
+		t.Fatalf("expected ErrSuspendTransient for Resuming, got %v", err)
+	}
+	if gotSuspend {
+		t.Fatal("must NOT call worker /suspend for a Resuming session")
+	}
+	// Also Suspending is transitional.
+	kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{SID: "ss", State: resumeapi.StateSuspending, Pool: "p", WorkerPodIP: "10.0.0.9"})
+	if err := s.SuspendNow(ctx, "ss"); err != ErrSuspendTransient {
+		t.Fatalf("expected ErrSuspendTransient for Suspending, got %v", err)
+	}
+}
+
+// TestSuspendNowSatisfiedStates: genuinely-satisfied states return nil (the request's
+// intent already holds), so the reconciler advances the watermark.
+func TestSuspendNowSatisfiedStates(t *testing.T) {
+	ctx := context.Background()
+	kv := testKV(t)
+	var gotSuspend bool
+	srv := stubSuspendWorker(t, "unused", &gotSuspend)
+	s := NewSuspender(kv, clientForStub(srv), nil, SuspendOptions{})
+
+	// Already Suspended -> nil.
+	kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{SID: "sd", State: resumeapi.StateSuspended, Pool: "p", SnapshotURI: "sandboxes/sd/snap-1"})
+	if err := s.SuspendNow(ctx, "sd"); err != nil {
+		t.Fatalf("Suspended should be nil (satisfied), got %v", err)
+	}
+	// Absent -> nil.
+	kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{SID: "sa", State: resumeapi.StateAbsent, Pool: "p"})
+	if err := s.SuspendNow(ctx, "sa"); err != nil {
+		t.Fatalf("Absent should be nil, got %v", err)
+	}
+	// Not-found in KV -> nil.
+	if err := s.SuspendNow(ctx, "nope"); err != nil {
+		t.Fatalf("missing session should be nil, got %v", err)
+	}
+	if gotSuspend {
+		t.Fatal("no worker /suspend should fire for satisfied/absent states")
+	}
+}

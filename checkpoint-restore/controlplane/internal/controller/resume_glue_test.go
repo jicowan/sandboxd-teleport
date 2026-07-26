@@ -43,6 +43,8 @@ var _ = Describe("configPolicyForSession precedence", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: tmpl, Namespace: ns},
 			Spec: corev1alpha1.SandboxTemplateSpec{
 				Image:                     "ghcr.io/example/pool-img:1",
+				Ports:                     testPorts(),
+				Health:                    testHealth(),
 				Idle:                      corev1alpha1.IdlePolicy{TimeoutSeconds: idle, Action: "suspend"},
 				CheckpointIntervalSeconds: ckpt,
 			},
@@ -86,6 +88,8 @@ var _ = Describe("configPolicyForSession precedence", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: "cp-app-redis", Namespace: ns},
 			Spec: corev1alpha1.AppTemplateSpec{
 				Image:                     "docker.io/library/redis:7-alpine",
+				Ports:                     testPorts(),
+				Health:                    testHealth(),
 				Idle:                      corev1alpha1.IdlePolicy{TimeoutSeconds: 90, Action: "suspend"},
 				CheckpointIntervalSeconds: 30,
 			},
@@ -164,7 +168,7 @@ var _ = Describe("resolveWorkloadSource generic/dedicated admission", func() {
 	mkDedicated := func(ctx context.Context, pool, tmpl string) {
 		Expect(k8sClient.Create(ctx, &corev1alpha1.SandboxTemplate{
 			ObjectMeta: metav1.ObjectMeta{Name: tmpl, Namespace: ns},
-			Spec:       corev1alpha1.SandboxTemplateSpec{Image: "ghcr.io/example/dedicated:1"},
+			Spec:       corev1alpha1.SandboxTemplateSpec{Image: "ghcr.io/example/dedicated:1", Ports: testPorts(), Health: testHealth()},
 		})).To(Succeed())
 		Expect(k8sClient.Create(ctx, &corev1alpha1.WarmPool{
 			ObjectMeta: metav1.ObjectMeta{Name: pool, Namespace: ns},
@@ -214,7 +218,7 @@ var _ = Describe("resolveWorkloadSource generic/dedicated admission", func() {
 		mkGeneric(ctx, "adm-gen2", "adm-gen2-tmpl")
 		Expect(k8sClient.Create(ctx, &corev1alpha1.AppTemplate{
 			ObjectMeta: metav1.ObjectMeta{Name: "adm-app", Namespace: ns},
-			Spec:       corev1alpha1.AppTemplateSpec{Image: "docker.io/library/redis:7-alpine"},
+			Spec:       corev1alpha1.AppTemplateSpec{Image: "docker.io/library/redis:7-alpine", Ports: testPorts(), Health: testHealth()},
 		})).To(Succeed())
 		plan, err := resolve(ctx, corev1alpha1.SessionSpec{
 			PoolRef: &corev1alpha1.LocalRef{Name: "adm-gen2"},

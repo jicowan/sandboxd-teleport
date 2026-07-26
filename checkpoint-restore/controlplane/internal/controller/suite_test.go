@@ -121,3 +121,14 @@ func getFirstFoundEnvTestBinaryDir() string {
 	}
 	return ""
 }
+
+// testHealth returns a valid readiness Health block (http probe + port), the minimum
+// a dedicated SandboxTemplate / AppTemplate needs to pass the #2 health-guardrail CEL
+// rule. testPorts returns the matching port. Shared by fixtures that create
+// image-bearing (workload-supplying) templates.
+func testHealth() *corev1alpha1.Health {
+	return &corev1alpha1.Health{Probe: "http", ProbePort: 8080, ProbePath: "/healthz"}
+}
+func testPorts() []corev1alpha1.PortMap {
+	return []corev1alpha1.PortMap{{Container: 8080, Host: 8080}}
+}

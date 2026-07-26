@@ -207,6 +207,53 @@ func BuildCheckpointer(c client.Client, kv *assign.Client, namespace string, htt
 		WithMirror(NewSessionMirror(c, namespace))
 }
 
+// BuildResumingHealer wires resume.ResumingHealer to the cached client + KV. It heals
+// the split-brain where a KV entry is stuck `Resuming` but its sandbox is actually
+// running on the worker (issue #1a) — e.g. a cold-start that outran the resume
+// deadline. grace must EXCEED the resume deadline so a live resume isn't disturbed.
+func BuildResumingHealer(c client.Client, kv *assign.Client, namespace string, httpClient *http.Client, grace time.Duration) *resume.ResumingHealer {
+	clientFor := workerClientFactory(httpClient)
+	return resume.NewResumingHealer(kv, clientFor, grace, nil).
+		WithMirror(NewSessionMirror(c, namespace))
+}
+
+// ResumingHealSweeper is a manager Runnable that periodically heals stuck-Resuming
+// sessions (issue #1a).
+type ResumingHealSweeper struct {
+	Healer   *resume.ResumingHealer
+	Interval time.Duration
+}
+
+// Start runs the heal loop until the manager context is cancelled.
+func (s *ResumingHealSweeper) Start(ctx context.Context) error {
+	iv := s.Interval
+	if iv == 0 {
+		iv = 30 * time.Second
+	}
+	t := time.NewTicker(iv)
+	defer t.Stop()
+	log := logf.FromContext(ctx).WithName("resuming-heal-sweeper")
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
+			if n, err := s.Healer.SweepOnce(ctx); err != nil {
+				log.Error(err, "resuming-heal sweep failed")
+			} else if n > 0 {
+				log.Info("healed stuck-Resuming sessions", "count", n)
+			}
+		}
+	}
+}
+
+var _ manager.Runnable = &ResumingHealSweeper{}
+
+// AddResumingHealSweeper registers the stuck-Resuming self-heal sweeper.
+func AddResumingHealSweeper(mgr ctrl.Manager, h *resume.ResumingHealer, interval time.Duration) error {
+	return mgr.Add(&ResumingHealSweeper{Healer: h, Interval: interval})
+}
+
 // CheckpointSweeper is a manager Runnable that periodically checkpoints opted-in
 // long-lived Running sessions (P5).
 type CheckpointSweeper struct {
