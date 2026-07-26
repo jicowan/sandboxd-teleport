@@ -377,6 +377,10 @@ usually by the operator from the `SandboxTemplate`/global flags):
 | `SANDBOXD_DRAIN_DEADLINE` | `100s` | On SIGTERM, how long the worker keeps serving (drain‑waits) so the operator can checkpoint‑on‑terminate before exit. Keep it under the pod's `terminationGracePeriodSeconds` (120s). |
 | `SANDBOXD_CRED_TOKEN_KEY` | `""` | Fleet‑wide HMAC key for the per‑session AWS credential vendor. Set (non‑empty) enables the vendor; the sandbox's `AWS_CONTAINER_AUTHORIZATION_TOKEN` = `HMAC(this, sid)`. Injected by the operator from the `--cred-token-secret` Secret. Empty = vendor disabled. |
 | `SANDBOXD_CRED_PORT` | `8091` | Port the credential vendor listens on (bound to `169.254.170.2`, reachable only from the worker's sandbox netns). |
+| `SANDBOXD_POD_MEM_LIMIT` | `""` | Worker pod memory limit in bytes, injected by the operator via the downward API **only when the SandboxTemplate sets `resources.limits.memory`**. When set, the worker caps each sandbox at `this − reserve` so a runaway guest OOM‑kills in its own cgroup instead of the sandboxd agent (agent OOM‑protection). Unset ⇒ no cap (today's behavior). See admin‑guide‑crds "Agent OOM‑protection". |
+| `SANDBOXD_AGENT_MEMORY_RESERVE` | `268435456` (256Mi) | Reserve floor (bytes) held back from the sandbox for the agent+runsc. Reserve = `max(this, pct% × pod limit)`. |
+| `SANDBOXD_AGENT_MEMORY_RESERVE_PCT` | `12` | Reserve as a percent of the pod limit. Set this **and** the floor to `0` to disable agent OOM‑protection even when a pod limit is present. |
+| `SANDBOXD_PULL_FORCE_IPV4` | on | Force image‑pull dialing onto IPv4 (`tcp4`). Default on: the worker pulls from its IPv4‑only pod netns, and dual‑stack registries (docker.io/quay.io/registry.k8s.io) advertise AAAA records that fail "network unreachable" with no fallback. Set `=0` on a genuinely IPv6‑capable pod. |
 | `AWS_REGION` | (SDK default) | Region for S3 (via the AWS default credential/config chain → EKS Pod Identity). |
 
 S3 credentials come from the AWS default chain (EKS Pod Identity via the worker's

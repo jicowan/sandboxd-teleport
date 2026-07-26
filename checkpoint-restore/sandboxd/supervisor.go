@@ -15,6 +15,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"time"
@@ -34,6 +35,7 @@ type healthState struct {
 	restarts    int
 	lastReadyAt time.Time
 	idle        bool
+	oomReported bool // OOM already diagnosed for the current stop (avoid per-tick re-scan/log)
 }
 
 func (s *server) supervise(interval time.Duration) {
@@ -55,6 +57,20 @@ func (s *server) checkOne(sb *sandbox) {
 
 	// Liveness: container gone/stopped unexpectedly.
 	if err != nil || st == "stopped" {
+		// Diagnose an out-of-memory death: if the sandbox blew past its per-sandbox
+		// memory limit (agent OOM-protection), its OWN cgroup OOM-killed it. Surface
+		// that so it reads as an OOM, not a mysterious exit. Best-effort, and logged
+		// once per stop episode (guarded so we don't re-scan /sys/fs/cgroup and
+		// re-log every supervise tick while a Policy:none sandbox stays stopped).
+		// See PRD-worker-memory-reserve.md.
+		if !hs.oomReported {
+			if n, ok := sandboxOOMKills("/sys/fs/cgroup", sb.ID); ok && n > 0 {
+				log.Printf("sandbox %s stopped after %d OOM-kill(s) in its own cgroup — exceeded its per-sandbox memory limit (agent OOM-protection did its job; the agent was spared)", sb.ID, n)
+				metrics.inc("sandbox_oom_kills")
+			}
+			hs.oomReported = true
+			s.putHealthState(sb.ID, hs)
+		}
 		// only act if we think it should be running (has no snapshot-only lifecycle)
 		if sb.Health.Policy == "cold" || sb.Health.Policy == "restore" {
 			s.restartSandbox(sb)
@@ -63,6 +79,11 @@ func (s *server) checkOne(sb *sandbox) {
 	}
 	if st != "running" {
 		return
+	}
+	// Running again → clear the one-shot OOM-report latch so a future stop re-reports.
+	if hs.oomReported {
+		hs.oomReported = false
+		s.putHealthState(sb.ID, hs)
 	}
 
 	// Readiness probe (needs the sandbox network path).

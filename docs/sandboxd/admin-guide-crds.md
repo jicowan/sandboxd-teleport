@@ -57,7 +57,7 @@ subresource; no printer columns.
 | `workerImage` | string | No | empty ⇒ operator global default | Overrides the sandboxd **worker** image for this pool (NOT the workload image). The worker image carries the pinned `runsc` that checkpoint/restore depends on, so it's normally one global value (operator `--worker-image`); override only to canary a new worker build on one pool. Sessions can't teleport across workers with incompatible `runsc`. |
 | `streamConsole` | bool | No | `false` | Surfaces the nested workload's stdout/stderr to the worker's stdout (→ `kubectl logs`) by setting `SANDBOXD_STREAM_CONSOLE=1` on this pool's workers. The console is attacker‑controlled and multi‑tenant over a worker's lifetime, so it's opt‑in per pool. The session‑scoped `/logs` API stays the production path. |
 | `iam` | IAMSpec | No | — | Lets sandboxes in this pool assume an AWS IAM role (`iam.roleArn`); the worker vends per‑session temporary credentials. Off unless set. A `Session` may override per session. Requires the operator's `--cred-token-secret`. |
-| `resources` | corev1.ResourceRequirements | No | — | Worker sizing hint → the worker pod's resource requests/limits. |
+| `resources` | corev1.ResourceRequirements | No | — | Worker sizing hint → the worker pod's resource requests/limits. **Setting `limits.memory` also enables agent OOM‑protection** (see the "Agent OOM‑protection" note below): the worker caps each sandbox below the pod limit so a runaway guest is OOM‑killed in its own cgroup instead of taking down the sandboxd agent. |
 | `scheduling` | SchedulingSpec | No | — | Worker‑pod placement (nodeSelector/tolerations/affinity/spread). Applied verbatim; the operator injects no defaults. |
 
 ### `.status`
@@ -93,6 +93,38 @@ spec:
 > To pin workers to gVisor nodes you **must** set `scheduling.nodeSelector` +
 > `tolerations` — nothing is defaulted. Node spread across hosts needs
 > `minDomains: 2` (a plain `maxSkew` won't force scale‑up).
+
+#### Agent OOM‑protection (per‑sandbox memory cap)
+
+A worker pod runs the **sandboxd agent** and **runsc** (the gVisor sentry/gofer)
+*alongside* the sandbox, all under one pod cgroup. In gVisor the guest's RAM lives
+inside the sentry process, so a runaway guest grows until the **pod** cgroup hits its
+limit — at which point the kernel OOM killer may kill the **sandboxd agent**, taking down
+the whole worker (and every other sandbox that would teleport onto it).
+
+To prevent that, **if you set `resources.limits.memory`** on the SandboxTemplate, the
+worker automatically caps each sandbox's own memory cgroup a bit **below** the pod limit
+(`sandbox limit = pod limit − reserve`). A guest that exceeds its cap is OOM‑killed in
+**its own** cgroup, and the agent is spared. The worker logs it on start:
+
+```
+per-sandbox memory limit 1879048192 bytes (pod limit 2147483648, reserve 268435456) — agent OOM-protection ON
+```
+
+- **Entirely automatic and worker‑internal** — no extra CRD field. The worker reads the
+  pod memory limit (injected by the operator via the downward API) and computes the cap.
+- **Off by default**: if you set **no** `limits.memory`, no cap is applied (today's
+  behavior) and the worker logs `agent OOM-protection is OFF`. **Recommended: set a memory
+  limit**, especially with Karpenter node pools (where a limit‑less pod can burst into
+  shared node memory that pod density makes unpredictable).
+- **Pool‑constant and teleport‑safe**: the cap derives from the pod limit (same for every
+  worker in the pool regardless of instance type), and it rides the checkpoint so a
+  restored sandbox keeps the same cap.
+- **Reserve tuning** (rarely needed) via worker env: `SANDBOXD_AGENT_MEMORY_RESERVE`
+  (floor bytes, default `256Mi`) and `SANDBOXD_AGENT_MEMORY_RESERVE_PCT` (default `12`);
+  the reserve is `max(floor, pct% × pod limit)`. Set both to `0` to disable.
+
+See [PRD‑worker‑memory‑reserve.md](PRD/PRD-worker-memory-reserve.md) for the full design.
 
 ---
 
