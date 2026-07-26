@@ -18,6 +18,9 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net"
+	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -100,9 +103,40 @@ func ecrCredsFor(ctx context.Context, host string) (string, string, error) {
 	return user, pass, nil
 }
 
-// ecrRegistryHosts returns a containerd RegistryHosts that authenticates ECR hosts
-// with a fetched token and leaves everything else on the default anonymous path.
-// Used as ResolverOptions.Hosts for the worker's Pull.
+// pullDialContext forces registry pulls onto IPv4 ("tcp4").
+//
+// WHY: the worker pulls the workload image from INSIDE its (IPv4-only) pod network
+// namespace via the node containerd's resolver. Dual-stack registries — docker.io
+// (its CloudFront CDN), quay.io, registry.k8s.io — advertise AAAA (IPv6) records.
+// Go's dialer attempts an IPv6 address, which fails "connect: network is
+// unreachable" on the v4-only pod netns, and containerd surfaces that instead of
+// falling back to the A record → the pull fails. (kubelet is unaffected: it pulls
+// in the HOST netns. ECR/ghcr happened to return reachable addresses.) Forcing
+// "tcp4" makes the dialer resolve+dial only A records, so these registries pull.
+// Opt out with SANDBOXD_PULL_FORCE_IPV4=0 on a genuinely IPv6-capable pod.
+func pullDialContext() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	forceV4 := os.Getenv("SANDBOXD_PULL_FORCE_IPV4") != "0" // default ON
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if forceV4 && (network == "tcp" || network == "tcp6") {
+			network = "tcp4"
+		}
+		return d.DialContext(ctx, network, addr)
+	}
+}
+
+// pullTransport is an http.RoundTripper for registry pulls that clones the default
+// transport and swaps in the IPv4-forcing dialer.
+func pullTransport() http.RoundTripper {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DialContext = pullDialContext()
+	return t
+}
+
+// ecrRegistryHosts returns a containerd RegistryHosts used for ALL worker pulls: it
+// authenticates ECR hosts with a fetched token (anonymous for everything else) AND
+// installs the IPv4-forcing transport on every host (see pullDialContext). Used as
+// ResolverOptions.Hosts for the worker's Pull, regardless of registry.
 func ecrRegistryHosts(ctx context.Context) docker.RegistryHosts {
 	return dockerconfig.ConfigureHosts(ctx, dockerconfig.HostOptions{
 		DefaultScheme: "https",
@@ -111,6 +145,10 @@ func ecrRegistryHosts(ctx context.Context) docker.RegistryHosts {
 				return "", "", nil // anonymous for non-ECR hosts
 			}
 			return ecrCredsFor(ctx, host)
+		},
+		UpdateClient: func(client *http.Client) error {
+			client.Transport = pullTransport()
+			return nil
 		},
 	})
 }

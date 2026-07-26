@@ -8,7 +8,13 @@ package main
 // netnsPath: if non-empty, the sandbox JOINS this network namespace (the interior
 // netns with the veth) — this is the checkpointable "sandbox" netstack path. If
 // empty, no network namespace is declared (host-net inherits the pod netns).
-func ociSpec(args, env []string, cwd string, uid, gid int, netnsPath string) map[string]any {
+//
+// memLimitBytes: if >0, sets linux.resources.memory.limit so this sandbox's own
+// cgroup OOM-kills a runaway guest BEFORE it can drive the worker POD cgroup to the
+// edge (where the kernel could pick the sandboxd agent as the victim). 0 = omit =
+// today's behavior (sandbox bounded only by the pod cgroup). See
+// docs/sandboxd/PRD/PRD-worker-memory-reserve.md.
+func ociSpec(args, env []string, cwd string, uid, gid int, netnsPath string, memLimitBytes int64) map[string]any {
 	namespaces := []map[string]any{
 		{"type": "pid"},
 		{"type": "ipc"},
@@ -19,6 +25,14 @@ func ociSpec(args, env []string, cwd string, uid, gid int, netnsPath string) map
 		namespaces = append(namespaces, map[string]any{"type": "network", "path": netnsPath})
 	}
 	mounts := append([]map[string]any{}, defaultMounts...)
+	linux := map[string]any{
+		"namespaces": namespaces,
+	}
+	if memLimitBytes > 0 {
+		linux["resources"] = map[string]any{
+			"memory": map[string]any{"limit": memLimitBytes},
+		}
+	}
 	return map[string]any{
 		"ociVersion": "1.2.0",
 		"process": map[string]any{
@@ -38,9 +52,7 @@ func ociSpec(args, env []string, cwd string, uid, gid int, netnsPath string) map
 		"root":     map[string]any{"path": "rootfs", "readonly": false},
 		"hostname": "sandbox",
 		"mounts":   mounts,
-		"linux": map[string]any{
-			"namespaces": namespaces,
-		},
+		"linux":    linux,
 	}
 }
 

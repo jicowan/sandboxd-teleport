@@ -30,6 +30,7 @@ type server struct {
 	region   string      // AWS region (for injected AWS_REGION)
 	cred     *credVendor // per-session AWS credential vendor (nil if disabled)
 	credPort int         // interior-gateway port the vendor listens on
+	memLimit int64       // per-sandbox memory cgroup limit in bytes (0 = uncapped); worker-side agent OOM-protection
 	mu       sync.Mutex
 	sb       map[string]*sandbox     // sandboxId -> metadata
 	hs       map[string]*healthState // sandboxId -> runtime health (not persisted)
@@ -70,6 +71,7 @@ func main() {
 		compress: os.Getenv("SANDBOXD_COMPRESS") != "0", // default ON (A/B: ~4x smaller, ~2x faster suspend); opt out with =0
 		region:   os.Getenv("AWS_REGION"),
 		credPort: int(envInt64("SANDBOXD_CRED_PORT", 8091)),
+		memLimit: computeSandboxMemLimit(loadMemReserveConfig()),
 		sb:       map[string]*sandbox{},
 		hs:       map[string]*healthState{},
 	}
@@ -303,7 +305,7 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 		netnsPath = interiorNetNSPath
 		lg("network up: %s:%v -> %s", s.podIP, req.Ports, interiorIP)
 	}
-	if err := writeOCISpec(bundle, ic, req.Cmd, req.Env, netnsPath); err != nil {
+	if err := writeOCISpec(bundle, ic, req.Cmd, req.Env, netnsPath, s.memLimit); err != nil {
 		teardownSandboxNet()
 		s.cleanupArtifacts(id)
 		s.dropCred(id)
@@ -498,7 +500,7 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		if len(req.Ports) > 0 {
 			netnsPath = interiorNetNSPath
 		}
-		if err := writeOCISpec(bundle, ic, nil, nil, netnsPath); err != nil {
+		if err := writeOCISpec(bundle, ic, nil, nil, netnsPath, s.memLimit); err != nil {
 			s.cleanupArtifacts(id)
 			writeErr(w, 500, "spec: "+err.Error())
 			return

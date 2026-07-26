@@ -28,7 +28,7 @@ type imageConfig struct {
 //   - root.readonly MUST be false (runsc spec defaults true -> workload can't write)
 //   - process.args = entrypoint+cmd (or user override)
 //   - a network namespace path is injected iff networking is set up
-func writeOCISpec(bundle string, ic *imageConfig, cmdOverride, envOverride []string, netnsPath string) error {
+func writeOCISpec(bundle string, ic *imageConfig, cmdOverride, envOverride []string, netnsPath string, memLimitBytes int64) error {
 	args := append(append([]string{}, ic.Entrypoint...), ic.Cmd...)
 	if len(cmdOverride) > 0 {
 		args = cmdOverride
@@ -48,7 +48,7 @@ func writeOCISpec(bundle string, ic *imageConfig, cmdOverride, envOverride []str
 	// writeResolvIntoRootfs after the rootfs is rebuilt. Writing it here too was a
 	// redundant second write of the same file to the same path (bundle/rootfs).
 	uid, gid := parseUser(ic.User)
-	spec := ociSpec(args, env, firstNonEmpty(ic.WorkingDir, "/"), uid, gid, netnsPath)
+	spec := ociSpec(args, env, firstNonEmpty(ic.WorkingDir, "/"), uid, gid, netnsPath, memLimitBytes)
 	b, err := json.MarshalIndent(spec, "", "  ")
 	if err != nil {
 		return err

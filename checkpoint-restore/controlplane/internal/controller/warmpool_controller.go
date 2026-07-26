@@ -24,6 +24,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -433,6 +434,27 @@ func (r *WarmPoolReconciler) workerEnv(tmpl *corev1alpha1.SandboxTemplate) []cor
 		{Name: "SANDBOXD_DEBUG", Value: "0"},
 		{Name: "SANDBOXD_POD_IP", ValueFrom: &corev1.EnvVarSource{
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}},
+	}
+	// Agent OOM-protection: when (and ONLY when) the template sets an explicit
+	// memory LIMIT on the worker pod, surface that limit to the worker in bytes via
+	// the downward API. The worker caps each sandbox at (limit − reserve) so a
+	// runaway guest OOM-kills in its own cgroup before it can starve the sandboxd
+	// agent (see docs/sandboxd/PRD/PRD-worker-memory-reserve.md).
+	//
+	// We inject this ONLY when a limit is set — NOT unconditionally — because
+	// resourceFieldRef:limits.memory FALLS BACK TO NODE ALLOCATABLE when no limit
+	// exists. Reading that would anchor the reserve on node memory (density- and
+	// instance-dependent, the exact unsafe case the PRD rejects). Env absent =>
+	// worker leaves sandboxes uncapped (today's behavior).
+	if tmpl != nil && tmpl.Spec.Resources != nil {
+		if _, ok := tmpl.Spec.Resources.Limits[corev1.ResourceMemory]; ok {
+			env = append(env, corev1.EnvVar{Name: "SANDBOXD_POD_MEM_LIMIT", ValueFrom: &corev1.EnvVarSource{
+				ResourceFieldRef: &corev1.ResourceFieldSelector{
+					ContainerName: "sandboxd",
+					Resource:      "limits.memory",
+					Divisor:       resource.MustParse("1"),
+				}}})
+		}
 	}
 	// Per-pool opt-in: surface the nested workload console to kubectl logs.
 	if tmpl != nil && tmpl.Spec.StreamConsole {

@@ -119,11 +119,15 @@ them in the OCI spec's `Linux.Resources`.
 
 ## 5. Proposed shape (phased)
 
-- **Phase 0 — per-sandbox limits, still one sandbox per worker.** Add
-  `AppTemplate.spec.resources` → `RunRequest.Resources` → OCI `Linux.Resources`. No
-  density yet, but ships the cgroup-limit mechanism and is independently useful
-  (predictable per-sandbox caps, noisy-neighbor protection even at 1:1). Low risk;
-  touches only spec plumbing.
+- **Phase 0 — SUPERSEDED (2026-07-26).** The original Phase 0 (expose per-sandbox
+  CPU/mem as a user-facing `AppTemplate.spec.resources` → `RunRequest.Resources` → OCI
+  `Linux.Resources`) was **dropped**: at strict 1:1 the worker POD cgroup is already the
+  cap and there's no resource-aware scheduler to read a per-sandbox value, so the knob
+  adds nothing until 1:1 is broken (Phases 1–3). The one benefit that *does* exist at
+  1:1 — OOM-isolating the sandboxd agent from a runaway guest — is delivered instead by
+  an internal, no-API worker-side memory reserve. See
+  [PRD-worker-memory-reserve.md](./PRD-worker-memory-reserve.md) (implemented). Phases
+  1–3 below are unchanged and still gated on Q5.
 - **Phase 1 — per-sandbox networking.** The 3.1 rework: per-id netns/IP/veth/nftables +
   IP allocator + host-port allocation + restore of per-sandbox IP/port. The keystone;
   do it behind the 1:1 model first (each worker still gets one, but via the per-id path)

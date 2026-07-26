@@ -76,20 +76,23 @@ func prepareRootfsContainerd(ref, destRootfs, snapKey string) (*imageConfig, err
 	}
 	// NOTE: cl is the shared long-lived client — do NOT Close it.
 
-	// Authenticate the pull for private registries. containerd's default resolver
-	// is anonymous (fine for public ghcr/docker-hub images, and for cache hits on
-	// images the kubelet already pulled), but a cache MISS on a private ECR image
-	// 401s. Pass a resolver whose Hosts authenticate ECR endpoints with a token
-	// fetched via the worker's AWS identity (Pod Identity); non-ECR hosts stay
-	// anonymous. See ecrauth.go.
+	// Always pull through our own resolver (ecrRegistryHosts), for EVERY registry —
+	// not just ECR. It does two things:
+	//   1. Authenticates ECR hosts with a fetched token (anonymous elsewhere), so a
+	//      cache MISS on a private ECR image doesn't 401.
+	//   2. Forces the pull dialer onto IPv4 (see pullDialContext in ecrauth.go).
+	//      The worker resolves+dials from its IPv4-only pod netns; dual-stack
+	//      registries (docker.io/quay.io/registry.k8s.io) advertise AAAA records and
+	//      containerd's default transport dials IPv6 → "network is unreachable" with
+	//      no v4 fallback. Installing the resolver unconditionally fixes those pulls.
+	// (Previously the default path passed NO resolver, so non-ECR pulls used
+	// containerd's stock transport and broke on IPv6-advertising registries.)
 	pullOpts := []containerd.RemoteOpt{
 		containerd.WithPullUnpack,
 		containerd.WithPullSnapshotter(snapshotter),
-	}
-	if isECRHost(registryHost(ref)) {
-		pullOpts = append(pullOpts, containerd.WithResolver(
+		containerd.WithResolver(
 			docker.NewResolver(docker.ResolverOptions{Hosts: ecrRegistryHosts(ctx)}),
-		))
+		),
 	}
 	img, err := cl.Pull(ctx, ref, pullOpts...)
 	if err != nil {
