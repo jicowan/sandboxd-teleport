@@ -95,13 +95,21 @@ import so issuer/audience/group can't drift. Expose it publicly with
 (needs the AWS Load Balancer Controller). Keycloak is BYO by default; the chart
 does not install the Keycloak server. See `charts/sandboxd-frontdoor/values.yaml`.
 
-## Releases (CI)
+## Releases + images (CI)
 
-Pushing to `main` builds the binaries and pushes `:latest` + `:<sha>` images to ECR.
-Pushing a `v*` tag additionally publishes a GitHub Release with the binaries + runsc
-attached and tags the images `:<version>`. The image-push job assumes an AWS role via
-OIDC — set the `AWS_ECR_PUSH_ROLE_ARN` repo secret. See
-[`.github/workflows/release.yml`](.github/workflows/release.yml).
+Two workflows, separated by intent:
+
+- **[`release.yml`](.github/workflows/release.yml)** (automatic) — pushing to `main`
+  builds the binaries as a smoke test; pushing a `v*` tag publishes a GitHub Release
+  with the operator/router/worker binaries + runsc attached. **No images are pushed here.**
+- **[`images.yml`](.github/workflows/images.yml)** (on demand) — run it from the
+  Actions tab or `gh workflow run images.yml -f release=v0.1.0` to build and push all
+  four images (operator, router, worker, broker) to ECR. Pass a `release` tag to fetch
+  the Go binaries from that published release (recommended); leave it empty to build
+  them in the job. The broker always builds from source. Requires the
+  `AWS_ECR_PUSH_ROLE_ARN` repo secret (an IAM role trusted for GitHub OIDC with ECR push).
+
+You can also build/push images locally with `make images`.
 
 ## Layout
 
@@ -112,4 +120,5 @@ OIDC — set the `AWS_ECR_PUSH_ROLE_ARN` repo secret. See
 | `build/docker/` | Distroless Dockerfiles (copy prebuilt binaries) |
 | `charts/sandboxd/` | Helm chart (CRDs, RBAC, operator, router, valkey) |
 | `charts/sandboxd-frontdoor/` | Helm chart (broker, agentgateway, optional Keycloak realm) |
-| `.github/workflows/release.yml` | Build binaries + images (incl. broker) on merge/tag |
+| `.github/workflows/release.yml` | Build binaries on merge; publish Release on `v*` tag |
+| `.github/workflows/images.yml` | On-demand build + push of all images to ECR |
