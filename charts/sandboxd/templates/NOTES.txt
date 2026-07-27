@@ -1,0 +1,34 @@
+sandboxd control plane installed into namespace: {{ .Release.Namespace }}
+
+Components:
+  operator  {{ include "sandboxd.operatorImage" . }}
+  router    {{ include "sandboxd.routerImage" . }}
+  worker    {{ include "sandboxd.workerImage" . }}   (stamped onto pool workers by the operator)
+  valkey    {{ .Values.valkey.image }}
+
+Config:
+  AWS region:        {{ .Values.aws.region }}
+  Checkpoint bucket: {{ .Values.aws.bucket | default "(UNSET — checkpoint/restore disabled; set aws.bucket)" }}
+  Worker namespace:  {{ .Values.worker.namespace }} (SA: {{ .Values.worker.serviceAccount }})
+  mTLS:              {{ .Values.mtls.enabled }}{{ if .Values.mtls.enabled }} (requires SPIRE + ClusterSPIFFEIDs present){{ end }}
+  Session GC:        {{ .Values.gc.enabled }}{{ if .Values.gc.enabled }} (dry-run: {{ .Values.gc.dryRun }}){{ end }}
+
+Prerequisites (BYO cluster — NOT installed by this chart):
+  1. A gVisor node group: nodes labeled `sandbox=gvisor` + taint `sandbox=gvisor:NoSchedule`,
+     with runsc {{ "release-20260622.0" }} on-node (must match the worker image's runsc).
+  2. The EKS Pod Identity agent add-on, and the IAM roles + associations from Terraform
+     (worker S3 role on SA {{ .Values.worker.serviceAccount }}; operator role on SA {{ .Values.operator.serviceAccount | default "sandboxd-operator" }}).
+{{- if .Values.mtls.enabled }}
+  3. SPIRE installed (spiffe/spire chart) with the ClusterSPIFFEIDs for
+     {{ .Values.mtls.operatorID }}, {{ .Values.mtls.routerID }}, {{ .Values.mtls.workerID }}.
+     See docs/sandboxd/security-spiffe-spire.md. To install WITHOUT mTLS: --set mtls.enabled=false
+{{- end }}
+
+Next:
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/sandboxd-operator
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/sandboxd-router
+{{- if not .Values.starterPool.enabled }}
+  # Create a pool to run sandboxes (or enable the starter: --set starterPool.enabled=true)
+{{- else }}
+  kubectl -n {{ .Values.worker.namespace }} get warmpool {{ .Values.starterPool.name }}-pool
+{{- end }}

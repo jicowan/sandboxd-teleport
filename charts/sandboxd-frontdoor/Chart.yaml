@@ -1,0 +1,17 @@
+apiVersion: v2
+name: sandboxd-frontdoor
+description: >-
+  The sandboxd MCP front door — broker (session resolver + MCP proxy),
+  agentgateway (JWT auth + per-app routing + tool allowlist), and an optional
+  Keycloak realm import. Sits in front of the sandboxd control plane (the
+  `sandboxd` chart) and terminates user identity at the edge.
+type: application
+version: 0.1.0
+appVersion: latest
+keywords:
+  - sandboxd
+  - mcp
+  - agentgateway
+  - keycloak
+  - oidc
+home: https://github.com/jicowan/sandboxd-teleport

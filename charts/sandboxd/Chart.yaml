@@ -1,0 +1,17 @@
+apiVersion: v2
+name: sandboxd
+description: >-
+  sandboxd-teleport control plane — operator, router, and Valkey assignment
+  table for running warm pools of nested gVisor sandboxes that checkpoint/restore
+  and teleport across workers. Installs the CRDs, RBAC, and control plane onto an
+  existing EKS cluster. Worker pods are rendered by the operator (not this chart).
+type: application
+version: 0.1.0
+# appVersion tracks the component image tag the chart defaults to.
+appVersion: "latest"
+keywords: [gvisor, sandbox, checkpoint, restore, teleport, eks]
+home: https://github.com/jicowan/sandboxd-teleport
+sources:
+  - https://github.com/jicowan/sandboxd-teleport
+maintainers:
+  - name: jicowan

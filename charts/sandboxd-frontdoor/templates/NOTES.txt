@@ -1,0 +1,35 @@
+sandboxd-frontdoor {{ .Chart.Version }} installed into namespace "{{ .Release.Namespace }}".
+
+Components:
+{{- if .Values.broker.enabled }}
+  ✓ broker         -> Service sandboxd-broker:{{ .Values.broker.service.port }} (forwards to router {{ include "frontdoor.routerUrl" . }})
+{{- else }}
+  ✗ broker         (disabled)
+{{- end }}
+{{- if .Values.agentgateway.enabled }}
+  ✓ agentgateway   -> Service agentgateway:{{ .Values.agentgateway.service.port }}
+{{- if .Values.agentgateway.ingress.enabled }}
+    public host: https://{{ .Values.publicHost }}   (point DNS at the provisioned ALB)
+{{- else }}
+    (no ingress — set agentgateway.ingress.enabled=true + certificateArn to expose publicly)
+{{- end }}
+{{- else }}
+  ✗ agentgateway   (disabled)
+{{- end }}
+{{- if .Values.keycloak.deploy }}
+  ✓ keycloak realm -> {{ .Values.keycloak.realm }} (import in ns {{ .Values.keycloak.namespace }}, CR {{ .Values.keycloak.keycloakCRName }})
+{{- else }}
+  · keycloak       (BYO — using issuer {{ .Values.oidc.issuer }})
+{{- end }}
+
+Apps (each => an agentgateway route pair + broker registry entry):
+{{- range .Values.apps }}
+  - {{ .id }}   https://{{ $.Values.publicHost }}/{{ .id }}/mcp   (AppTemplate {{ .appTemplate }}, pool {{ .pool }}, group {{ .group }})
+{{- end }}
+
+Dependency ordering: broker waits for the router{{ if .Values.keycloak.deploy }} + Keycloak OIDC discovery{{ end }};
+agentgateway waits for the broker (initContainers). Install with `--wait` to block until Ready.
+
+IMPORTANT: the control-plane chart (`sandboxd`) must be installed first — the broker
+forwards MCP to its router at {{ include "frontdoor.routerUrl" . }}.
+Ensure oidc.issuer / audience / azp / requiredGroup match your Keycloak realm.

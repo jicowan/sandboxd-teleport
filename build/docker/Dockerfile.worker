@@ -1,0 +1,18 @@
+# Worker (sandboxd) image: the sandboxd agent + the pinned runsc binary, on
+# distroless/static. Like the operator image this COPIES prebuilt binaries (from the
+# GitHub release or `make build-worker` + `make fetch-runsc`), it does not compile.
+#
+# CRITICAL: the runsc version MUST match the on-node runsc, or checkpoint/restore
+# hard-fails. The pin is RUNSC_VERSION in the top-level Makefile.
+#
+# Build context = a directory containing BOTH `sandboxd` and `runsc`. Example:
+#   docker build -f build/docker/Dockerfile.worker dist/worker
+FROM gcr.io/distroless/static-debian12:nonroot
+# runsc needs root (privileged, nested gVisor); override distroless nonroot.
+USER 0:0
+COPY runsc /usr/local/bin/runsc
+COPY sandboxd /usr/local/bin/sandboxd
+ENV SANDBOXD_RUNSC=/usr/local/bin/runsc \
+    SANDBOXD_WORK=/work \
+    SANDBOXD_ADDR=:8090
+ENTRYPOINT ["/usr/local/bin/sandboxd"]
