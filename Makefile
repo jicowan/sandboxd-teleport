@@ -37,9 +37,12 @@ BROKER_REPO   ?= aio-sandbox-broker-sandboxd
 TAG           ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 
 # Pinned runsc version — MUST match the on-node runsc, or checkpoint/restore fails.
+# gVisor's release bucket is keyed by the bare date (20260622), not the full tag
+# (release-20260622.0), so derive the date for the download URL.
 RUNSC_VERSION ?= release-20260622.0
 RUNSC_ARCH    ?= x86_64
-RUNSC_URL      = https://storage.googleapis.com/gvisor/releases/release/$(RUNSC_VERSION)/$(RUNSC_ARCH)/runsc
+RUNSC_DATE     = $(shell echo "$(RUNSC_VERSION)" | sed -E 's/release-([0-9]+).*/\1/')
+RUNSC_URL      = https://storage.googleapis.com/gvisor/releases/release/$(RUNSC_DATE)/$(RUNSC_ARCH)/runsc
 
 # Binary source for image builds: local (go build here) | release (download from GH).
 BINSRC        ?= local
