@@ -47,8 +47,10 @@ jobs:
 
       - name: Fetch pinned runsc
         run: |
+          # gVisor's release bucket is keyed by the bare date, not the full tag.
+          RUNSC_DATE="$(echo "${RUNSC_VERSION}" | sed -E 's/release-([0-9]+).*/\1/')"
           curl -fsSL -o dist/runsc \
-            "https://storage.googleapis.com/gvisor/releases/release/${RUNSC_VERSION}/${RUNSC_ARCH}/runsc"
+            "https://storage.googleapis.com/gvisor/releases/release/${RUNSC_DATE}/${RUNSC_ARCH}/runsc"
           chmod +x dist/runsc
 
       - name: Upload binaries as workflow artifact

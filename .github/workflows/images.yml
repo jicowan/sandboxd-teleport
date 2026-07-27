@@ -59,8 +59,10 @@ jobs:
             CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o "${GITHUB_WORKSPACE}/dist/router" ./cmd/router )
           ( cd checkpoint-restore/sandboxd
             CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o "${GITHUB_WORKSPACE}/dist/sandboxd" ./ )
+          # gVisor's release bucket is keyed by the bare date, not the full tag.
+          RUNSC_DATE="$(echo "${RUNSC_VERSION}" | sed -E 's/release-([0-9]+).*/\1/')"
           curl -fsSL -o dist/runsc \
-            "https://storage.googleapis.com/gvisor/releases/release/${RUNSC_VERSION}/${RUNSC_ARCH}/runsc"
+            "https://storage.googleapis.com/gvisor/releases/release/${RUNSC_DATE}/${RUNSC_ARCH}/runsc"
           chmod +x dist/*
 
       - name: Download binaries from release
