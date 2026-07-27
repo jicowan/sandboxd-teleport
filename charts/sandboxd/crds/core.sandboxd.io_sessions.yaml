@@ -1,0 +1,366 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: sessions.core.sandboxd.io
+spec:
+  group: core.sandboxd.io
+  names:
+    kind: Session
+    listKind: SessionList
+    plural: sessions
+    shortNames:
+    - sess
+    singular: session
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.workerPodIP
+      name: Worker
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Session is the Schema for the sessions API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of Session
+            properties:
+              appRef:
+                description: |-
+                  appRef optionally names an AppTemplate that supplies the WORKLOAD
+                  (image + cmd/env/ports/health/idle/checkpoint/iam), DECOUPLED from poolRef
+                  (capacity + placement). This is how a session runs a workload on a GENERIC pool
+                  (a WarmPool whose SandboxTemplate has no image): the pool supplies worker-shape,
+                  the AppTemplate supplies what to run (docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13).
+                  An AppTemplate cannot specify scheduling — placement is always the pool's.
+                  Resolution precedence: image > appRef > poolRef's own (dedicated-pool) image.
+                  Mutually exclusive with image. Additive/optional: inert unless set, so classic
+                  poolRef and inline-image sessions are unaffected.
+                properties:
+                  name:
+                    description: name of the referenced object.
+                    type: string
+                required:
+                - name
+                type: object
+              cmd:
+                description: cmd overrides the entrypoint for arbitrary-image mode.
+                items:
+                  type: string
+                type: array
+              env:
+                description: env for arbitrary-image mode.
+                items:
+                  type: string
+                type: array
+              forkFrom:
+                description: |-
+                  forkFrom records that this Session is a fork child and, for the snapshot
+                  source, the base it was seeded from. Set by the ForkSet controller; empty for
+                  normal and image-source sessions. It makes a child self-describing (a rebuild
+                  knows its base) and is the ref-count decrement key for base reclaim
+                  (docs/sandboxd/PRD/PRD-snapshot-fork.md §5.4).
+                properties:
+                  baseRef:
+                    description: |-
+                      baseRef names the BaseSnapshot this fork was seeded from (snapshot source).
+                      Empty for an image-source fork.
+                    properties:
+                      name:
+                        description: name of the referenced object.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  snapshotURI:
+                    description: |-
+                      snapshotURI is the base snapshot this fork restored from (snapshot source).
+                      Empty for an image-source fork.
+                    type: string
+                type: object
+              iam:
+                description: |-
+                  iam optionally lets this session's sandbox assume an AWS IAM role, overriding
+                  the pool template's iam. Authorization is enforced at the front door / control
+                  plane before the Session is created.
+                properties:
+                  roleArn:
+                    description: |-
+                      roleArn is the ARN of the IAM role the sandbox may assume. Authorization for
+                      which sessions may use which role is enforced at the front door / control
+                      plane, not here.
+                    type: string
+                type: object
+              image:
+                description: |-
+                  image is a caller-supplied arbitrary image (inline arbitrary-image mode, O6):
+                  admin/kubectl escape hatch, NOT exposed through the front door. When set it is
+                  the workload image directly; cmd/env/ports may accompany it. Highest-precedence
+                  workload source. Mutually exclusive with appRef.
+                type: string
+              lifecycle:
+                description: lifecycle overrides template idle/TTL for this session.
+                properties:
+                  idleAction:
+                    description: |-
+                      idleAction overrides the template idle action for this session: suspend
+                      (checkpoint->S3, free worker), reset (discard state, free worker), or none.
+                      Lets an ephemeral fork choose reset-on-idle without a dedicated pool
+                      (docs/sandboxd/PRD/PRD-snapshot-fork.md §5.3). Empty = inherit the template's action.
+                    enum:
+                    - suspend
+                    - reset
+                    - none
+                    type: string
+                  idleTimeoutSeconds:
+                    description: idleTimeoutSeconds overrides the template idle timeout.
+                    type: integer
+                  ttlAfterSuspendSeconds:
+                    description: |-
+                      ttlAfterSuspendSeconds is how long the S3 checkpoint is retained after
+                      suspend before GC.
+                    type: integer
+                type: object
+              poolRef:
+                description: |-
+                  poolRef selects a WarmPool — the session's CAPACITY + PLACEMENT source (which
+                  pool a worker is claimed from). On a DEDICATED pool (its SandboxTemplate pins an
+                  image) poolRef alone runs that image. On a GENERIC pool (its SandboxTemplate has
+                  no image — worker-shape only) the pool supplies only capacity and the workload
+                  comes from appRef below (docs/sandboxd/PRD/PRD-arbitrary-image-sessions.md §13). poolRef is
+                  effectively always required — an appRef/image session still needs a pool to run
+                  on.
+                properties:
+                  name:
+                    description: name of the referenced object.
+                    type: string
+                required:
+                - name
+                type: object
+              ports:
+                description: ports for arbitrary-image mode.
+                items:
+                  description: PortMap maps a worker pod port to a sandbox container
+                    port (DNAT).
+                  properties:
+                    container:
+                      description: container is the port the sandbox process listens
+                        on.
+                      maximum: 65535
+                      minimum: 1
+                      type: integer
+                    host:
+                      description: host is the port on the worker pod IP. 0 defaults
+                        to container.
+                      maximum: 65535
+                      minimum: 0
+                      type: integer
+                  required:
+                  - container
+                  type: object
+                type: array
+              subject:
+                description: |-
+                  subject is the opaque identity the router matches the JWT-derived subject
+                  against (O4).
+                type: string
+              suspendRequest:
+                description: |-
+                  suspendRequest is an EDGE-TRIGGERED, one-shot request to checkpoint+suspend
+                  this session now (docs/sandboxd/PRD/PRD-on-demand-suspend.md). Set it to a fresh OPAQUE
+                  token (uuid/timestamp/etc.); when it differs from status.lastSuspendHandled the
+                  operator performs exactly one checkpoint->S3->Suspended->free-worker, then sets
+                  the watermark equal. It is NOT a level-triggered desired-state: reactive resume
+                  (a request to the router) may bring the session back to Running afterward and
+                  will NOT be re-suspended, because the token is already handled. Empty = no
+                  request.
+                type: string
+            type: object
+          status:
+            description: status defines the observed state of Session
+            properties:
+              conditions:
+                description: conditions represent the current state of the Session
+                  resource.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              health:
+                description: health is the readiness/restart config (replayed on restore).
+                properties:
+                  probe:
+                    description: probe type used to determine readiness.
+                    enum:
+                    - none
+                    - tcp
+                    - http
+                    type: string
+                  probePath:
+                    description: probePath is the HTTP path to probe (http probe only).
+                    type: string
+                  probePort:
+                    description: probePort is the interior container port to probe.
+                    type: integer
+                  restartPolicy:
+                    description: restartPolicy on unexpected sandbox exit.
+                    enum:
+                    - none
+                    - cold
+                    - restore
+                    type: string
+                type: object
+              iamRoleArn:
+                description: iamRoleArn is the session's assumable AWS role (replayed
+                  on restore).
+                type: string
+              image:
+                description: image is the resolved image (recorded for restore identity).
+                type: string
+              lastActiveAt:
+                description: |-
+                  lastActiveAt is the last request time stamped by the router (O3). Mirrored
+                  coarsely (on transitions, not every request) to avoid write amplification.
+                format: date-time
+                type: string
+              lastSuspendHandled:
+                description: |-
+                  lastSuspendHandled is the watermark for the on-demand suspend request
+                  (docs/sandboxd/PRD/PRD-on-demand-suspend.md): the spec.suspendRequest token the operator
+                  most recently COMPLETED — set only after the checkpoint is durably in S3 and
+                  the session is Suspended. A requester waits for
+                  status.lastSuspendHandled == spec.suspendRequest (&& snapshotURI != "") to know
+                  the snapshot is safe to promote/fork. Equal ⇒ done; differing ⇒ pending.
+                type: string
+              phase:
+                description: phase mirrors the KV session state.
+                enum:
+                - Absent
+                - Running
+                - Suspending
+                - Suspended
+                - Resuming
+                type: string
+              pool:
+                description: pool is the WarmPool the session's worker is claimed
+                  from.
+                type: string
+              ports:
+                description: ports are the session's exposed port mappings (replayed
+                  on restore).
+                items:
+                  description: PortMap maps a worker pod port to a sandbox container
+                    port (DNAT).
+                  properties:
+                    container:
+                      description: container is the port the sandbox process listens
+                        on.
+                      maximum: 65535
+                      minimum: 1
+                      type: integer
+                    host:
+                      description: host is the port on the worker pod IP. 0 defaults
+                        to container.
+                      maximum: 65535
+                      minimum: 0
+                      type: integer
+                  required:
+                  - container
+                  type: object
+                type: array
+              snapshotURI:
+                description: snapshotURI is the current checkpoint location (set once
+                  one exists).
+                type: string
+              workerPod:
+                description: workerPod is the worker pod name currently bound (fencing
+                  key); empty when suspended.
+                type: string
+              workerPodIP:
+                description: workerPodIP is set while Running/Resuming.
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

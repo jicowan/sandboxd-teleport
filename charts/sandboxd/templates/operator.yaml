@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandboxd-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: sandboxd-operator
+    {{- include "sandboxd.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.operator.replicas }}
+  selector:
+    matchLabels: { app.kubernetes.io/name: sandboxd-operator }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: sandboxd-operator }
+    spec:
+      serviceAccountName: {{ .Values.operator.serviceAccount | default "sandboxd-operator" }}
+      {{- if .Values.waitForDependencies.enabled }}
+      initContainers:
+        {{- include "sandboxd.waitFor" (dict "name" "wait-for-valkey" "image" .Values.waitForDependencies.image "deps" (list "valkey:6379")) | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: operator
+          image: {{ include "sandboxd.operatorImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            {{- if .Values.operator.leaderElect }}
+            - --leader-elect
+            {{- end }}
+            - --health-probe-bind-address=:8081
+            - --kv-addr=valkey:6379
+            - --resume-addr=:8082
+            - --resume-namespace={{ .Values.worker.namespace }}
+            - --worker-sa={{ .Values.worker.serviceAccount }}
+            - --worker-image={{ include "sandboxd.workerImage" . }}
+            {{- if .Values.aws.bucket }}
+            - --worker-bucket={{ .Values.aws.bucket }}
+            {{- end }}
+            - --worker-region={{ .Values.aws.region }}
+            - --resume-deadline-seconds={{ .Values.controlPlane.resumeDeadlineSeconds }}
+            - --worker-reclaim-grace-seconds={{ .Values.controlPlane.workerReclaimGraceSeconds }}
+            - --sweep-interval-seconds={{ .Values.controlPlane.sweepIntervalSeconds }}
+            - --max-concurrent-resumes={{ .Values.controlPlane.maxConcurrentResumes }}
+            {{- if .Values.credVendor.enabled }}
+            - --cred-token-secret={{ .Values.credVendor.secretName }}
+            {{- end }}
+            {{- if .Values.gc.enabled }}
+            - --enable-checkpoint-gc
+            - --gc-dry-run={{ .Values.gc.dryRun }}
+            - --checkpoint-gc-interval-seconds={{ .Values.gc.intervalSeconds }}
+            - --default-ttl-after-suspend-seconds={{ .Values.gc.defaultTtlAfterSuspendSeconds }}
+            - --abandoned-grace-seconds={{ .Values.gc.abandonedGraceSeconds }}
+            {{- end }}
+            {{- if .Values.mtls.enabled }}
+            - --mtls
+            - --spiffe-router-id={{ .Values.mtls.routerID }}
+            - --spiffe-worker-id={{ .Values.mtls.workerID }}
+            {{- end }}
+          env:
+            - name: AWS_REGION
+              value: {{ .Values.aws.region | quote }}
+            {{- if .Values.mtls.enabled }}
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: unix://{{ .Values.mtls.spiffeSocket }}
+            {{- end }}
+          ports:
+            - { containerPort: 8081, name: health }
+            - { containerPort: 8082, name: resume }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8081 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8081 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources: {{- toYaml .Values.operator.resources | nindent 12 }}
+          {{- if .Values.mtls.enabled }}
+          volumeMounts:
+            - name: spiffe-workload-api
+              mountPath: {{ dir .Values.mtls.spiffeSocket }}
+              readOnly: true
+          {{- end }}
+      {{- if .Values.mtls.enabled }}
+      volumes:
+        - name: spiffe-workload-api
+          csi:
+            driver: {{ .Values.mtls.csiDriver }}
+            readOnly: true
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandboxd-operator
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "sandboxd.labels" . | nindent 4 }}
+spec:
+  selector: { app.kubernetes.io/name: sandboxd-operator }
+  ports:
+    - { port: 8082, targetPort: 8082, name: resume }

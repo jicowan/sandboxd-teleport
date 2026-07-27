@@ -1,0 +1,61 @@
+{{- if .Values.runtimeClass.enabled }}
+# Optional gVisor RuntimeClass. NOT required by sandboxd (the worker drives runsc as
+# a binary, not via RuntimeClass) — provided for convenience only.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: {{ .Values.runtimeClass.name }}
+  labels: {{- include "sandboxd.labels" . | nindent 4 }}
+handler: {{ .Values.runtimeClass.handler }}
+{{- end }}
+{{- if .Values.starterPool.enabled }}
+---
+# Starter GENERIC pool + AppTemplate so `helm install` yields a drivable sandbox.
+# Lives in the WORKER namespace (where the operator manages pools), not the release
+# namespace. Requires a gVisor node group (label sandbox=gvisor + taint) present.
+apiVersion: core.sandboxd.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: {{ .Values.starterPool.name }}
+  namespace: {{ .Values.worker.namespace }}
+  labels: {{- include "sandboxd.labels" . | nindent 4 }}
+spec:
+  # No image => generic pool (worker-shape only); the workload comes from the app below.
+  workerImage: {{ include "sandboxd.workerImage" . }}
+  {{- with .Values.starterPool.nodeSelector }}
+  scheduling:
+    nodeSelector: {{- toYaml . | nindent 6 }}
+    {{- with $.Values.starterPool.tolerations }}
+    tolerations: {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- end }}
+  resources:
+    requests: { cpu: "500m", memory: {{ .Values.starterPool.memoryLimit | default "1Gi" | quote }} }
+    {{- if .Values.starterPool.memoryLimit }}
+    # A memory LIMIT enables agent OOM-protection (worker caps each sandbox below it).
+    limits: { memory: {{ .Values.starterPool.memoryLimit | quote }} }
+    {{- end }}
+---
+apiVersion: core.sandboxd.io/v1alpha1
+kind: WarmPool
+metadata:
+  name: {{ .Values.starterPool.name }}-pool
+  namespace: {{ .Values.worker.namespace }}
+  labels: {{- include "sandboxd.labels" . | nindent 4 }}
+spec:
+  templateRef: { name: {{ .Values.starterPool.name }} }
+  replicas: {{ .Values.starterPool.replicas }}
+  minIdle: {{ .Values.starterPool.minIdle }}
+---
+apiVersion: core.sandboxd.io/v1alpha1
+kind: AppTemplate
+metadata:
+  name: {{ .Values.starterPool.app.name }}
+  namespace: {{ .Values.worker.namespace }}
+  labels: {{- include "sandboxd.labels" . | nindent 4 }}
+spec:
+  image: {{ .Values.starterPool.app.image }}
+  ports: [{ container: {{ .Values.starterPool.app.port }}, host: {{ .Values.starterPool.app.port }} }]
+  health: { probe: http, probePort: {{ .Values.starterPool.app.port }}, probePath: {{ .Values.starterPool.app.healthPath | quote }} }
+  idle: { timeoutSeconds: 600, action: suspend }
+{{- end }}

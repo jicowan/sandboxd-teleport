@@ -1,0 +1,122 @@
+{{- if .Values.keycloak.deploy }}
+{{- /* Unique groups referenced by apps + the baseline required group. */ -}}
+{{- $groups := list .Values.oidc.requiredGroup -}}
+{{- range .Values.apps }}{{- if .group }}{{- $groups = append $groups .group }}{{- end }}{{- end }}
+{{- $groups = $groups | uniq -}}
+# KeycloakRealmImport — requires the Keycloak Operator and a Keycloak CR named
+# {{ .Values.keycloak.keycloakCRName }} to already exist in ns {{ .Values.keycloak.namespace }}.
+# This chart does NOT install the Keycloak server itself.
+apiVersion: k8s.keycloak.org/v2alpha1
+kind: KeycloakRealmImport
+metadata:
+  name: {{ .Values.keycloak.realm }}-realm
+  namespace: {{ .Values.keycloak.namespace }}
+  labels:
+    app.kubernetes.io/component: realm
+    {{- include "frontdoor.labels" . | nindent 4 }}
+spec:
+  keycloakCRName: {{ .Values.keycloak.keycloakCRName }}
+  realm:
+    realm: {{ .Values.keycloak.realm }}
+    displayName: {{ .Values.keycloak.displayName | quote }}
+    enabled: true
+    accessTokenLifespan: 3600
+    ssoSessionIdleTimeout: 1800
+    ssoSessionMaxLifespan: 36000
+    loginWithEmailAllowed: true
+    registrationAllowed: false
+    rememberMe: true
+    resetPasswordAllowed: true
+
+    groups:
+      {{- range $groups }}
+      - name: {{ . }}
+      {{- end }}
+
+    clientScopes:
+      - name: sandbox
+        description: Adds aud, groups, preferred_username, and client_id on access tokens
+        protocol: openid-connect
+        attributes:
+          include.in.token.scope: "true"
+          display.on.consent.screen: "false"
+        protocolMappers:
+          - name: sandbox-audience
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.custom.audience: {{ .Values.oidc.audience }}
+              access.token.claim: "true"
+              id.token.claim: "false"
+          - name: sandbox-groups
+            protocol: openid-connect
+            protocolMapper: oidc-group-membership-mapper
+            config:
+              claim.name: groups
+              full.path: "false"
+              access.token.claim: "true"
+              id.token.claim: "false"
+              userinfo.token.claim: "true"
+          - name: sandbox-username
+            protocol: openid-connect
+            protocolMapper: oidc-usermodel-property-mapper
+            config:
+              user.attribute: username
+              claim.name: preferred_username
+              jsonType.label: String
+              access.token.claim: "true"
+              id.token.claim: "false"
+              userinfo.token.claim: "true"
+          - name: client-id-hardcoded
+            protocol: openid-connect
+            protocolMapper: oidc-hardcoded-claim-mapper
+            config:
+              claim.name: client_id
+              claim.value: {{ .Values.oidc.azp }}
+              jsonType.label: String
+              access.token.claim: "true"
+              id.token.claim: "false"
+
+    clients:
+      - clientId: {{ .Values.oidc.azp }}
+        name: Sandbox Client (user login)
+        description: Public client end users authenticate through to reach the sandbox
+        protocol: openid-connect
+        enabled: true
+        publicClient: true
+        standardFlowEnabled: true
+        redirectUris:
+          - "http://localhost/*"
+          - "http://127.0.0.1/*"
+          - "http://localhost:*/*"
+          - "http://127.0.0.1:*/*"
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: false
+        attributes:
+          oauth2.device.authorization.grant.enabled: "true"
+          pkce.code.challenge.method: "S256"
+          access.token.lifespan: "3600"
+        defaultClientScopes:
+          - openid
+          - profile
+          - email
+          - sandbox
+        optionalClientScopes:
+          - offline_access
+
+    {{- if and .Values.keycloak.seedUser.enabled .Values.keycloak.seedUser.password }}
+    users:
+      - username: {{ .Values.keycloak.seedUser.username }}
+        email: {{ .Values.keycloak.seedUser.email }}
+        enabled: true
+        emailVerified: true
+        credentials:
+          - type: password
+            value: {{ .Values.keycloak.seedUser.password | quote }}
+            temporary: true
+        realmRoles:
+          - default-roles-{{ .Values.keycloak.realm }}
+        groups:
+          - /{{ .Values.oidc.requiredGroup }}
+    {{- end }}
+{{- end }}

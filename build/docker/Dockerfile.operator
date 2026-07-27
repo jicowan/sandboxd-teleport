@@ -1,0 +1,16 @@
+# Operator/router image: a single prebuilt static Go binary on distroless.
+#
+# This Dockerfile does NOT compile — it COPIES a binary produced elsewhere (the
+# GitHub release, or `make build-<component>` locally) into a minimal base. The same
+# shape is used for the operator and the router (both are static amd64 binaries from
+# the controlplane module), so one Dockerfile with a BIN arg serves both.
+#
+# Build context = the directory containing the prebuilt binary. Example:
+#   docker build -f build/docker/Dockerfile.operator --build-arg BIN=operator dist/operator
+FROM gcr.io/distroless/static:nonroot
+ARG BIN=manager
+WORKDIR /
+# The binary is expected at the root of the build context, named by $BIN.
+COPY ${BIN} /manager
+USER 65532:65532
+ENTRYPOINT ["/manager"]

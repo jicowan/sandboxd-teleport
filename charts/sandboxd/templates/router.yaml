@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandboxd-router
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: sandboxd-router
+    {{- include "sandboxd.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.router.replicas }}
+  selector:
+    matchLabels: { app.kubernetes.io/name: sandboxd-router }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: sandboxd-router }
+    spec:
+      {{- if .Values.waitForDependencies.enabled }}
+      initContainers:
+        {{- include "sandboxd.waitFor" (dict "name" "wait-for-deps" "image" .Values.waitForDependencies.image "deps" (list "valkey:6379" "sandboxd-operator:8082")) | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: router
+          image: {{ include "sandboxd.routerImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --listen=:8080
+            - --kv-addr=valkey:6379
+            {{- if .Values.mtls.enabled }}
+            # mTLS: talk to the operator over https + authorize its SPIFFE ID.
+            - --resume-url=https://sandboxd-operator:8082/resume
+            - --mtls
+            - --spiffe-operator-id={{ .Values.mtls.operatorID }}
+            {{- else }}
+            - --resume-url=http://sandboxd-operator:8082/resume
+            {{- end }}
+            - --worker-port=8090
+            - --resume-deadline-seconds={{ .Values.controlPlane.resumeDeadlineSeconds }}
+          {{- if .Values.mtls.enabled }}
+          env:
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: unix://{{ .Values.mtls.spiffeSocket }}
+          {{- end }}
+          ports: [{ containerPort: 8080, name: http }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources: {{- toYaml .Values.router.resources | nindent 12 }}
+          {{- if .Values.mtls.enabled }}
+          volumeMounts:
+            - name: spiffe-workload-api
+              mountPath: {{ dir .Values.mtls.spiffeSocket }}
+              readOnly: true
+          {{- end }}
+      {{- if .Values.mtls.enabled }}
+      volumes:
+        - name: spiffe-workload-api
+          csi:
+            driver: {{ .Values.mtls.csiDriver }}
+            readOnly: true
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandboxd-router
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "sandboxd.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.router.service.type }}
+  selector: { app.kubernetes.io/name: sandboxd-router }
+  ports:
+    - { port: {{ .Values.router.service.port }}, targetPort: 8080, name: http }

@@ -1,0 +1,147 @@
+# ============================================================================
+# sandboxd-frontdoor — values
+#
+# The front door has three components, each independently toggleable:
+#   broker         — resolves per-user sessions, proxies MCP to the router
+#   agentgateway   — edge JWT auth + per-app routing + tool allowlist
+#   keycloak       — OPTIONAL realm import (BYO Keycloak by default)
+#
+# A SINGLE oidc block below feeds the broker env, the agentgateway route
+# policies, AND the (optional) Keycloak realm — so issuer/audience/azp/group
+# can never drift between the three (a top failure mode of the raw manifests).
+#
+# Dependency ordering is enforced with initContainers (TCP/HTTP reachability):
+#   broker        waits for the router Service (control-plane chart) and, if
+#                 bundled, Keycloak's OIDC discovery endpoint (JWKS serving).
+#   agentgateway  waits for the broker Service.
+# Plus `--wait` on `helm install` blocks until Deployments are Ready.
+# ============================================================================
+
+# ---- OIDC (shared by broker + agentgateway + realm) ------------------------
+# These MUST agree across all three components. The defaults are safe
+# placeholders that REJECT every real token — set them for your environment.
+oidc:
+  # Realm issuer URL. For a BYO Keycloak: https://<host>/realms/<realm>.
+  # When keycloak.deploy=true this is derived from keycloak.* if left empty.
+  issuer: "https://keycloak.example.com/realms/sandbox"
+  # JWKS URL. Defaults to <issuer>/protocol/openid-connect/certs when empty.
+  jwksUrl: ""
+  audience: "sandbox-router"        # aud the token must carry (AIO_EXPECTED_AUDIENCE)
+  azp: "aio-sandbox-client"         # authorized party / client_id (AIO_GATEWAY_AZP)
+  requiredGroup: "sandbox-users"    # baseline group in the `groups` claim
+  scopes: [openid, sandbox]
+
+# ---- Public hostname (agentgateway ingress + resourceMetadata) -------------
+# The externally reachable host clients hit, e.g. agentgateway.example.com.
+# Used for the ALB Ingress rule host AND each route's resourceMetadata.resource.
+publicHost: "agentgateway.example.com"
+
+# ---- Cross-chart wiring: the sandboxd control plane ------------------------
+# The broker forwards MCP to the router installed by the `sandboxd` chart.
+controlPlane:
+  # Namespace the sandboxd control-plane chart was installed into.
+  namespace: "sandboxd-controlplane-system"
+  # Router Service name + port in that namespace.
+  routerService: "sandboxd-router"
+  routerPort: 8080
+
+# ---- Image registry (shared default; per-component override below) ---------
+image:
+  registry: ""                      # e.g. <acct>.dkr.ecr.<region>.amazonaws.com
+  pullPolicy: IfNotPresent
+
+# ---- Apps: the workloads exposed through the front door --------------------
+# Each app becomes (a) a broker registry entry (app-id -> appTemplate/pool/group)
+# and (b) an agentgateway route pair (well-known + data path) that injects
+# X-Sandbox-App and applies the tool allowlist. Keep this list in sync with the
+# AppTemplates/WarmPools created by the control-plane chart or your own CRs.
+defaultApp: "aio"
+apps:
+  - id: aio
+    appTemplate: aio-app
+    pool: aio-generic-pool
+    group: sandbox-users
+    # agentgateway tool-authorization rules (CEL). Rules are OR'd; a request is
+    # allowed if any matches. Omit/empty => allow all authenticated users.
+    authzRules:
+      - '"sandbox-power" in jwt.groups'
+      - 'mcp.tool.name.startsWith("browser_")'
+      - 'mcp.tool.name == "sandbox_file_operations"'
+      - 'mcp.tool.name == "sandbox_str_replace_editor"'
+      - 'mcp.tool.name == "sandbox_convert_to_markdown"'
+      - 'mcp.tool.name == "sandbox_get_context"'
+      - 'mcp.tool.name == "sandbox_get_packages"'
+      - 'mcp.tool.name == "sandbox_load_skill"'
+  - id: everything
+    appTemplate: everything-app
+    pool: aio-generic-pool
+    group: sandbox-power
+    authzRules:
+      - '"sandbox-power" in jwt.groups'
+
+# ---- Broker ----------------------------------------------------------------
+broker:
+  enabled: true
+  repo: aio-sandbox-broker-sandboxd
+  tag: ""                           # defaults to .Values.image.tag-less "latest"
+  replicas: 2
+  # Protocol version the broker rewrites into the MCP initialize response.
+  mcpProtocolVersion: "2025-11-25"
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 256Mi }
+
+# ---- agentgateway ----------------------------------------------------------
+agentgateway:
+  enabled: true
+  image: cr.agentgateway.dev/agentgateway:v1.3.1
+  replicas: 1
+  port: 3000
+  # Karpenter: don't disrupt the single gateway pod mid-connection.
+  doNotDisrupt: true
+  ndots: "3"
+  service:
+    type: ClusterIP
+    port: 3000
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 256Mi }
+  ingress:
+    enabled: false                  # opt-in: needs AWS Load Balancer Controller
+    className: alb
+    # ACM cert for publicHost. REQUIRED when ingress.enabled=true.
+    certificateArn: ""
+    scheme: internet-facing
+    # Extra ALB annotations merged in (health-check + TLS defaults are set for you).
+    annotations: {}
+
+# ---- Keycloak (BYO by default) ---------------------------------------------
+# deploy=false  => you bring a running Keycloak; only oidc.* is used.
+# deploy=true   => apply a KeycloakRealmImport (needs the Keycloak Operator +
+#                  a Keycloak CR already present; this chart does NOT install
+#                  the Keycloak server itself). Realm mirrors deploy/00-keycloak-realm.yaml.
+keycloak:
+  deploy: false
+  namespace: keycloak
+  # Name of the Keycloak CR the realm import binds to (spec.keycloakCRName).
+  keycloakCRName: keycloak
+  realm: sandbox
+  displayName: AIO Sandbox
+  # OIDC discovery host for the broker's startup wait when deploy=true, e.g.
+  # keycloak.keycloak.svc.cluster.local:8080. Empty => derived from issuer host.
+  discoveryHost: ""
+  # Optional seed user. Leave password empty to omit the user entirely (no
+  # placeholder secret ships in the rendered manifest).
+  seedUser:
+    enabled: false
+    username: demo-user
+    email: demo-user@example.com
+    password: ""                    # set to seed; empty => user omitted
+
+# ---- Dependency-ordering initContainers ------------------------------------
+waitForDependencies:
+  enabled: true
+  image: busybox:1.36

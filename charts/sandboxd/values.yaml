@@ -1,0 +1,128 @@
+# ============================================================================
+# sandboxd Helm values
+# ============================================================================
+
+# --- Images -----------------------------------------------------------------
+# registry defaults to ECR; combined with the per-component repo + tag below.
+# e.g. <registry>/<operator.repo>:<tag>
+image:
+  registry: "111122223333.dkr.ecr.us-west-2.amazonaws.com"  # SET to your ECR
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+operator:
+  repo: sandboxd-operator
+  replicas: 1
+  # Reasonable default limits; tune for pool size.
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { memory: 256Mi }
+  # Leader election (enable for HA / >1 replica).
+  leaderElect: true
+
+router:
+  repo: sandboxd-router
+  replicas: 1
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { memory: 256Mi }
+  service:
+    type: ClusterIP
+    port: 8080
+
+# The WORKER image the operator stamps onto pool worker pods. The operator renders
+# worker Deployments itself (this chart cannot template them); this just sets the
+# operator's --worker-image default. Per-pool override via SandboxTemplate.workerImage.
+worker:
+  repo: sandboxd
+  # ServiceAccount the workers run as (must have the S3 Pod Identity from Terraform).
+  serviceAccount: sandboxd-worker
+  # Namespace pools/sessions/workers live in (operator --resume-namespace).
+  namespace: default
+
+# --- AWS / S3 ---------------------------------------------------------------
+aws:
+  region: us-west-2
+  bucket: ""   # REQUIRED for checkpoint/restore; the Terraform output bucket_name
+
+# --- Startup ordering -------------------------------------------------------
+# initContainers gate each component on its dependencies (TCP reachability) so a pod
+# never starts before what it needs is up: operator waits for valkey; router waits
+# for valkey AND the operator. Runtime-robust (also re-gates after a restart), not
+# just install-time. Disable if you prefer to rely on crash-loop-until-ready.
+waitForDependencies:
+  enabled: true
+  image: busybox:1.36
+
+# --- Valkey (assignment table) ---------------------------------------------
+valkey:
+  image: valkey/valkey:8-alpine
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 256Mi }
+
+# --- Control-plane tunables (operator flags) --------------------------------
+controlPlane:
+  resumeDeadlineSeconds: 90
+  # MUST exceed resumeDeadlineSeconds (see docs — worker-reclaim invariant).
+  workerReclaimGraceSeconds: 300
+  sweepIntervalSeconds: 30
+  maxConcurrentResumes: 0
+
+# --- Session GC (opt-in; deletes data, needs the operator S3 role) ----------
+gc:
+  enabled: false
+  dryRun: true
+  intervalSeconds: 300
+  defaultTtlAfterSuspendSeconds: 0
+  abandonedGraceSeconds: 3600
+
+# --- Per-session IAM credential vendor (opt-in) -----------------------------
+# When enabled, the chart wires the operator to a fleet HMAC Secret so workers can
+# vend per-session AWS creds. Provide the Secret name (key: token) out of band.
+credVendor:
+  enabled: false
+  secretName: sandboxd-cred-token
+
+# --- mTLS / SPIFFE (SECURE BY DEFAULT — requires SPIRE present) -------------
+# When enabled, the operator + router run with --mtls (the operator then also
+# injects mTLS into the worker pods it renders), and the router talks to the
+# operator over https. SPIRE (spiffe/spire chart) + the ClusterSPIFFEIDs are a
+# PREREQUISITE — see docs/sandboxd/security-spiffe-spire.md. Set enabled=false for
+# a plain-HTTP install (getting-started / no SPIRE).
+mtls:
+  enabled: true
+  spiffeSocket: /spiffe-workload-api/spire-agent.sock
+  operatorID: spiffe://sandboxd/operator
+  routerID: spiffe://sandboxd/router
+  workerID: spiffe://sandboxd/worker
+  # SPIRE CSI driver socket dir mounted into operator/router for the Workload API.
+  csiDriver: csi.spiffe.io
+
+# --- Optional cluster extras (opt-in) ---------------------------------------
+# The gvisor RuntimeClass is NOT required by sandboxd (the worker drives runsc as a
+# binary, not via RuntimeClass), but shipped here for convenience if you want it.
+runtimeClass:
+  enabled: false
+  name: gvisor
+  handler: runsc
+
+# A starter generic pool + AppTemplate so `helm install` yields a drivable sandbox.
+# Requires a gVisor node group (label sandbox=gvisor + taint) already present.
+starterPool:
+  enabled: false
+  name: sandboxd-generic
+  replicas: 2
+  minIdle: 1
+  # The starter AppTemplate (a workload to run on the generic pool).
+  app:
+    name: aio-app
+    image: ghcr.io/agent-infra/sandbox:latest
+    port: 8080
+    healthPath: /v1/health
+  # Per-sandbox memory limit → enables agent OOM-protection (see docs). Empty = off.
+  memoryLimit: ""
+  nodeSelector:
+    sandbox: gvisor
+  tolerations:
+    - { key: sandbox, operator: Equal, value: gvisor, effect: NoSchedule }
