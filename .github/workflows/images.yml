@@ -1,0 +1,124 @@
+name: Images
+
+# On-demand container image build + push to ECR. Run it from the Actions tab
+# (or `gh workflow run images.yml -f release=v0.1.0`).
+#
+#   - Go images (operator/router/worker) COPY prebuilt binaries. Provide a
+#     published release tag to download them (recommended, mirrors what the
+#     Release workflow attached); leave `release` empty to build them here.
+#   - The broker (Python) always builds from source (context broker/).
+#
+# Requires the AWS_ECR_PUSH_ROLE_ARN repo secret (an IAM role trusted for GitHub
+# OIDC with ECR push permission). Images are tagged :<sha> and :latest, plus the
+# release tag when provided.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Published release tag to fetch Go binaries from (e.g. v0.1.0). Empty = build binaries here."
+        required: false
+        type: string
+
+permissions: {}
+
+env:
+  RUNSC_VERSION: release-20260622.0
+  RUNSC_ARCH: x86_64
+  AWS_REGION: us-west-2
+  OPERATOR_REPO: sandboxd-operator
+  ROUTER_REPO: sandboxd-router
+  WORKER_REPO: sandboxd
+  BROKER_REPO: aio-sandbox-broker-sandboxd
+
+jobs:
+  images:
+    name: Build + push images to ECR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # OIDC -> assume AWS role
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # ---- Obtain the Go binaries: download from a release, or build here ----
+      - name: Setup Go
+        if: inputs.release == ''
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: checkpoint-restore/controlplane/go.mod
+
+      - name: Build binaries + fetch runsc (no release provided)
+        if: inputs.release == ''
+        run: |
+          set -euo pipefail
+          ( cd checkpoint-restore/controlplane
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o "${GITHUB_WORKSPACE}/dist/operator" ./cmd
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o "${GITHUB_WORKSPACE}/dist/router" ./cmd/router )
+          ( cd checkpoint-restore/sandboxd
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o "${GITHUB_WORKSPACE}/dist/sandboxd" ./ )
+          curl -fsSL -o dist/runsc \
+            "https://storage.googleapis.com/gvisor/releases/release/${RUNSC_VERSION}/${RUNSC_ARCH}/runsc"
+          chmod +x dist/*
+
+      - name: Download binaries from release
+        if: inputs.release != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$RELEASE" --repo "${GITHUB_REPOSITORY}" --dir dist --clobber \
+            --pattern operator --pattern router --pattern sandboxd --pattern runsc
+          chmod +x dist/*
+
+      - name: Lay out binaries for the Dockerfiles
+        run: |
+          set -euo pipefail
+          mkdir -p dist/operator dist/router dist/worker
+          mv dist/operator dist/operator-bin && mv dist/operator-bin dist/operator/manager
+          mv dist/router   dist/router-bin   && mv dist/router-bin   dist/router/manager
+          mv dist/sandboxd dist/worker/sandboxd
+          mv dist/runsc    dist/worker/runsc
+          chmod +x dist/worker/sandboxd dist/worker/runsc dist/operator/manager dist/router/manager
+
+      # ---- Push to ECR --------------------------------------------------------
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # v4.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2.0.1
+
+      - name: Compute tags
+        id: tags
+        run: |
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          if [[ -n "${RELEASE:-}" ]]; then echo "version=${RELEASE}" >> "$GITHUB_OUTPUT"; fi
+        env:
+          RELEASE: ${{ inputs.release }}
+
+      - name: Build + push images
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          SHA: ${{ steps.tags.outputs.sha }}
+          VERSION: ${{ steps.tags.outputs.version }}
+        run: |
+          set -euo pipefail
+          push() { # $1 repo  $2 dockerfile  $3 context  $4.. build-args
+            local repo="$1" df="$2" ctx="$3"; shift 3
+            local tags=("-t" "$REGISTRY/$repo:$SHA" "-t" "$REGISTRY/$repo:latest")
+            [[ -n "${VERSION:-}" ]] && tags+=("-t" "$REGISTRY/$repo:$VERSION")
+            docker build --platform=linux/amd64 -f "$df" "$@" "${tags[@]}" "$ctx"
+            docker push --all-tags "$REGISTRY/$repo"
+          }
+          push "$OPERATOR_REPO" build/docker/Dockerfile.operator dist/operator --build-arg BIN=manager
+          push "$ROUTER_REPO"   build/docker/Dockerfile.operator dist/router   --build-arg BIN=manager
+          push "$WORKER_REPO"   build/docker/Dockerfile.worker   dist/worker
+          push "$BROKER_REPO"   broker/Dockerfile.sandboxd       broker

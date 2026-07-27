@@ -1,12 +1,11 @@
 name: Release
 
-# Build the operator/router/worker binaries and images.
-#   push to main  -> build binaries, push images tagged :<sha> and :latest to ECR
-#   push tag v*   -> also publish a GitHub Release with the binaries + runsc attached,
-#                    and push images tagged :<version>
+# Build the operator/router/worker binaries (+ runsc).
+#   push to main  -> build binaries (CI smoke: they compile)
+#   push tag v*   -> also publish a GitHub Release with the binaries + runsc attached
 #
-# Images COPY the prebuilt binaries built here (build/docker/*), matching the
-# `make images BINSRC=release` model.
+# Container images are NOT built here — build/push them on demand with the
+# "Images" workflow (.github/workflows/images.yml) or locally via `make images`.
 
 on:
   push:
@@ -18,14 +17,8 @@ permissions: {}
 env:
   RUNSC_VERSION: release-20260622.0
   RUNSC_ARCH: x86_64
-  AWS_REGION: us-west-2
-  OPERATOR_REPO: sandboxd-operator
-  ROUTER_REPO: sandboxd-router
-  WORKER_REPO: sandboxd
-  BROKER_REPO: aio-sandbox-broker-sandboxd
 
 jobs:
-  # -------------------------------------------------------------------------
   build-binaries:
     name: Build binaries + runsc
     runs-on: ubuntu-latest
@@ -75,111 +68,3 @@ jobs:
             dist/router
             dist/sandboxd
             dist/runsc
-
-  # -------------------------------------------------------------------------
-  build-images:
-    name: Build + push images to ECR
-    needs: build-binaries
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write   # OIDC -> assume AWS role
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Download binaries
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: binaries
-          path: dist
-
-      - name: Lay out binaries for the Dockerfiles
-        run: |
-          mkdir -p dist/operator dist/router dist/worker
-          mv dist/operator dist/operator-bin && mv dist/operator-bin dist/operator/manager
-          mv dist/router   dist/router-bin   && mv dist/router-bin   dist/router/manager
-          mv dist/sandboxd dist/worker/sandboxd
-          mv dist/runsc    dist/worker/runsc
-          chmod +x dist/worker/sandboxd dist/worker/runsc dist/operator/manager dist/router/manager
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # v4.1.0
-        with:
-          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Login to ECR
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2.0.1
-
-      - name: Compute tags
-        id: tags
-        run: |
-          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build + push images
-        env:
-          REGISTRY: ${{ steps.ecr.outputs.registry }}
-          SHA: ${{ steps.tags.outputs.sha }}
-          VERSION: ${{ steps.tags.outputs.version }}
-        run: |
-          set -euo pipefail
-          push() { # $1 repo  $2 dockerfile  $3 context  $4.. build-args
-            local repo="$1" df="$2" ctx="$3"; shift 3
-            local tags=("-t" "$REGISTRY/$repo:$SHA" "-t" "$REGISTRY/$repo:latest")
-            [[ -n "${VERSION:-}" ]] && tags+=("-t" "$REGISTRY/$repo:$VERSION")
-            docker build --platform=linux/amd64 -f "$df" "$@" "${tags[@]}" "$ctx"
-            docker push --all-tags "$REGISTRY/$repo"
-          }
-          push "$OPERATOR_REPO" build/docker/Dockerfile.operator dist/operator --build-arg BIN=manager
-          push "$ROUTER_REPO"   build/docker/Dockerfile.operator dist/router   --build-arg BIN=manager
-          push "$WORKER_REPO"   build/docker/Dockerfile.worker   dist/worker
-
-  # -------------------------------------------------------------------------
-  # The broker is Python — no prebuilt binary, so this job is independent of
-  # build-binaries and builds the image from source (context broker/).
-  build-broker:
-    name: Build + push broker image to ECR
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write   # OIDC -> assume AWS role
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # v4.1.0
-        with:
-          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Login to ECR
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2.0.1
-
-      - name: Compute tags
-        id: tags
-        run: |
-          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build + push broker image
-        env:
-          REGISTRY: ${{ steps.ecr.outputs.registry }}
-          SHA: ${{ steps.tags.outputs.sha }}
-          VERSION: ${{ steps.tags.outputs.version }}
-        run: |
-          set -euo pipefail
-          tags=("-t" "$REGISTRY/$BROKER_REPO:$SHA" "-t" "$REGISTRY/$BROKER_REPO:latest")
-          [[ -n "${VERSION:-}" ]] && tags+=("-t" "$REGISTRY/$BROKER_REPO:$VERSION")
-          docker build --platform=linux/amd64 -f broker/Dockerfile.sandboxd "${tags[@]}" broker
-          docker push --all-tags "$REGISTRY/$BROKER_REPO"
