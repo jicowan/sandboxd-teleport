@@ -136,6 +136,9 @@ func (c *Checkpointer) checkpointOne(ctx context.Context, e *resumeapi.SessionEn
 			return nil // moved on; the periodic snapshot is stale, drop it silently
 		}
 		cur.SnapshotURI = resp.Snapshot
+		if resp.Digest != "" {
+			cur.Digest = resp.Digest // record for digest-pinned restore (#8)
+		}
 		cur.LastCheckpointAt = c.now().UnixMilli()
 		err = c.kv.PutSessionCAS(ctx, cur)
 		if err == nil {

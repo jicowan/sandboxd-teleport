@@ -30,6 +30,11 @@ type SessionEntry struct {
 	WorkerPodIP  string           `json:"workerPodIP,omitempty"`  // set while Running/Resuming
 	WorkerPod    string           `json:"workerPod,omitempty"`
 	Image        string           `json:"image,omitempty"`        // replayed on restore
+	// Digest is the resolved image manifest digest (sha256:...) recorded when the
+	// session ran/suspended. Replayed on restore so the worker digest-PINS the base
+	// rootfs pull (repo@digest) instead of a registry tag-resolve. Best-effort: empty
+	// => restore falls back to pulling Image (tag), today's behavior.
+	Digest       string           `json:"digest,omitempty"`
 	SnapshotURI  string           `json:"snapshotURI,omitempty"`  // current checkpoint (one lineage)
 	Ports        []sbxapi.PortMap `json:"ports,omitempty"`
 	Health       *sbxapi.Health   `json:"health,omitempty"`       // replayed on restore (probe config)

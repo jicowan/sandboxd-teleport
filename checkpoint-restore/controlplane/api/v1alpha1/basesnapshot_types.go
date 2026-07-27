@@ -58,6 +58,11 @@ type BaseSnapshotStatus struct {
 	// so forks are self-describing.
 	// +optional
 	Image string `json:"image,omitempty"`
+	// Digest is the source session's resolved image manifest digest (sha256:...), so
+	// fork restores digest-PIN the base rootfs pull instead of a registry tag-resolve
+	// (the base's Image tag — e.g. :latest — is exactly what drifts). Best-effort.
+	// +optional
+	Digest string `json:"digest,omitempty"`
 	// +optional
 	RunscVersion string `json:"runscVersion,omitempty"`
 	// +optional

@@ -128,3 +128,31 @@ func firstNonEmpty(vals ...string) string {
 	}
 	return ""
 }
+
+// pullRef builds the image reference to pull for a restore (#8). When digest is a
+// valid "sha256:..." it returns a DIGEST-pinned ref "<repo>@<digest>" (any :tag on
+// image is dropped — a ref can't carry both a tag and a digest for our purposes, and
+// the digest is authoritative). This lets containerd serve the image from its local
+// content store WITHOUT a registry tag-resolve round-trip. Best-effort: an empty or
+// non-sha256 digest, or an image that already carries an @digest, returns image
+// unchanged (fall back to the tag pull — today's behavior).
+func pullRef(image, digest string) string {
+	if image == "" || !strings.HasPrefix(digest, "sha256:") {
+		return image
+	}
+	if strings.Contains(image, "@") {
+		return image // already digest-pinned; leave it
+	}
+	// Strip a :tag if present, WITHOUT touching a registry-host port (host:5000/repo).
+	// A tag can only appear in the LAST path segment (after the last '/').
+	repo := image
+	if slash := strings.LastIndex(image, "/"); slash >= 0 {
+		if colon := strings.LastIndex(image[slash+1:], ":"); colon >= 0 {
+			repo = image[:slash+1+colon]
+		}
+	} else if colon := strings.LastIndex(image, ":"); colon >= 0 {
+		// No '/', e.g. "redis:7" — the ':' is a tag separator.
+		repo = image[:colon]
+	}
+	return repo + "@" + digest
+}

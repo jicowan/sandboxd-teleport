@@ -154,6 +154,11 @@ type SessionStatus struct {
 	// +optional
 	Image string `json:"image,omitempty"`
 
+	// digest is the resolved image manifest digest (sha256:...), mirrored so a restore
+	// after a KV rebuild can still digest-pin the rootfs pull (#8). Best-effort.
+	// +optional
+	Digest string `json:"digest,omitempty"`
+
 	// The following fields make the Session.status a LOSSLESS durable mirror of the
 	// KV assignment entry, so the Valkey cache can be rebuilt after a restart
 	// (PRD-durable-assignment-state) without re-resolving a possibly-changed

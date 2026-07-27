@@ -138,6 +138,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              digest:
+                description: |-
+                  Digest is the source session's resolved image manifest digest (sha256:...), so
+                  fork restores digest-PIN the base rootfs pull instead of a registry tag-resolve
+                  (the base's Image tag — e.g. :latest — is exactly what drifts). Best-effort.
+                type: string
               health:
                 description: Health describes how the worker probes the sandbox and
                   how it restarts it.

@@ -263,6 +263,11 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              digest:
+                description: |-
+                  digest is the resolved image manifest digest (sha256:...), mirrored so a restore
+                  after a KV rebuild can still digest-pin the rootfs pull (#8). Best-effort.
+                type: string
               health:
                 description: health is the readiness/restart config (replayed on restore).
                 properties:

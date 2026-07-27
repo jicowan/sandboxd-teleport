@@ -282,6 +282,7 @@ func (r *ForkSetReconciler) ensureChild(ctx context.Context, fs *corev1alpha1.Fo
 				State:              resumeapi.StateSuspended,
 				Pool:               fs.Spec.Pool,
 				Image:              base.Status.Image,
+				Digest:             base.Status.Digest, // digest-pin the fork's first restore (#8)
 				SnapshotURI:        base.Status.SnapshotURI,
 				Ports:              portsFromCRD(base.Status.Ports),
 				Health:             healthFromCRD(base.Status.Health),

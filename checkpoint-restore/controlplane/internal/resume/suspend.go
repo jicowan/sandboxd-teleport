@@ -231,6 +231,9 @@ func (s *Suspender) suspendOne(ctx context.Context, e *resumeapi.SessionEntry, a
 		if resp.Image != "" {
 			se.Image = resp.Image
 		}
+		if resp.Digest != "" {
+			se.Digest = resp.Digest // record so the restore digest-pins the rootfs pull (#8)
+		}
 		se.WorkerPod = ""
 		se.WorkerPodIP = ""
 	}); err != nil {

@@ -170,6 +170,7 @@ func applyEntryToStatus(e *resumeapi.SessionEntry, st *corev1alpha1.SessionStatu
 	st.WorkerPod = e.WorkerPod
 	st.SnapshotURI = e.SnapshotURI
 	st.Image = e.Image
+	st.Digest = e.Digest
 	st.Pool = e.Pool
 	st.IAMRoleARN = e.IAMRoleARN
 	st.Ports = portsToCRD(e.Ports)
@@ -191,6 +192,7 @@ func statusToEntry(sid string, st *corev1alpha1.SessionStatus) *resumeapi.Sessio
 		WorkerPodIP: st.WorkerPodIP,
 		WorkerPod:   st.WorkerPod,
 		Image:       st.Image,
+		Digest:      st.Digest,
 		SnapshotURI: st.SnapshotURI,
 		IAMRoleARN:  st.IAMRoleARN,
 		Ports:       portsFromCRD(st.Ports),

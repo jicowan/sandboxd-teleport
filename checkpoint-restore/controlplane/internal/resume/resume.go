@@ -379,7 +379,7 @@ func (wf *Workflow) resumeFromSnapshot(ctx context.Context, cur *resumeapi.Sessi
 	}
 	wf.notify.PoolChanged(w.Pool) // idle->busy: refresh pool status
 	ip, err := wf.startAndBind(ctx, cur.SID, w, bindSpec{
-		restore: true, img: cur.Image, ports: cur.Ports, health: cur.Health,
+		restore: true, img: cur.Image, digest: cur.Digest, ports: cur.Ports, health: cur.Health,
 		snapshot: cur.SnapshotURI, roleARN: cur.IAMRoleARN,
 		idleTimeoutSeconds: cur.IdleTimeoutSeconds, checkpointIntervalSeconds: cur.CheckpointIntervalSeconds,
 		seed: cur, // resume() already read this entry; seed the Resuming CAS
@@ -419,6 +419,7 @@ func (wf *Workflow) rollbackToSuspended(ctx context.Context, sid string) {
 type bindSpec struct {
 	restore                   bool
 	img                       string
+	digest                    string // resolved image digest for a digest-pinned restore pull (#8); empty => tag pull
 	cmd, env                  []string
 	ports                     []sbxapi.PortMap
 	health                    *sbxapi.Health
@@ -444,6 +445,9 @@ func (wf *Workflow) startAndBind(ctx context.Context, sid string, w *resumeapi.W
 		e.WorkerPod = w.Pod
 		e.WorkerPodIP = w.PodIP
 		e.Image = b.img
+		if b.digest != "" {
+			e.Digest = b.digest // digest-pin future restores (#8); refreshed from RunResponse below
+		}
 		e.Ports = b.ports
 		if b.health != nil {
 			e.Health = b.health // record so restore-on-connect can replay the probe
@@ -460,17 +464,22 @@ func (wf *Workflow) startAndBind(ctx context.Context, sid string, w *resumeapi.W
 	}
 
 	cl := wf.clientFor(w.PodIP)
+	var runDigest string // resolved image digest to record (cold-start only; #8)
 	if b.restore {
 		if _, err := cl.Restore(ctx, sbxapi.RestoreRequest{
-			SandboxID: sid, Image: b.img, Snapshot: b.snapshot, Ports: b.ports, Health: b.health, IAMRoleARN: b.roleARN,
+			SandboxID: sid, Image: b.img, Digest: b.digest, Snapshot: b.snapshot, Ports: b.ports, Health: b.health, IAMRoleARN: b.roleARN,
 		}); err != nil {
 			return "", fmt.Errorf("worker /restore: %w", err)
 		}
 	} else {
-		if _, err := cl.Run(ctx, sbxapi.RunRequest{
+		resp, err := cl.Run(ctx, sbxapi.RunRequest{
 			SandboxID: sid, Image: b.img, Cmd: b.cmd, Env: b.env, Ports: b.ports, Health: b.health, IAMRoleARN: b.roleARN,
-		}); err != nil {
+		})
+		if err != nil {
 			return "", fmt.Errorf("worker /run: %w", err)
+		}
+		if resp != nil {
+			runDigest = resp.Digest // the worker's resolved manifest digest (#8)
 		}
 	}
 	if err := cl.WaitReady(ctx, sid, wf.opts.PollInterval); err != nil {
@@ -480,6 +489,9 @@ func (wf *Workflow) startAndBind(ctx context.Context, sid string, w *resumeapi.W
 	if err := wf.casSession(ctx, sid, func(e *resumeapi.SessionEntry) {
 		e.State = resumeapi.StateRunning
 		e.WorkerPodIP = w.PodIP
+		if runDigest != "" {
+			e.Digest = runDigest // record the resolved digest so a later teleport digest-pins (#8)
+		}
 	}); err != nil {
 		return "", fmt.Errorf("mark running: %w", err)
 	}

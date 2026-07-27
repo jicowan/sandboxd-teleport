@@ -177,6 +177,7 @@ func (r *BaseSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 type sourceIdentity struct {
 	SnapshotURI  string
 	Image        string
+	Digest       string
 	Ports        []corev1alpha1.PortMap
 	Health       *corev1alpha1.Health
 	IAMRoleARN   string
@@ -195,6 +196,7 @@ func (r *BaseSnapshotReconciler) resolveSource(ctx context.Context, ns, sid stri
 			return sourceIdentity{
 				SnapshotURI: e.SnapshotURI,
 				Image:       e.Image,
+				Digest:      e.Digest,
 				Ports:       portsToCRD(e.Ports),
 				Health:      healthToCRD(e.Health),
 				IAMRoleARN:  e.IAMRoleARN,
@@ -212,6 +214,7 @@ func (r *BaseSnapshotReconciler) resolveSource(ctx context.Context, ns, sid stri
 	return sourceIdentity{
 		SnapshotURI: s.Status.SnapshotURI,
 		Image:       s.Status.Image,
+		Digest:      s.Status.Digest,
 		Ports:       s.Status.Ports,
 		Health:      s.Status.Health,
 		IAMRoleARN:  s.Status.IAMRoleARN,
@@ -220,6 +223,7 @@ func (r *BaseSnapshotReconciler) resolveSource(ctx context.Context, ns, sid stri
 
 func applySourceIdentity(st *corev1alpha1.BaseSnapshotStatus, src sourceIdentity) {
 	st.Image = src.Image
+	st.Digest = src.Digest
 	st.Ports = src.Ports
 	st.Health = src.Health
 	st.IAMRoleARN = src.IAMRoleARN

@@ -40,7 +40,12 @@ type RunResponse struct {
 	SandboxID string    `json:"sandboxId"`
 	Status    string    `json:"status"`
 	Image     string    `json:"image"`
-	Ports     []PortMap `json:"ports,omitempty"`
+	// Digest is the resolved image manifest digest (sha256:...) the worker pulled.
+	// Surfaced so the operator can record it and later digest-PIN the restore pull
+	// (avoids a registry tag-resolve on teleport; see RestoreRequest.Digest). Empty
+	// if unknown. Best-effort — never required.
+	Digest string    `json:"digest,omitempty"`
+	Ports  []PortMap `json:"ports,omitempty"`
 }
 
 // CheckpointRequest is the body of POST /checkpoint.
@@ -62,8 +67,13 @@ type CheckpointResponse struct {
 
 // RestoreRequest is the body of POST /restore.
 type RestoreRequest struct {
-	SandboxID    string    `json:"sandboxId"`
-	Image        string    `json:"image"`
+	SandboxID string `json:"sandboxId"`
+	Image     string `json:"image"`
+	// Digest, when set (sha256:...), lets the worker pull the base rootfs by DIGEST
+	// (repo@digest) instead of resolving Image's tag against the registry — a
+	// tag-resolve does a registry round-trip EVEN when the layers are cached, which
+	// intermittently times out. Best-effort: empty => fall back to pulling Image (tag).
+	Digest       string    `json:"digest,omitempty"`
 	Snapshot     string    `json:"snapshot"`
 	RunscVersion string    `json:"runscVersion,omitempty"`
 	Ports        []PortMap `json:"ports,omitempty"`
@@ -91,6 +101,7 @@ type SuspendResponse struct {
 	SandboxID string `json:"sandboxId"`
 	Snapshot  string `json:"snapshot"` // S3 prefix of the checkpoint
 	Image     string `json:"image"`
+	Digest    string `json:"digest,omitempty"` // resolved image digest, for digest-pinned restore (see RestoreRequest.Digest)
 	Suspended bool   `json:"suspended"`
 }
 

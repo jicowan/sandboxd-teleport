@@ -328,7 +328,8 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 		Ports: req.Ports, Health: req.Health, RunscVer: s.runsc.version(),
 		IAMRoleARN: req.IAMRoleARN,
 		CreatedAt:  time.Now().UTC().Format(time.RFC3339)})
-	writeJSON(w, 200, map[string]any{"sandboxId": id, "status": st, "image": req.Image, "ports": req.Ports})
+	writeJSON(w, 200, map[string]any{"sandboxId": id, "status": st, "image": req.Image,
+		"digest": ic.Digest, "ports": req.Ports})
 }
 
 // POST /checkpoint {sandboxId, leaveRunning?}
@@ -408,6 +409,7 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SandboxID    string    `json:"sandboxId"`
 		Image        string    `json:"image"`
+		Digest       string    `json:"digest"` // optional: digest-pin the rootfs pull (#8)
 		Snapshot     string    `json:"snapshot"`
 		RunscVersion string    `json:"runscVersion"`
 		Ports        []portMap `json:"ports"`
@@ -440,11 +442,16 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lg := reqLogger(r, "restore", id)
-	lg("START from snapshot=%s image=%s", req.Snapshot, req.Image)
+	// Digest-pin the rootfs pull when a digest is supplied (#8): pulling repo@digest
+	// lets containerd serve from the local content store without a registry tag-
+	// resolve (which does a round-trip even on a cache hit and intermittently times
+	// out). Best-effort: no/invalid digest => pull req.Image (tag), today's behavior.
+	pullImage := pullRef(req.Image, req.Digest)
+	lg("START from snapshot=%s image=%s", req.Snapshot, pullImage)
 	bundle := filepath.Join(s.work, "bundles", id)
 	rootfs := filepath.Join(bundle, "rootfs")
 	tp := time.Now()
-	ic, err := prepareRootfsContainerd(req.Image, rootfs, snapshotKey(id))
+	ic, err := prepareRootfsContainerd(pullImage, rootfs, snapshotKey(id))
 	if err != nil {
 		lg("pull FAILED: %v", err)
 		s.cleanupArtifacts(id)
@@ -606,7 +613,7 @@ func (s *server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 	metrics.inc("suspends")
 	lg("SUSPENDED: snapshot=%s, worker freed", prefix)
 	writeJSON(w, 200, map[string]any{"sandboxId": req.SandboxID, "snapshot": prefix,
-		"image": sb.Image, "suspended": true})
+		"image": sb.Image, "digest": sb.Digest, "suspended": true})
 }
 
 // POST /reset {sandboxId} — free the worker WITHOUT checkpointing (discard state).

@@ -142,7 +142,7 @@ sandbox so its AWS SDK gets per-session temporary credentials for the role.
 **Response `200`**
 
 ```json
-{ "sandboxId": "sess-…", "status": "running", "image": "…", "ports": [ … ] }
+{ "sandboxId": "sess-…", "status": "running", "image": "…", "digest": "sha256:…", "ports": [ … ] }
 ```
 
 **Errors:** `400` image required / bad ports; `409` sandbox already exists;
@@ -197,6 +197,7 @@ and restores in one step — there is no separate `create`.
 {
   "sandboxId": "sess-…",                 // optional; generated if empty
   "image": "ghcr.io/agent-infra/sandbox:latest",  // required (base rootfs)
+  "digest": "sha256:…",                  // optional; digest-pin the rootfs pull
   "snapshot": "sandboxes/sess-…/snap-…", // required (S3 prefix)
   "runscVersion": "release-20260622.0",  // optional; 409 on mismatch
   "ports": [{ "container": 8080, "host": 8080 }],
@@ -204,6 +205,17 @@ and restores in one step — there is no separate `create`.
   "iamRoleArn": "arn:aws:iam::…:role/…"  // optional; re-establish per-session AWS creds after teleport
 }
 ```
+
+`digest`, when set, makes the worker pull the base rootfs **by digest**
+(`<repo>@<digest>`, tag stripped) instead of resolving `image`'s tag against the
+registry. A tag pull does a registry manifest round-trip **even when the layers are
+already cached** — which adds latency and intermittently times out against dual-stack
+registries. Digest‑pinning serves the image from the node's local content store with
+no registry contact. **Best‑effort:** an empty or non‑`sha256:` digest falls back to
+pulling `image` (the tag) — today's behavior. The operator records the resolved digest
+(returned by `/run`, `/checkpoint`, `/suspend`) in the session's KV entry and replays
+it here on teleport. Measured: a cached‑image restore's rootfs step dropped from ~25s
+(tag) to ~5–10s (digest) under a slow registry.
 
 `iamRoleArn` re-registers the session's role with the new worker's credential
 vendor on teleport (the AWS env already travels baked into the checkpoint; the
@@ -240,7 +252,7 @@ S3 and the worker becomes reusable.
 **Response `200`**
 
 ```json
-{ "sandboxId": "sess-…", "snapshot": "sandboxes/sess-…/snap-…", "image": "…", "suspended": true }
+{ "sandboxId": "sess-…", "snapshot": "sandboxes/sess-…/snap-…", "image": "…", "digest": "sha256:…", "suspended": true }
 ```
 
 **Errors:** `400` bad id; `404` unknown sandbox; `503` S3 not configured;

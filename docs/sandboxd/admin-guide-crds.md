@@ -293,6 +293,7 @@ mirror so a rebuild needs no template re‑resolution.
 | `workerPodIP` | string | — | Set while Running/Resuming. |
 | `snapshotURI` | string | — | Current checkpoint location (once one exists). |
 | `image` | string | — | Resolved image (recorded for restore identity). |
+| `digest` | string | — | Resolved image manifest digest (`sha256:…`), mirrored so a restore digest‑pins the rootfs pull (skips the registry tag‑resolve) — even after a KV rebuild. Best‑effort; empty ⇒ tag pull. |
 | `ports` | []PortMap | — | Exposed ports (replayed on restore). |
 | `health` | Health | — | Readiness/restart config (replayed on restore). |
 | `iamRoleArn` | string | — | Session's assumable AWS role (replayed on restore). |
@@ -476,7 +477,7 @@ subresource. Printer columns: `Ready`, `Refs`, `Pinned`, `Phase`.
 | Field | Type | Meaning |
 |-------|------|---------|
 | `snapshotURI` | string | The fork‑stable `bases/<name>/…` prefix the base was copied to. |
-| `image` / `runscVersion` / `ports` / `health` / `iamRoleArn` | — | Restore identity captured from the source at promote time (forks are self‑describing). |
+| `image` / `digest` / `runscVersion` / `ports` / `health` / `iamRoleArn` | — | Restore identity captured from the source at promote time (forks are self‑describing). `digest` (`sha256:…`) is seeded into each fork child so its first restore digest‑pins the base rootfs pull (skips the registry tag‑resolve); best‑effort. |
 | `refCount` | int32 | Holds keeping the base alive: forks not yet past their first restore, plus explicit pins. Drops as forks materialize. |
 | `ready` | bool | True once copy‑on‑promote completes (base is forkable). |
 | `phase` | string | `Pending` \| `Ready` \| `Reclaimed` \| `Failed`. |
