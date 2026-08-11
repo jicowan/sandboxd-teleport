@@ -1,0 +1,4 @@
+# Packer build outputs / plugin cache — not source.
+manifest.json
+crash.log
+*.log

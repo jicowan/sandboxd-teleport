@@ -184,6 +184,22 @@ infra-destroy: ## terraform destroy (tears down S3/IAM/Pod Identity — NOT the 
 		-var="region=$(AWS_REGION)" $(if $(CLUSTER_NAME),-var="cluster_name=$(CLUSTER_NAME)")
 
 # ============================================================================
+# AMI (Packer) — build the KVM-enabled node image for microVM sandboxes
+# ============================================================================
+PACKER_DIR    := packer
+K8S_VERSION   ?= 1.31
+
+.PHONY: ami-microvm ami-microvm-validate
+ami-microvm: ## Build the KVM-enabled microVM node AMI (Packer; run result on *.metal)
+	cd $(PACKER_DIR) && packer init microvm-node.pkr.hcl && \
+		packer build -var region=$(AWS_REGION) -var k8s_version=$(K8S_VERSION) microvm-node.pkr.hcl
+
+ami-microvm-validate: ## Validate + fmt-check the Packer template (no build)
+	cd $(PACKER_DIR) && packer init microvm-node.pkr.hcl && \
+		packer fmt -check -diff microvm-node.pkr.hcl && \
+		packer validate -var region=$(AWS_REGION) -var k8s_version=$(K8S_VERSION) microvm-node.pkr.hcl
+
+# ============================================================================
 # Install (Helm) — onto an existing cluster
 # ============================================================================
 .PHONY: install upgrade uninstall lint template
