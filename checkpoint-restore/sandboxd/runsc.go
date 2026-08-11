@@ -417,6 +417,21 @@ func (r *runscDriver) delete(id string) error {
 // cached (the binary is immutable for the process lifetime).
 func (r *runscDriver) version() string { return r.ver }
 
+// runtimeName identifies this engine family for the cross-runtime restore guard.
+func (r *runscDriver) runtimeName() string { return "gvisor" }
+
+// networkMode reports the runsc --network mode ("host"|"sandbox"|"none"); only
+// "sandbox" (netstack) supports the checkpointable veth/interior-netns data path.
+func (r *runscDriver) networkMode() string { return r.network }
+
+// streamLogsToStdout / recentLogs satisfy the runtimeDriver interface with the
+// gVisor-specific implementations (sentry/gofer debug logs).
+func (r *runscDriver) streamLogsToStdout()         { r.tailToStdout() }
+func (r *runscDriver) recentLogs(max int64) string { return r.tailGvisorLogs(max) }
+
+// runscDriver satisfies runtimeDriver.
+var _ runtimeDriver = (*runscDriver)(nil)
+
 // resolveVersion execs `runsc --version` once. On error it logs and returns "" —
 // the caller (newRunsc) warns that the version-guard is disabled rather than
 // silently persisting an empty version.

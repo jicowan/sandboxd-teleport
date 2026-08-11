@@ -52,7 +52,7 @@ func (s *server) supervise(interval time.Duration) {
 }
 
 func (s *server) checkOne(sb *sandbox) {
-	st, err := s.runsc.state(sb.ID)
+	st, err := s.rt.state(sb.ID)
 	hs := s.healthState(sb.ID)
 
 	// Liveness: container gone/stopped unexpectedly.
@@ -170,7 +170,7 @@ func (s *server) restartSandbox(sb *sandbox) {
 	metrics.inc("restarts")
 
 	// clear the dead runsc state first
-	s.runsc.delete(sb.ID)
+	s.rt.delete(sb.ID)
 	teardownSandboxNet()
 
 	// rebuild network if the sandbox had ports
@@ -193,11 +193,11 @@ func (s *server) restartSandbox(sb *sandbox) {
 		}
 		// original spec is in the downloaded checkpoint dir
 		s.moveSpecFromImg(sb)
-		if err := s.runsc.restore(sb.ID, sb.Bundle, imgDir); err != nil {
+		if err := s.rt.restore(sb.ID, sb.Bundle, imgDir); err != nil {
 			metrics.inc("restart_failures")
 		}
 	case "cold":
-		if err := s.runsc.createStart(sb.ID, sb.Bundle); err != nil {
+		if err := s.rt.createStart(sb.ID, sb.Bundle); err != nil {
 			metrics.inc("restart_failures")
 		}
 	}
