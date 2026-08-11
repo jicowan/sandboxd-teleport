@@ -105,6 +105,11 @@ type SuspendResponse struct {
 	Snapshot  string `json:"snapshot"` // S3 prefix of the checkpoint
 	Image     string `json:"image"`
 	Suspended bool   `json:"suspended"`
+	// Runtime + EngineVersion identify the engine that produced this checkpoint, so
+	// the control plane can record them on the session and refuse a cross-runtime /
+	// incompatible-version restore later. See PRD-microvm-runtime-cloud-hypervisor.md §5.2.
+	Runtime       string `json:"runtime,omitempty"`
+	EngineVersion string `json:"engineVersion,omitempty"`
 }
 
 // StatusResponse is the body of GET /status?sandboxId=.

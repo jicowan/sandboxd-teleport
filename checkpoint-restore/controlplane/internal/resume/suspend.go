@@ -228,6 +228,8 @@ func (s *Suspender) suspendOne(ctx context.Context, e *resumeapi.SessionEntry, a
 	if err := s.casSession(ctx, e.SID, func(se *resumeapi.SessionEntry) {
 		se.State = resumeapi.StateSuspended
 		se.SnapshotURI = resp.Snapshot
+		se.Runtime = resp.Runtime             // record engine so restore can refuse a cross-runtime resume
+		se.EngineVersion = resp.EngineVersion // and an incompatible engine version
 		if resp.Image != "" {
 			se.Image = resp.Image
 		}
@@ -279,6 +281,8 @@ func (s *Suspender) SuspendForTerminate(ctx context.Context, sid, workerPod, wor
 		if cerr := s.casSession(ctx, sid, func(se *resumeapi.SessionEntry) {
 			se.State = resumeapi.StateSuspended
 			se.SnapshotURI = resp.Snapshot
+			se.Runtime = resp.Runtime
+			se.EngineVersion = resp.EngineVersion
 			if resp.Image != "" {
 				se.Image = resp.Image
 			}

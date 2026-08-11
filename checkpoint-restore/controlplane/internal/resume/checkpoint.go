@@ -136,6 +136,8 @@ func (c *Checkpointer) checkpointOne(ctx context.Context, e *resumeapi.SessionEn
 			return nil // moved on; the periodic snapshot is stale, drop it silently
 		}
 		cur.SnapshotURI = resp.Snapshot
+		cur.Runtime = resp.Runtime             // engine identity travels with the snapshot lineage
+		cur.EngineVersion = resp.EngineVersion // (restore guard uses it)
 		cur.LastCheckpointAt = c.now().UnixMilli()
 		err = c.kv.PutSessionCAS(ctx, cur)
 		if err == nil {

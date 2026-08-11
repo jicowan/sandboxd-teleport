@@ -628,7 +628,8 @@ func (s *server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 	metrics.inc("suspends")
 	lg("SUSPENDED: snapshot=%s, worker freed", prefix)
 	writeJSON(w, 200, map[string]any{"sandboxId": req.SandboxID, "snapshot": prefix,
-		"image": sb.Image, "suspended": true})
+		"image": sb.Image, "suspended": true,
+		"runtime": s.rt.runtimeName(), "engineVersion": s.rt.version()})
 }
 
 // POST /reset {sandboxId} — free the worker WITHOUT checkpointing (discard state).

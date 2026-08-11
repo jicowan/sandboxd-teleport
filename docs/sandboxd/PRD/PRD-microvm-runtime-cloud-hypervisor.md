@@ -307,30 +307,61 @@ The operator then, in `desiredDeployment` (`warmpool_controller.go:351-427`), ap
 
 ### 5.4 The Cloud Hypervisor driver (`chDriver`) — port from substrate
 
-New files under `checkpoint-restore/sandboxd/` (or a `runtime/microvm` subpackage):
-- `ch_driver.go` — implements `RuntimeDriver`; owns a `running map[id]*vm`.
-- `ch/` — CH REST client over the per-sandbox api-socket (`vm.create`, `vm.boot`,
-  `vm.pause`, `vm.snapshot`, `vm.restore`, `vm.resume`, plus `RestoreWithNetFDs` fd-passing
-  and `MergeDeltaIntoBase` for the sparse-snapshot merge). **Port from
-  `substrate-upstream/internal/ch`.**
-- `kata/` — kata-agent ttrpc client + OCI→kata spec conversion + virtiofsd launch + overlay
-  setup. **Port from `substrate-upstream/internal/kata`** (and its vendored kata-agent
-  protos, with provenance preserved per substrate's `PROVENANCE.md`).
-- `microvm_net.go` — the tap/TC-mirror/fd-passing networking (§4.1), sibling to
-  `network.go`.
+> **Source of truth (verified first-hand 2026-08-11 against `substrate-upstream`).**
+> Correcting the earlier (subagent-summarized) paths: substrate's CH + kata packages are
+> NOT top-level `internal/` — they live under the command tree at
+> **`cmd/ateom-microvm/internal/ch/`** and **`cmd/ateom-microvm/internal/kata/`**; the
+> vendored kata protos are at **`cmd/ateom-microvm/internal/third_party/kata/agentpb/`**
+> (kata tag **3.31.0**, Apache-2.0, message types only — no ttrpc service stub; the driver
+> calls agent RPCs by string method name). The ateom gRPC contract is at
+> `internal/proto/ateompb/ateom.proto`. Module `github.com/agent-substrate/substrate`, Go 1.26.
 
-Method mapping:
-- `CreateStart` → prepare overlay rootfs (reuse `containerd.go`) → launch virtiofsd on it →
-  boot CH with virtio-fs + fd-passed tap → drive kata-agent `CreateSandbox`/`CreateContainer`
-  → configure guest net.
+New files under `checkpoint-restore/sandboxd/` (or a `runtime/microvm` subpackage):
+- `ch_driver.go` — implements `RuntimeDriver`; owns a `running map[id]*vm` and serializes
+  ops under a mutex (substrate's `AteomService.lock`).
+- `ch/` — CH REST client over the per-sandbox api-socket. **Port from
+  `cmd/ateom-microvm/internal/ch/`** (`ch.go`, `api.go`, `createvm.go`, `restorefds.go`,
+  `merge.go`). CRITICAL detail: CH is driven **two ways over the same unix api-socket** —
+  (a) stdlib `net/http` with a unix-dialing `Transport` + `DisableKeepAlives` for normal
+  calls (`vm.create`/`vm.boot`/`vm.pause`/`vm.snapshot`/`vm.resume`/`vm.info`), and
+  (b) **raw HTTP/1.1 over `net.DialUnix` + `WriteMsgUnix`/`SCM_RIGHTS`** whenever fds ride
+  along (`vm.add-net` on boot, `vm.restore` on restore) — `net/http` can't attach ancillary
+  data. You need both. `MergeDeltaIntoBase` (merge.go, `//go:build linux`, uses
+  `SEEK_DATA`/`SEEK_HOLE`) reconstitutes a full snapshot after an OnDemand (sparse) restore.
+- `kata/` — kata-agent ttrpc client + OCI→kata spec conversion + virtiofsd launch + overlay
+  setup. **Port from `cmd/ateom-microvm/internal/kata/`** + `cmd/ateom-microvm/internal/
+  third_party/kata/agentpb/`. NO kata shim, NO containerd: the driver dials CH's hybrid-vsock
+  unix socket, does the plaintext `CONNECT 1024`/`OK` handshake itself, then `ttrpc.NewClient`
+  and calls `grpc.AgentService`/`<Method>` by name (containerd/ttrpc v1.2.8). Rootfs =
+  overlay(virtio-fs RO lower from the OCI image + guest **tmpfs** upper) so rootfs writes live
+  in guest RAM and are captured by the memory snapshot.
+- `microvm_net.go` — the veth-into-interior-netns + **tap/TC-mirror + fd extraction**
+  networking (§4.1). **Port from `cmd/ateom-microvm/net.go`.** Uses `google/nftables` (not
+  shelling `iptables`) and **fixed MACs** (`hostVethMAC`/`actorGuestMAC`) + constant
+  `169.254.17.0/30` so the guest's frozen ARP/MAC survive restore.
+
+Deps the port pulls in (from substrate go.mod): `containerd/ttrpc`, `google/nftables`,
+`vishvananda/netlink`+`netns`, `opencontainers/runtime-spec`, `pelletier/go-toml/v2`,
+`hashicorp/go-reap`, `golang.org/x/sys/unix`. All microVM files carry `//go:build linux`
+with a `*_unsupported.go` stub, matching substrate.
+
+Method mapping (RunWorkload boot order verified in `run.go:RunWorkload`):
+- `CreateStart` → resolve runtime assets → `setupActorNetwork` (veth into interior netns) →
+  build containers via `ensureKataCompatibleSpec` + reuse sandboxd's `containerd.go` for the
+  overlay rootfs → `StartVirtiofsd` (subprocess, `--migration-mode find-paths`) → `LaunchVMM`
+  (CH subprocess, NOT `CommandContext` — must outlive the RPC) → `CreateVM` → `setupRestoreTap`
+  + `AddNetWithFDs` (SCM_RIGHTS) → `BootVM` → `DialAgent` (hybrid-vsock) → `CreateSandbox` →
+  guest net (`UpdateInterface`/`UpdateRoutes`/`AddARPNeighbors`) → per-container carrier +
+  overlay `CreateContainer`/`StartContainer` → `readyz.WaitAll`.
 - `Checkpoint` → `vm.pause` → `vm.snapshot file://<imageDir>` → (if restored-from-OnDemand)
   `MergeDeltaIntoBase` → (leaveRunning ? `vm.resume` : teardown). The worker's existing
-  `uploadDir(imageDir)` ships it.
-- `Restore` → `LaunchVMM` bare → rewrite socket paths in `config.json` → rebuild RO lower
-  from re-pulled image → rebuild tap + fresh fds → `vm.restore {memory_restore_mode:
-  OnDemand}` + `vm.resume`.
-- `State`/`Delete`/`Version`/`Runtime` → CH VM state query / VMM teardown / CH `--version` /
-  `"microvm"`.
+  `uploadDir(imageDir)` ships it (report the written file list, as substrate's `snapshot_files`).
+- `Restore` → `LaunchVMM` bare → rewrite per-actor socket paths in snapshot `config.json` →
+  reconstruct RO lower from re-pulled image (`ReconstructSharedDirFromImage`) → rebuild tap +
+  fresh fds → `RestoreWithNetFDs {memory_restore_mode: OnDemand, net_fds}` (raw socket) →
+  `vm.resume`. Keep the snapshot dir for the VM's whole lifetime (OnDemand demand-pages from it).
+- `State`/`Delete`/`Version`/`Runtime` → CH `vm.info` state / VMM teardown + `CleanupSandboxState`
+  / CH `--version` / `"microvm"`.
 
 ### 5.5 Touch list (by layer)
 
@@ -359,11 +390,18 @@ Method mapping:
   (default gvisor). Generalize the wire to `{Runtime, EngineVersion}` with back-compat and
   make cross-runtime restore a hard 409. Add the `Runtime` CRD field (accepted, only
   `gvisor` wired). **Ships independently; de-risks everything; zero functional change.**
-- **Phase 1 — CH boot + run (no teleport).** Port `ch/` + `kata/` + overlay/virtiofsd;
-  `chDriver.CreateStart`/`State`/`Delete`. Bring up a microVM pool that runs a workload and
-  serves it (per-runtime pod shape + KVM nodes). Networking via `microvm_net.go`. Validates
-  the isolation + rootfs + net model end-to-end. **No checkpoint/restore yet** — `/suspend`
-  returns 501 for microVM pools.
+- **Phase 1 — CH boot + run (no teleport).**
+  - **1a — activate the restore guard (DONE 2026-08-11).** Thread the snapshot's
+    `{runtime, engineVersion}` end-to-end so the Phase 0 guard is live: worker `/suspend`
+    (and `/checkpoint`) responses carry `runtime`+`engineVersion` (`SuspendResponse`,
+    `CheckpointResponse`); the operator records them on `SessionEntry` + mirrors them into
+    `Session.status` (lossless durable rebuild); resume replays them on `RestoreRequest`.
+    A cross-runtime or version-mismatched resume now hard-409s at the worker. Prerequisite
+    to any microVM pool coexisting with gVisor. (Unit test: `TestResumeReplaysRuntimeGuard`.)
+  - **1b — CH boot + run.** Port `ch/` + `kata/` + `microvm_net.go` + overlay/virtiofsd;
+    `chDriver.CreateStart`/`State`/`Delete`. Bring up a microVM pool that runs a workload and
+    serves it (per-runtime pod shape + KVM nodes). Validates isolation + rootfs + net model
+    end-to-end. **No checkpoint/restore yet** — `/suspend` returns 501 for microVM pools.
 - **Phase 2 — CH teleport.** `chDriver.Checkpoint`/`Restore` (userfaultfd OnDemand,
   delta-merge, fd-passed tap rebuild). Wire `/checkpoint`, `/restore`, `/suspend`,
   checkpoint-on-terminate for microVM pools. This is the substrate-heavy port and the main
