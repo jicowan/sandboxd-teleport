@@ -447,6 +447,18 @@ Method mapping (RunWorkload boot order verified in `run.go:RunWorkload`):
     169.254.17.2, the guest's IP over `ateom0`) and pins the cred-vendor IP on `ateom0`;
     `/run`, `/restore`, and the supervisor skip `setupSandboxNet` when the driver owns its
     network; `createStart`/`restore` gained a `ports []portMap` arg.
+    - **IAM live-validated end to end.** A microVM sandbox with `iam.roleArn` set (on the
+      AppTemplate/SandboxTemplate/Session) received real per-session STS credentials in-guest:
+      the guest read `AWS_CONTAINER_CREDENTIALS_FULL_URI=http://169.254.170.2:8091/creds/<sid>`,
+      reached the worker cred vendor over the `ateom0` pin, and got back temporary keys
+      (an `ASIA…` AccessKeyId + session token, ~1h expiry) for the assumed session role —
+      confirmed by a matching `sts:AssumeRole` event in CloudTrail. This is the same
+      cred-vendor + container-credentials contract the gVisor path uses, now working across
+      the microVM netns boundary. NOTE: the vendor's FIRST (cold) `sts:AssumeRole` can take
+      >8s; a too-tight client timeout can miss it, but the vendor caches the result so a real
+      AWS SDK's retry succeeds immediately after. A portless IAM-only sandbox is a known gap —
+      `setupInboundPorts` currently returns early when `len(ports)==0`, so the cred-vendor pin
+      is skipped; split the pin out of the ports guard so IAM works without exposed ports.
   - **Fork base-id (commit `0fc3370`).** A fork restores under a NEW sandbox id, but the
     guest's virtio-fs find-paths are frozen at the golden id's path
     (`SharedDir(baseID)/<baseID>/rootfs`), so `vm.restore` failed with a vhost-user
