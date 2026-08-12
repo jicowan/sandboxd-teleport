@@ -398,17 +398,28 @@ Method mapping (RunWorkload boot order verified in `run.go:RunWorkload`):
     `Session.status` (lossless durable rebuild); resume replays them on `RestoreRequest`.
     A cross-runtime or version-mismatched resume now hard-409s at the worker. Prerequisite
     to any microVM pool coexisting with gVisor. (Unit test: `TestResumeReplaysRuntimeGuard`.)
-  - **1b — CH boot + run.** Port `ch/` + `kata/` + `microvm_net.go` + overlay/virtiofsd;
-    `chDriver.CreateStart`/`State`/`Delete`. Bring up a microVM pool that runs a workload and
-    serves it (per-runtime pod shape + KVM nodes). Validates isolation + rootfs + net model
-    end-to-end. **No checkpoint/restore yet** — `/suspend` returns 501 for microVM pools.
-- **Phase 2 — CH teleport.** `chDriver.Checkpoint`/`Restore` (userfaultfd OnDemand,
-  delta-merge, fd-passed tap rebuild). Wire `/checkpoint`, `/restore`, `/suspend`,
-  checkpoint-on-terminate for microVM pools. This is the substrate-heavy port and the main
-  risk; it's the payoff (teleport parity with gVisor).
-- **Phase 3 — forkset + hardening.** microVM forkset fan-out from one base snapshot (CoW +
-  VMGenID reseed for entropy/identity §4.5); clock-fixup on long-suspended resume; density
-  and cold-start tuning; observability parity (OOM/exit visibility like the gVisor path).
+  - **1b — CH boot + run (DONE 2026-08-12).** Ported `ch/` + `kata/` + `microvm_net.go` +
+    overlay/virtiofsd; `chDriver.createStart`/`state`/`delete`. A microVM pool boots a
+    workload and serves it (per-runtime pod shape + nested-virt KVM nodes). Validated
+    isolation + rootfs + net model end-to-end live (redis in a CH microVM via the driver).
+    Key fix: retry the kata-agent vsock CONNECT until the guest is up (CH creates the socket
+    file at vm.create, long before the agent listens). Commits `b83aaaf`, `43a850b`.
+- **Phase 2 — CH teleport (DONE 2026-08-12).** `chDriver.checkpoint`/`restore` (eager Copy
+  restore on CH v53, which prefaults OnDemand; delta-merge path retained for a future
+  non-prefaulting CH; fd-passed tap rebuild; snapshot socket-path rewrite). Wired through
+  the existing `/checkpoint`, `/restore`, `/suspend` handlers (runtime-neutral contract, no
+  handler changes) + the operator per-runtime pod shape (`/dev/kvm` + `SANDBOXD_RUNTIME`).
+  **Live-proven**: RUN → checkpoint (2GiB snapshot → S3) → reset → restore (same id) →
+  Running in ~11s, guest RAM resumed. Load-bearing fix: **virtiofsd v1.14.0**, sourced
+  separately from upstream — kata-static 4.0.0's bundled v1.13.x has an old vhost-user that
+  HANGS CH's snapshot/restore migration handshake. Commits `e28d21f`, `e7b4f72`.
+- **Phase 3 — forkset + hardening (not started).** microVM forkset fan-out from one base
+  snapshot (CoW + VMGenID reseed for entropy/identity §4.5); clock-fixup on long-suspended
+  resume; density and cold-start tuning; observability parity (OOM/exit visibility like the
+  gVisor path). **Sparse-aware S3 transfer** — the current `uploadDir` streams the whole
+  dense memory-ranges file, so a small working set ships as the full guest RAM (a 154MiB
+  working set uploaded/downloaded as 2GiB), which dominates suspend/restore latency and S3
+  cost — is split into its own PRD: `PRD-sparse-checkpoint-s3-transfer.md` (answers §8 Q5).
 
 ## 7. Firecracker as a later, third driver (explicitly out of scope now)
 
