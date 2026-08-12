@@ -31,6 +31,7 @@ REGISTRY      ?= $(AWS_ACCOUNT).dkr.ecr.$(AWS_REGION).amazonaws.com
 OPERATOR_REPO ?= sandboxd-operator
 ROUTER_REPO   ?= sandboxd-router
 WORKER_REPO   ?= sandboxd
+MICROVM_WORKER_REPO ?= sandboxd-microvm
 BROKER_REPO   ?= aio-sandbox-broker-sandboxd
 
 # Image tag: default to the short git SHA; images are also pushed as :latest.
@@ -43,6 +44,14 @@ RUNSC_VERSION ?= release-20260622.0
 RUNSC_ARCH    ?= x86_64
 RUNSC_DATE     = $(shell echo "$(RUNSC_VERSION)" | sed -E 's/release-([0-9]+).*/\1/')
 RUNSC_URL      = https://storage.googleapis.com/gvisor/releases/release/$(RUNSC_DATE)/$(RUNSC_ARCH)/runsc
+
+# Pinned microVM runtime versions — the CH microVM worker (SANDBOXD_RUNTIME=microvm)
+# bundles cloud-hypervisor + the kata-static guest kernel/rootfs/virtiofsd. Live-
+# validated on a nested-virtualization node (see PRD-microvm-runtime-cloud-hypervisor.md).
+CH_VERSION    ?= v53.0
+KATA_VERSION  ?= 4.0.0
+CH_URL         = https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/$(CH_VERSION)/cloud-hypervisor-static
+KATA_URL       = https://github.com/kata-containers/kata-containers/releases/download/$(KATA_VERSION)/kata-static-$(KATA_VERSION)-amd64.tar.zst
 
 # Binary source for image builds: local (go build here) | release (download from GH).
 BINSRC        ?= local
@@ -133,7 +142,7 @@ ecr-login: ## Log docker in to ECR
 		docker login --username AWS --password-stdin $(REGISTRY)
 
 ecr-repos: ## Ensure the ECR repositories exist (idempotent)
-	@for r in $(OPERATOR_REPO) $(ROUTER_REPO) $(WORKER_REPO) $(BROKER_REPO); do \
+	@for r in $(OPERATOR_REPO) $(ROUTER_REPO) $(WORKER_REPO) $(MICROVM_WORKER_REPO) $(BROKER_REPO); do \
 		aws ecr describe-repositories --region $(AWS_REGION) --repository-names $$r >/dev/null 2>&1 || \
 		aws ecr create-repository --region $(AWS_REGION) --repository-name $$r >/dev/null && echo "ensured ecr repo: $$r"; \
 	done
@@ -158,6 +167,32 @@ image-worker: ## Build + push the worker image (sandboxd + pinned runsc)
 		-t $(REGISTRY)/$(WORKER_REPO):$(TAG) -t $(REGISTRY)/$(WORKER_REPO):latest $(DIST)/worker
 	docker push $(REGISTRY)/$(WORKER_REPO):$(TAG)
 	docker push $(REGISTRY)/$(WORKER_REPO):latest
+
+# ---- microVM worker (SANDBOXD_RUNTIME=microvm) --------------------------------
+.PHONY: fetch-microvm-assets image-worker-microvm
+fetch-microvm-assets: ## Download cloud-hypervisor + kata guest kernel/rootfs/virtiofsd -> dist/microvm-worker/
+	@mkdir -p $(DIST)/microvm-worker
+	@echo "fetching cloud-hypervisor $(CH_VERSION)"
+	curl -fsSL -o $(DIST)/microvm-worker/cloud-hypervisor "$(CH_URL)"
+	@echo "fetching kata-static $(KATA_VERSION) (kernel + rootfs image + virtiofsd)"
+	curl -fsSL -o $(DIST)/microvm-worker/kata.tar.zst "$(KATA_URL)"
+	@rm -rf $(DIST)/microvm-worker/kata && mkdir -p $(DIST)/microvm-worker/kata
+	tar --zstd -xf $(DIST)/microvm-worker/kata.tar.zst -C $(DIST)/microvm-worker/kata
+	@# Resolve the kata symlinks to the real kernel + rootfs image + virtiofsd and
+	@# stage them flat in the build context (Docker COPY doesn't follow symlinks well).
+	cp -L $(DIST)/microvm-worker/kata/opt/kata/share/kata-containers/vmlinux.container $(DIST)/microvm-worker/vmlinux.container
+	cp -L $(DIST)/microvm-worker/kata/opt/kata/share/kata-containers/kata-containers.img $(DIST)/microvm-worker/kata-containers.img
+	cp -L $(DIST)/microvm-worker/kata/opt/kata/libexec/virtiofsd $(DIST)/microvm-worker/virtiofsd
+	@chmod +x $(DIST)/microvm-worker/cloud-hypervisor $(DIST)/microvm-worker/virtiofsd
+	@rm -rf $(DIST)/microvm-worker/kata $(DIST)/microvm-worker/kata.tar.zst
+	@echo "microVM assets staged in $(DIST)/microvm-worker/"
+
+image-worker-microvm: build-worker fetch-microvm-assets ecr-login ecr-repos ## Build + push the microVM worker image (sandboxd + CH + kata kernel/rootfs/virtiofsd)
+	@cp $(DIST)/worker/sandboxd $(DIST)/microvm-worker/sandboxd
+	docker build --platform=$(PLATFORM) -f build/docker/Dockerfile.worker.microvm \
+		-t $(REGISTRY)/$(MICROVM_WORKER_REPO):$(TAG) -t $(REGISTRY)/$(MICROVM_WORKER_REPO):latest $(DIST)/microvm-worker
+	docker push $(REGISTRY)/$(MICROVM_WORKER_REPO):$(TAG)
+	docker push $(REGISTRY)/$(MICROVM_WORKER_REPO):latest
 
 # The broker is Python — no prebuilt binary/release artifact. Built from source
 # in its own context (broker/), so it does NOT depend on _ensure-bins.
