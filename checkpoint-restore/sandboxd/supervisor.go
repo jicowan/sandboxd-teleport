@@ -173,8 +173,10 @@ func (s *server) restartSandbox(sb *sandbox) {
 	s.rt.delete(sb.ID)
 	teardownSandboxNet()
 
-	// rebuild network if the sandbox had ports
-	if len(sb.Ports) > 0 && s.netns {
+	// rebuild network if the sandbox had ports. A driver that builds its own interior
+	// network (microVM) does so inside createStart/restore from sb.Ports; only build
+	// it here for drivers that don't (gVisor). See runtimeDriver.buildsOwnNetwork.
+	if len(sb.Ports) > 0 && s.netns && !s.rt.buildsOwnNetwork() {
 		if err := setupSandboxNet(s.podIP, sb.Ports); err != nil {
 			metrics.inc("restart_failures")
 			return
@@ -193,11 +195,11 @@ func (s *server) restartSandbox(sb *sandbox) {
 		}
 		// original spec is in the downloaded checkpoint dir
 		s.moveSpecFromImg(sb)
-		if err := s.rt.restore(sb.ID, sb.Bundle, imgDir); err != nil {
+		if err := s.rt.restore(sb.ID, sb.Bundle, imgDir, sb.Ports); err != nil {
 			metrics.inc("restart_failures")
 		}
 	case "cold":
-		if err := s.rt.createStart(sb.ID, sb.Bundle); err != nil {
+		if err := s.rt.createStart(sb.ID, sb.Bundle, sb.Ports); err != nil {
 			metrics.inc("restart_failures")
 		}
 	}

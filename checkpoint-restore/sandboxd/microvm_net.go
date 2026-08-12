@@ -113,6 +113,52 @@ func (d *chDriver) setupRestoreTap(ctx context.Context, name string, queuePairs 
 	return fds, nil
 }
 
+// setupInboundPorts wires the same inbound + IAM routing gVisor's setupSandboxNet
+// installs, but over the veth ateomnet already built (ateom0 in the pod netns ->
+// eth0/169.254.17.2 in the interior netns -> TC-mirror -> guest). We deliberately
+// REUSE the gVisor routing model rather than ateomnet's atunnel-oriented rules:
+//
+//   - Inbound: installNft writes the pod-netns DNAT podIP:hostPort ->
+//     169.254.17.2:containerPort (+ masquerade), so the router reaches the guest's
+//     workload port. (ateomnet's own table only masqueraded egress — no inbound.)
+//   - IAM: pin the credential-vendor IP (169.254.170.2) on ateom0, exactly as gVisor
+//     does on its host veth, so a guest request to AWS_CONTAINER_CREDENTIALS_FULL_URI
+//     — routed via its default gateway 169.254.17.1 — is delivered locally to the
+//     vendor. Without this, per-session IAM creds never reach a microVM sandbox.
+//
+// installNft uses its own nft table (sbx_net), distinct from ateomnet's
+// (ateom_actor), so the two coexist; the masquerade is harmlessly duplicated.
+// Called from createStart/restore AFTER SetupActorNetwork (ateom0 must exist).
+func (d *chDriver) setupInboundPorts(ports []portMap) error {
+	if len(ports) == 0 {
+		return nil
+	}
+	podIP := envOr("SANDBOXD_POD_IP", "")
+	if podIP == "" {
+		return fmt.Errorf("setupInboundPorts: SANDBOXD_POD_IP unset")
+	}
+	for i := range ports {
+		if ports[i].Host == 0 {
+			ports[i].Host = ports[i].Container
+		}
+	}
+	// Pin the credential-vendor IP on the gateway veth (ateom0) — the IAM fix.
+	if hostLink, err := netlink.LinkByName(ateomnet.HostVethName); err == nil {
+		if credAddr, perr := netlink.ParseAddr(credVendorIP + "/32"); perr == nil {
+			if err := netlink.AddrReplace(hostLink, credAddr); err != nil {
+				slog.Warn("microvm: pin cred vendor IP on host veth", slog.Any("err", err))
+			}
+		}
+	} else {
+		slog.Warn("microvm: lookup host veth for cred vendor pin", slog.String("link", ateomnet.HostVethName), slog.Any("err", err))
+	}
+	// Inbound DNAT (+ masq) in the pod netns, reusing gVisor's rules.
+	if err := installNft(podIP, ports); err != nil {
+		return fmt.Errorf("setupInboundPorts: install DNAT: %w", err)
+	}
+	return nil
+}
+
 // actorVethMTU reads the MTU of the actor veth (eth0 in the interior netns) so the
 // guest eth0 can be configured with a matching MTU via the agent (UpdateInterface).
 // Defaults to 1500 if the link can't be read.

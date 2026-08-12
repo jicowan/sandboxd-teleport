@@ -307,15 +307,21 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 				req.Ports[i].Host = req.Ports[i].Container
 			}
 		}
-		if err := setupSandboxNet(s.podIP, req.Ports); err != nil {
-			lg("network setup FAILED: %v", err)
-			s.cleanupArtifacts(id)
-			writeErr(w, 500, "network: "+err.Error())
-			return
+		// A driver that builds its OWN interior network (microVM) sets up the veth +
+		// inbound DNAT + cred-vendor routing itself, inside createStart (from the ports
+		// arg). Only build it here (and point the spec at the gVisor netns) for drivers
+		// that don't (gVisor). See runtimeDriver.buildsOwnNetwork.
+		if !s.rt.buildsOwnNetwork() {
+			if err := setupSandboxNet(s.podIP, req.Ports); err != nil {
+				lg("network setup FAILED: %v", err)
+				s.cleanupArtifacts(id)
+				writeErr(w, 500, "network: "+err.Error())
+				return
+			}
+			// DNS (/etc/resolv.conf) was already written into the rootfs by
+			// prepareRootfsContainerd on the correct mount-ns thread; nothing to do here.
+			netnsPath = interiorNetNSPath
 		}
-		// DNS (/etc/resolv.conf) was already written into the rootfs by
-		// prepareRootfsContainerd on the correct mount-ns thread; nothing to do here.
-		netnsPath = interiorNetNSPath
 		lg("network up: %s:%v -> %s", s.podIP, req.Ports, interiorIP)
 	}
 	if err := writeOCISpec(bundle, ic, req.Cmd, req.Env, netnsPath, s.memLimit); err != nil {
@@ -326,7 +332,7 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lg("%s createStart", s.rt.runtimeName())
-	if err := s.rt.createStart(id, bundle); err != nil {
+	if err := s.rt.createStart(id, bundle, req.Ports); err != nil {
 		lg("runtime FAILED: %v", err)
 		s.rt.delete(id) // clear any partial runtime state
 		teardownSandboxNet()
@@ -498,11 +504,15 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 				req.Ports[i].Host = req.Ports[i].Container
 			}
 		}
-		if err := setupSandboxNet(s.podIP, req.Ports); err != nil {
-			lg("network setup FAILED: %v", err)
-			s.cleanupArtifacts(id)
-			writeErr(w, 500, "network: "+err.Error())
-			return
+		// microVM rebuilds its own veth + DNAT + cred routing inside restore (from the
+		// ports arg); gVisor's is built here. See runtimeDriver.buildsOwnNetwork.
+		if !s.rt.buildsOwnNetwork() {
+			if err := setupSandboxNet(s.podIP, req.Ports); err != nil {
+				lg("network setup FAILED: %v", err)
+				s.cleanupArtifacts(id)
+				writeErr(w, 500, "network: "+err.Error())
+				return
+			}
 		}
 		// write resolv.conf into the freshly-rebuilt rootfs (the saved config.json
 		// no longer bind-mounts it; DNS is a direct file in the rootfs).
@@ -536,7 +546,7 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		s.cred.register(id, req.IAMRoleARN)
 	}
 	tr := time.Now()
-	if err := s.rt.restore(id, bundle, imgDir); err != nil {
+	if err := s.rt.restore(id, bundle, imgDir, req.Ports); err != nil {
 		lg("restore FAILED: %v", err)
 		s.rt.delete(id)
 		teardownSandboxNet()

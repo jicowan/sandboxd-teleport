@@ -41,7 +41,7 @@ const bootTimeout = 120 * time.Second
 // createStart boots a microVM for sandbox id from the prepared OCI bundle and
 // starts its single container inside, via the kata-agent. Mirrors substrate's
 // coldBootActor, collapsed to sandboxd's one-container-per-sandbox model.
-func (d *chDriver) createStart(id, bundle string) (retErr error) {
+func (d *chDriver) createStart(id, bundle string, ports []portMap) (retErr error) {
 	if d.interiorNetNS == 0 {
 		return fmt.Errorf("microvm createStart: interior netns unavailable (networking disabled)")
 	}
@@ -80,6 +80,11 @@ func (d *chDriver) createStart(id, bundle string) (retErr error) {
 			ccancel()
 		}
 	}()
+	// Inbound (router->guest DNAT) + IAM (cred-vendor pin) routing over the veth just
+	// built. Retains gVisor's routing model (see setupInboundPorts).
+	if err := d.setupInboundPorts(ports); err != nil {
+		return fmt.Errorf("microvm inbound ports: %w", err)
+	}
 
 	// 3) Guest sizing + agent kernel params from the kata config.
 	memMiB, vcpus, kparams, err := d.guestConfig()
@@ -203,9 +208,14 @@ func (d *chDriver) createStart(id, bundle string) (retErr error) {
 
 	stopOOM := make(chan struct{})
 	d.mu.Lock()
-	d.vms[id] = &chVM{id: id, apiSocket: apiSocket, chCmd: chCmd, vfsdCmd: vfsdCmd, agent: ac, stopOOM: stopOOM}
+	// A cold boot's frozen find-paths base id IS its own id (createStart reconstructs
+	// the RO lower + carrier at cid=id below).
+	d.vms[id] = &chVM{id: id, apiSocket: apiSocket, chCmd: chCmd, vfsdCmd: vfsdCmd, agent: ac, baseID: id, stopOOM: stopOOM}
 	d.mu.Unlock()
 	go d.watchOOM(id, ac, stopOOM) // observability parity: surface guest OOM-kills
+	if d.streamConsole {
+		d.forwardWorkloadLogs(id, ac) // relay WORKLOAD stdout/stderr → kubectl logs (opt-in)
+	}
 	return nil
 }
 

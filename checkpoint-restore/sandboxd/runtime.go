@@ -21,13 +21,28 @@ import (
 // only same-package engines can satisfy it.
 type runtimeDriver interface {
 	// createStart boots a fresh workload from a prepared OCI bundle, detached.
-	createStart(id, bundle string) error
+	// ports are the requested podIP:hostPort -> interior:containerPort mappings; a
+	// driver that builds its OWN interior network (microVM) uses them to install the
+	// inbound DNAT + credential-vendor routing over its veth (see setupInboundPorts).
+	// A driver whose network is built by the handler ahead of the call (gVisor)
+	// ignores them here — they were already applied by setupSandboxNet.
+	createStart(id, bundle string, ports []portMap) error
 	// checkpoint writes an atomic snapshot of the sandbox into imageDir. When
 	// leaveRunning is set the sandbox keeps running (periodic checkpoint); compress
 	// trades restore speed for on-disk/S3 size.
 	checkpoint(id, imageDir string, leaveRunning, compress bool) error
-	// restore establishes AND resumes the sandbox from imageDir in one step.
-	restore(id, bundle, imageDir string) error
+	// restore establishes AND resumes the sandbox from imageDir in one step. ports
+	// carries the same inbound mappings as createStart (re-established on the new
+	// worker so the restored sandbox is reachable at the same podIP:hostPort).
+	restore(id, bundle, imageDir string, ports []portMap) error
+
+	// buildsOwnNetwork reports whether the driver constructs its own interior
+	// network (veth/netns) inside createStart/restore (microVM), rather than relying
+	// on the handler's setupSandboxNet to build it beforehand (gVisor). It gates the
+	// handler: true = skip setupSandboxNet (the driver owns networking, incl. the
+	// inbound DNAT + cred-vendor routing, applied from the ports arg); false = the
+	// handler builds the veth + DNAT before the call, as today.
+	buildsOwnNetwork() bool
 	// state returns the container status ("running"|"stopped"|...).
 	state(id string) (string, error)
 	// delete tears the sandbox down fast and robustly (frees the worker slot).

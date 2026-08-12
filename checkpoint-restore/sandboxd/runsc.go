@@ -329,7 +329,10 @@ func (r *runscDriver) tailGvisorLogs(maxBytes int64) string {
 // `runsc start` runs the container in the FOREGROUND and blocks until it exits —
 // fatal for a long-running workload. `runsc run -detach` does create+start and
 // returns, leaving the sandbox running in the background.
-func (r *runscDriver) createStart(id, bundle string) error {
+// createStart ignores ports: the gVisor network (veth + DNAT) is built by the
+// handler's setupSandboxNet BEFORE this call, so runsc joins the ready interior
+// netns via the spec's netnsPath. (buildsOwnNetwork() returns false.)
+func (r *runscDriver) createStart(id, bundle string, _ []portMap) error {
 	pid := filepath.Join(bundle, id+".pid")
 	log := filepath.Join(bundle, id+".run.log")
 	return r.runDetached(id, log, "run", "-bundle", bundle, "-pid-file", pid, "-detach", id)
@@ -361,12 +364,16 @@ func (r *runscDriver) checkpoint(id, imageDir string, leaveRunning, compress boo
 // boots a DIFFERENT sandbox that waits for `start` — its watchdog logs
 // "Watchdog.Start() not called within 30s" and the container hangs at "created"
 // because the restore never targets it. So: NO separate create; restore -detach.
-func (r *runscDriver) restore(id, bundle, imageDir string) error {
+func (r *runscDriver) restore(id, bundle, imageDir string, _ []portMap) error {
 	pid := filepath.Join(bundle, id+".pid")
 	log := filepath.Join(bundle, id+".restore.log")
 	return r.runDetached(id, log, "restore", "-bundle", bundle, "-image-path", imageDir,
 		"-pid-file", pid, "-detach", id)
 }
+
+// buildsOwnNetwork: gVisor's veth/DNAT is built by the handler's setupSandboxNet
+// before createStart/restore, so the handler owns networking here.
+func (r *runscDriver) buildsOwnNetwork() bool { return false }
 
 // State returns the container status ("running", "stopped", ...).
 func (r *runscDriver) state(id string) (string, error) {

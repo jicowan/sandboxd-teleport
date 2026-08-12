@@ -27,6 +27,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/jicowan/aio-sandbox/sandboxd/ateomnet"
@@ -60,6 +61,14 @@ const (
 	chConfigFile       = "clh-config.json"
 	chStateFile        = "clh-state.json"
 	chMemoryRangesFile = "clh-memory-ranges"
+	// chBaseIDFile records the FROZEN base id — the sandbox id whose paths the guest's
+	// virtio-fs find-paths are pinned to (SharedDir(baseID)/<baseID>/rootfs, frozen at
+	// snapshot time). For a cold-booted sandbox this is its own id; a FORK restored
+	// under a NEW id must reconstruct the RO lower at this frozen path, not the new id,
+	// or virtiofsd find-paths can't reopen the guest's inodes (vm.restore 500). It
+	// propagates across a fork lineage (a fork's own checkpoint keeps the golden base
+	// id). This is the sandboxd analog of substrate's baseIDFile.
+	chBaseIDFile = "clh-baseid"
 )
 
 // checkpointTimeout bounds pause+snapshot+teardown so a wedged VMM can't hang
@@ -150,6 +159,18 @@ func (d *chDriver) checkpoint(id, imageDir string, leaveRunning, compress bool) 
 	}
 	_ = os.RemoveAll(stage)
 
+	// Record the frozen base id so a fork restored under a NEW id reconstructs the RO
+	// lower at the path the guest's find-paths expect (see chBaseIDFile). Falls back
+	// to the sandbox's own id if unknown (e.g. a checkpoint after an operator restart
+	// lost in-memory state — the common cold-boot case where baseID == id anyway).
+	baseID := vm.baseID
+	if baseID == "" {
+		baseID = id
+	}
+	if err := os.WriteFile(filepath.Join(imageDir, chBaseIDFile), []byte(baseID), 0o644); err != nil {
+		return fmt.Errorf("microvm checkpoint: writing base id: %w", err)
+	}
+
 	if leaveRunning {
 		resumeOnErr = false // resume unconditionally below
 		if err := client.Resume(ctx); err != nil {
@@ -169,7 +190,7 @@ func (d *chDriver) checkpoint(id, imageDir string, leaveRunning, compress bool) 
 // fd-backed → fresh net_fds), relaunch CH with --restore, and resume. Guest RAM —
 // process state, the tmpfs rootfs upper (so rootfs writes persist), and the frozen
 // network config — comes back from the memory image.
-func (d *chDriver) restore(id, bundle, imageDir string) (retErr error) {
+func (d *chDriver) restore(id, bundle, imageDir string, ports []portMap) (retErr error) {
 	if d.interiorNetNS == 0 {
 		return fmt.Errorf("microvm restore: interior netns unavailable (networking disabled)")
 	}
@@ -177,6 +198,18 @@ func (d *chDriver) restore(id, bundle, imageDir string) (retErr error) {
 	defer cancel()
 
 	rootfs := filepath.Join(bundle, "rootfs")
+
+	// Read the FROZEN base id (see chBaseIDFile). The guest's virtio-fs find-paths are
+	// pinned to SharedDir(baseID)/<baseID>/rootfs; for a same-id resume baseID == id,
+	// but a FORK restores under a new id and MUST reconstruct the RO lower at the
+	// golden base's path or find-paths can't reopen the guest's inodes. Fall back to
+	// id (a pre-baseid snapshot, or a same-id resume).
+	baseID := id
+	if b, rerr := os.ReadFile(filepath.Join(imageDir, chBaseIDFile)); rerr == nil {
+		if v := strings.TrimSpace(string(b)); v != "" {
+			baseID = v
+		}
+	}
 
 	// The snapshot was staged flat under clh- names; CH's vm.restore wants a dir
 	// whose files are named exactly config.json/state.json/memory-ranges. Rebuild
@@ -212,9 +245,11 @@ func (d *chDriver) restore(id, bundle, imageDir string) (retErr error) {
 		return fmt.Errorf("microvm restore: rewrite socket paths: %w", err)
 	}
 
-	// Host networking: per-sandbox veth into the interior netns (the /restore handler
-	// already set up the pod-side veth+nft for the sandbox ports; this is the
-	// interior actor veth the guest attaches to). Clean up on failure.
+	// Host networking: rebuild the per-sandbox veth into the interior netns (the guest
+	// attaches to it via the tap). The microVM driver owns its networking, so — unlike
+	// gVisor, where the handler's setupSandboxNet runs first — we also (re)install the
+	// inbound DNAT + cred-vendor routing here, on the SAME worker so the restored
+	// sandbox is reachable at the same podIP:hostPort. Clean up on failure.
 	if err := ateomnet.SetupActorNetwork(ctx, ateomnet.NetworkConfig{
 		InteriorNetNS:      d.interiorNetNS,
 		HostVethHWAddr:     hostVethHWAddr,
@@ -229,6 +264,9 @@ func (d *chDriver) restore(id, bundle, imageDir string) (retErr error) {
 			ccancel()
 		}
 	}()
+	if err := d.setupInboundPorts(ports); err != nil {
+		return fmt.Errorf("microvm restore: inbound ports: %w", err)
+	}
 
 	// Clean stale per-sandbox state + create the VM runtime dir for the sockets CH
 	// will reopen (vsock, serial, fs) at the paths rewritten above.
@@ -237,17 +275,20 @@ func (d *chDriver) restore(id, bundle, imageDir string) (retErr error) {
 		return fmt.Errorf("microvm restore: vm dir: %w", err)
 	}
 
-	// Reconstruct the overlay RO lower from the freshly-prepared bundle rootfs and
-	// start the virtiofsd serving it (find-paths re-opens the lower by path; the
-	// writable upper is a guest tmpfs restored from the memory image).
-	if err := kata.ReconstructSharedDirFromImage(ctx, rootfs, id, id); err != nil {
+	// Reconstruct the overlay RO lower at the FROZEN base path (SharedDir(baseID)/
+	// <baseID>/rootfs) — find-paths re-opens the guest's inodes by that exact path, so
+	// a fork under a new id must still lay the lower where the golden guest froze it.
+	// The writable upper is a guest tmpfs restored from the memory image. The virtiofsd
+	// SOCKET stays per-VMDir(id) (matches rewriteSnapshotSocketPaths), but the SHARED
+	// DIR it serves is the base's, so the guest's find-paths resolve.
+	if err := kata.ReconstructSharedDirFromImage(ctx, rootfs, baseID, baseID); err != nil {
 		return fmt.Errorf("microvm restore: stage rootfs: %w", err)
 	}
 	vfsdLog, _ := os.OpenFile(filepath.Join(kata.VMDir(id), "virtiofsd.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	vfsdCmd, err := kata.StartVirtiofsd(ctx, kata.VirtiofsdOptions{
 		Binary:     d.virtiofsd,
 		SocketPath: kata.VirtiofsdSocketPath(id),
-		SharedDir:  kata.SharedDir(id),
+		SharedDir:  kata.SharedDir(baseID),
 		Log:        vfsdLog,
 	})
 	if err != nil {
@@ -360,11 +401,15 @@ func (d *chDriver) restore(id, bundle, imageDir string) (retErr error) {
 	d.vms[id] = &chVM{
 		id: id, apiSocket: apiSocket, chCmd: chCmd, vfsdCmd: vfsdCmd, agent: ac,
 		restoreSourceDir: restoreDir, snapshotSelfContained: selfContained,
+		baseID:  baseID, // propagate the golden base across a fork lineage
 		stopOOM: stopOOM,
 	}
 	d.mu.Unlock()
 	if ac != nil {
 		go d.watchOOM(id, ac, stopOOM) // observability parity: surface guest OOM-kills
+		if d.streamConsole {
+			d.forwardWorkloadLogs(id, ac) // relay restored WORKLOAD stdout/stderr → kubectl logs
+		}
 	}
 	return nil
 }

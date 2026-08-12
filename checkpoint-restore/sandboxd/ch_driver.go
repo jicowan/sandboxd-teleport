@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -63,6 +64,12 @@ type chVM struct {
 	restoreSourceDir      string
 	snapshotSelfContained bool
 
+	// baseID is the FROZEN base id the guest's virtio-fs find-paths are pinned to
+	// (see chBaseIDFile). A cold boot sets it to the sandbox's own id; a restore
+	// carries the base id forward from the snapshot, so a fork's later checkpoint
+	// still records the golden base — the guest never re-pins find-paths on restore.
+	baseID string
+
 	// stopOOM signals the per-VM OOM-watcher goroutine to exit (closed on delete).
 	stopOOM chan struct{}
 }
@@ -75,6 +82,10 @@ type chDriver struct {
 	kernel    string // guest kernel (virtiofs-enabled, e.g. kata vmlinux.container)
 	ver       string // resolved cloud-hypervisor version (recorded in snapshots)
 	network   string // data-path mode; microVM path is "sandbox" (see microvm_net.go)
+
+	// streamConsole relays each VM's serial console to worker stdout (kubectl logs)
+	// when set (SANDBOXD_STREAM_CONSOLE=1, via streamLogsToStdout). Opt-in per pool.
+	streamConsole bool
 
 	// interiorNetNS is the persistent per-worker netns that hosts each sandbox's
 	// veth peer (the actor eth0); the tap that CH's virtio-net attaches to is
@@ -227,14 +238,107 @@ func (d *chDriver) delete(id string) error {
 	return nil
 }
 
+// buildsOwnNetwork: the microVM driver constructs its own veth + interior netns
+// (via ateomnet) inside createStart/restore, and installs the inbound DNAT +
+// credential-vendor routing itself (setupInboundPorts), so the handler must NOT
+// call setupSandboxNet (which would build a conflicting gVisor veth/netns).
+func (d *chDriver) buildsOwnNetwork() bool { return true }
+
 func (d *chDriver) runtimeName() string { return "microvm" }
 func (d *chDriver) version() string     { return d.ver }
 func (d *chDriver) networkMode() string { return d.network }
 
-// streamLogsToStdout / recentLogs: CH/virtiofsd log surfacing lands with the boot
-// path (later slice). No-ops for now so the interface is satisfied.
-func (d *chDriver) streamLogsToStdout()         {}
-func (d *chDriver) recentLogs(max int64) string { return "" }
+// streamLogsToStdout arms per-workload log streaming when SANDBOXD_STREAM_CONSOLE=1
+// (opt-in per pool, like gVisor — the workload output is attacker-controlled and
+// multi-tenant over a worker's lifetime). NOTE the distinction from the VM's serial
+// console (kernel + kata-agent, captured to VMDir/serial.log): what we forward here
+// is the WORKLOAD CONTAINER's own stdout/stderr, pulled from the kata-agent via
+// ReadStdout/ReadStderr for exec id <id>_ovl (see forwardWorkloadLogs) — the actual
+// process output a user expects in `kubectl logs`, not the guest boot console. The
+// forwarder goroutines are started per VM at boot/restore; this only records the flag.
+func (d *chDriver) streamLogsToStdout() { d.streamConsole = true }
+
+// recentLogs returns the tail of the (single) running VM's serial console for the
+// /logs endpoint, up to maxBytes. One sandbox per worker today, so return the first.
+// This is the VM console (a coarse fallback); the live workload stdout/stderr is
+// streamed separately via forwardWorkloadLogs.
+func (d *chDriver) recentLogs(maxBytes int64) string {
+	d.mu.Lock()
+	var id string
+	for k := range d.vms {
+		id = k
+		break
+	}
+	d.mu.Unlock()
+	if id == "" {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(kata.VMDir(id), "serial.log"))
+	if err != nil {
+		return ""
+	}
+	if int64(len(b)) > maxBytes {
+		b = b[int64(len(b))-maxBytes:]
+	}
+	return string(b)
+}
+
+// overlayWorkloadExecID is the container/exec id of the single workload container a
+// microVM sandbox runs (createStart starts it as id+"_ovl"; kata sets ExecId==ContainerId).
+func overlayWorkloadExecID(id string) string { return id + "_ovl" }
+
+// forwardWorkloadLogs relays the workload container's stdout AND stderr to the
+// worker's stdout as prefixed, sanitized, byte-capped lines, by pumping the
+// kata-agent's ReadStdout/ReadStderr for exec id <id>_ovl (via NewStdioReader).
+// Started per VM at boot/restore only when streamConsole is set; each stream's
+// goroutine ends when the agent signals container-exit / the connection closes
+// (StreamReader returns io.EOF), so they never outlive the VM. ac is the open agent
+// client tracked on the chVM.
+func (d *chDriver) forwardWorkloadLogs(id string, ac *kata.AgentClient) {
+	execID := overlayWorkloadExecID(id)
+	for _, stderr := range []bool{false, true} {
+		go d.pumpStream(id, kata.NewStdioReader(context.Background(), ac, execID, execID, stderr), stderr)
+	}
+}
+
+// pumpStream reads a workload stdio stream to EOF, emitting complete sanitized lines
+// to worker stdout under a byte cap (mirrors runscDriver.tailConsoleToStdout).
+func (d *chDriver) pumpStream(id string, r io.Reader, stderr bool) {
+	stream := "stdout"
+	if stderr {
+		stream = "stderr"
+	}
+	prefix := "[sandbox " + id + " " + stream + "] "
+	maxBytes := envInt64("SANDBOXD_STREAM_CONSOLE_MAX_BYTES", 8<<20)
+
+	var relayed int64
+	buf := make([]byte, 0, 4096)
+	rd := make([]byte, 4096)
+	for {
+		n, err := r.Read(rd)
+		if n > 0 {
+			buf = append(buf, rd[:n]...)
+			for {
+				i := bytes.IndexByte(buf, '\n')
+				if i < 0 {
+					break
+				}
+				line := buf[:i]
+				buf = buf[i+1:]
+				clean := sanitizeConsole(line)
+				if relayed+int64(len(clean)) > maxBytes {
+					fmt.Fprintf(os.Stdout, "%s<truncated: exceeded %d bytes>\n", prefix, maxBytes)
+					return
+				}
+				relayed += int64(len(clean))
+				fmt.Fprintf(os.Stdout, "%s%s\n", prefix, clean)
+			}
+		}
+		if err != nil { // io.EOF on container exit / connection close
+			return
+		}
+	}
+}
 
 // chDriver satisfies runtimeDriver.
 var _ runtimeDriver = (*chDriver)(nil)
