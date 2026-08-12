@@ -127,6 +127,33 @@ func DialAgent(ctx context.Context, vsockPath string) (*AgentClient, error) {
 	return &AgentClient{conn: conn, client: ttrpc.NewClient(conn)}, nil
 }
 
+// DialAgentRetry repeatedly attempts DialAgent until the handshake succeeds or
+// the deadline passes. CH creates the hybrid-vsock socket file host-side at
+// vm.create — long before the guest kata-agent listens on the vsock port — so a
+// single CONNECT races the guest boot and gets EOF/refused. Retrying the whole
+// CONNECT (not just os.Stat on the socket) is the only reliable readiness signal:
+// the guest agent takes several seconds to reach kata-containers.target.
+func DialAgentRetry(ctx context.Context, vsockPath string, timeout time.Duration) (*AgentClient, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		attemptCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		ac, err := DialAgent(attemptCtx, vsockPath)
+		cancel()
+		if err == nil {
+			return ac, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("dial agent aborted: %w", ctx.Err())
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("kata-agent not ready after %s: %w", timeout, lastErr)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // Close shuts the ttrpc client and underlying connection.
 func (a *AgentClient) Close() error {
 	err := a.client.Close()

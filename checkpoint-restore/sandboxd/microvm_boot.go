@@ -164,12 +164,16 @@ func (d *chDriver) createStart(id, bundle string) (retErr error) {
 		return fmt.Errorf("microvm vm.boot: %w", err)
 	}
 
-	// 10) Dial the kata-agent over hybrid-vsock (poll until it listens).
+	// 10) Dial the kata-agent over hybrid-vsock. CH creates the socket FILE at
+	//     vm.create (instantly), but the guest agent doesn't listen on the vsock
+	//     port until several seconds into boot (systemd -> kata-containers.target),
+	//     so we must retry the CONNECT handshake, not just wait for the file — a
+	//     single early CONNECT races the boot and gets EOF.
 	vsockPath := kata.VsockSocketPath(id)
 	if !waitForFileMV(vsockPath, 15*time.Second) {
 		return fmt.Errorf("microvm: kata-agent vsock %q did not appear", vsockPath)
 	}
-	ac, err := kata.DialAgent(ctx, vsockPath)
+	ac, err := kata.DialAgentRetry(ctx, vsockPath, 60*time.Second)
 	if err != nil {
 		return fmt.Errorf("microvm dial agent: %w", err)
 	}
