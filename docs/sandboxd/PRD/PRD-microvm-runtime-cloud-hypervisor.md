@@ -413,13 +413,27 @@ Method mapping (RunWorkload boot order verified in `run.go:RunWorkload`):
   Running in ~11s, guest RAM resumed. Load-bearing fix: **virtiofsd v1.14.0**, sourced
   separately from upstream — kata-static 4.0.0's bundled v1.13.x has an old vhost-user that
   HANGS CH's snapshot/restore migration handshake. Commits `e28d21f`, `e7b4f72`.
-- **Phase 3 — forkset + hardening (not started).** microVM forkset fan-out from one base
-  snapshot (CoW + VMGenID reseed for entropy/identity §4.5); clock-fixup on long-suspended
-  resume; density and cold-start tuning; observability parity (OOM/exit visibility like the
-  gVisor path). **Sparse-aware S3 transfer** — the current `uploadDir` streams the whole
+- **Phase 3 — forkset + hardening (mostly DONE 2026-08-12; density tuning deferred).**
+  microVM forkset fan-out needs no new fan-out code: the ForkSet controller is runtime-
+  neutral (it seeds each child Session `Suspended+snapshotURI` and the existing resume path
+  restores it via `chDriver.restore`), so forksets already work for microVM. What Phase 3
+  added is the correctness of N clones from one base snapshot + observability parity, all
+  live-validated (commit `21d3305`):
+  - **Entropy reseed (VMGenID analog).** After restore, `kata-agent ReseedRandomDev` injects
+    fresh per-clone host entropy, so clones restored from one memory image don't share the
+    frozen CRNG state and emit identical randomness (§4.5).
+  - **Clock-fixup.** After restore, `kata-agent SetGuestDateTime` sets the guest wall clock
+    to the host's current time (the guest's clock is frozen at snapshot time).
+  - **Observability parity.** A per-VM background watcher loops on the agent's blocking
+    `GetOOMEvent` and logs + counts guest-cgroup OOMs (invisible to the host cgroup the
+    gVisor path scans). Both restore fixups are best-effort; the OOM watcher is started on
+    boot/restore and stopped on delete.
+  - **Deferred:** microVM density / cold-start tuning (measurement-driven, no concrete need
+    yet); container-exit (non-OOM) surfacing via a `state()` agent query.
+- **Sparse-aware S3 transfer (separate PRD).** The current `uploadDir` streams the whole
   dense memory-ranges file, so a small working set ships as the full guest RAM (a 154MiB
-  working set uploaded/downloaded as 2GiB), which dominates suspend/restore latency and S3
-  cost — is split into its own PRD: `PRD-sparse-checkpoint-s3-transfer.md` (answers §8 Q5).
+  working set uploaded/downloaded as 2GiB), dominating suspend/restore latency and S3 cost.
+  Split into its own PRD: `PRD-sparse-checkpoint-s3-transfer.md` (answers §8 Q5).
 
 ## 7. Firecracker as a later, third driver (explicitly out of scope now)
 
