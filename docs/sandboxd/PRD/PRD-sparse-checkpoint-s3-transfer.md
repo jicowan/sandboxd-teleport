@@ -1,6 +1,9 @@
 # PRD — sparse-aware checkpoint transfer to S3
 
-Status: **Proposed.** Written 2026-08-12. Grounded in a read of the live worker's S3
+Status: **IMPLEMENTED (Phase 1) + live-validated 2026-08-12.** On branch
+`feat/sparse-checkpoint-s3`. See §6 for per-phase status and §5.1 for the live results
+(microVM 43× smaller; gVisor ~1× — the data is incompressible, benchmarked). Written
+2026-08-12. Grounded in a read of the live worker's S3
 path (`checkpoint-restore/sandboxd/s3.go` — `uploadDir`/`downloadPrefix`/`downloadOne`),
 the checkpoint/suspend/restore handlers (`checkpoint-restore/sandboxd/main.go`), the
 microVM driver's snapshot files (`checkpoint-restore/sandboxd/microvm_checkpoint.go`), and
@@ -121,38 +124,104 @@ existing gVisor `compress` behavior is unaffected.
   After this change, report both logical and transferred bytes so the win is visible and
   monitorable.
 
+## 5.1 Implementation + live results (2026-08-12)
+
+Implemented as `checkpoint-restore/sandboxd/sparse_linux.go` (`writeSparseZstd` /
+`readSparseZstd` / `hasSparseMagic`, magic `SBXDSPRS`, zstd `SpeedFastest` +
+`GOMAXPROCS` concurrency), wired behind `s3.go`'s `uploadOne`/`downloadOne`:
+
+- **Upload** streams the codec through an `io.Pipe` whose reader is the multipart
+  upload `Body`, so `manager.Uploader` still buffers into 5 MiB parts and uploads them
+  **concurrently** — compression runs in the pipe-writer goroutine alongside the parallel
+  part uploads. No loss of upload parallelism.
+- **Download** does the concurrent ranged-GET into a `.dl` temp file (keeps download
+  parallelism; the compressed object is small), then decodes locally with **magic
+  dispatch**: sparse-zstd → `readSparseZstd`; magic absent → a dense pre-codec object,
+  renamed into place (backward compatible — snapshots already in S3 still restore).
+
+**Live-validated on both runtimes** (redis on microVM, the AIO agent sandbox on gVisor);
+both round-tripped losslessly (state teleported exactly, ~4.4 s restore):
+
+| Runtime | Image file | Dense (before) | Sparse+zstd (after) | Reduction |
+|---|---|---|---|---|
+| microVM (redis) | `clh-memory-ranges` | 2048 MiB | **47.9 MiB** | **~43×** |
+| gVisor (AIO) | `checkpoint.img` | 163.6 MiB | 161.2 MiB | ~1× (none) |
+
+**Why the two runtimes differ — and why no zstd feature closes the gap.** The microVM
+`clh-memory-ranges` is a sparse mmap of the full guest address space: mostly holes, so
+`SEEK_DATA`/`SEEK_HOLE` drops almost everything → 43×. gVisor's `checkpoint.img` is
+already **densely packed** by runsc (no holes to drop) AND its content is
+near-incompressible. Benchmarked directly on the real 163.6 MiB AIO `checkpoint.img`:
+
+| codec / setting | ratio |
+|---|---|
+| gzip -1 (32 KiB window) | 1.02× |
+| zstd -1 (≈ our `SpeedFastest`) | 1.005× |
+| zstd `--long=27 -1` (large window / long-distance matching) | 1.019× |
+| zstd `--long=31 -19` (max window + high level) | 1.019× |
+| zstd -19 (high level) | 1.036× |
+
+The question "is there a zstd feature that works better on dense files?" was tested: the
+feature for far-apart redundancy is **long-distance matching (large window)**, but it
+gains ~1.9% here — confirming there is no distant redundancy to find. This is an
+**entropy** ceiling (JS heaps, JIT code, already-compressed assets, TLS state), not a
+window-size or level-tuning problem; even `-19` (≈10× the CPU of `-1`) buys only ~3%.
+
+**Decision: keep `SpeedFastest` as the single, always-on setting.** It delivers 43× where
+the data is sparse/compressible (microVM, the case that mattered) and a cheap ~1× pass
+where it isn't (gVisor), at negligible CPU on the suspend hot path. A higher level or
+long-distance matching is not worth an order of magnitude more CPU for a few percent, and
+helps neither case. We always compress (no per-file skip): the codec is a no-op-fast pass
+on incompressible data, and uniformity keeps one code path.
+
 ## 6. Phasing
 
-- **Phase 1 — codec + S3 seam.** Port `sparsezstd` into the worker (Apache-2.0 provenance),
-  wire it behind `uploadDir`/`downloadOne` with magic-dispatch read fallback. Unit-test the
-  round-trip on a hand-built sparse file (holes preserved, bytes identical). This alone
-  delivers the win for both runtimes.
-- **Phase 2 — live validation + telemetry.** Re-run the microVM teleport cycle; confirm the
-  redis snapshot S3 object drops from ~2 GiB to ~working-set, and upload/download/restore
-  times drop. Surface logical-vs-transferred bytes in the checkpoint/suspend responses and
-  logs. Revisit `restoreTimeout` (a working-set-sized restore may fit the normal budget).
-- **Phase 3 (optional) — tuning.** zstd level as a per-pool/template knob; parallel extent
-  compression if the single-stream encode becomes the bottleneck; drop the interim
-  `restoreTimeout` bump once sparse restore is the default.
+- **Phase 1 — codec + S3 seam (DONE 2026-08-12).** Ported `sparsezstd` into the worker
+  (`sparse_linux.go`, Apache-2.0 provenance), wired behind `s3.go`'s `uploadOne`/
+  `downloadOne` with magic-dispatch read fallback; upload keeps multipart concurrency via
+  an `io.Pipe`, download keeps ranged-GET concurrency via a temp file + local decode.
+  Round-trip unit test (holes preserved, bytes identical, decoded file stays sparse) passes
+  on linux. Live-validated on microVM + gVisor (see §5.1). The big win is microVM-specific.
+- **Phase 2 — telemetry + timeout revisit (NOT DONE).** Still to do: surface
+  logical-vs-transferred bytes in the checkpoint/suspend responses + logs so the win is
+  observable/monitorable; revisit the microVM `restoreTimeout` (a working-set-sized restore
+  — the microVM case is now ~48 MiB, not 2 GiB — likely fits a far smaller budget than the
+  10-min interim). Live functional validation is already done (§5.1).
+- **Phase 3 (optional) — tuning.** DEPRIORITIZED by §5.1: a zstd level knob / long-distance
+  matching was benchmarked and doesn't pay off (entropy ceiling on dense data; sparse data
+  is already tiny at `SpeedFastest`). Parallel extent compression only if the single-stream
+  encode ever becomes the bottleneck (it is not — S3 dominates). Keep `SpeedFastest`.
 
 ## 7. Open questions
 
-1. **Object naming vs magic-only.** Rely solely on the in-band magic (cleanest, one code
-   path) or also suffix the S3 key (`.spz`) so the format is visible in `aws s3 ls`?
-2. **Migrate old snapshots or read-compat forever?** Keep the plain-stream fallback
-   indefinitely (simple, a little dead code) or add a one-time re-pack + cutover?
-3. **Apply to metadata files too, or memory-only?** Uniform (all files through the codec)
-   is simplest; memory-only avoids touching the tiny files at all. Any downside to uniform?
-4. **zstd level default.** Fastest (`best-speed`, matches the current gVisor default) to
-   keep suspend latency low, or a higher level since suspend is off the request hot path?
-5. **Does the sparse download interact with CH OnDemand restore-dir lifetime**
-   (microVM PRD §8 Q4)? The restored local file must stay sparse *and* present for the VM's
-   lifetime under OnDemand; confirm `WriteAt`-into-truncated-file yields a file CH can
-   demand-page from.
+1. **Object naming vs magic-only.** DECIDED: magic-only (in-band `SBXDSPRS` dispatch, one
+   code path, no key suffix). Kept the plain-object fallback for backward compat.
+2. **Migrate old snapshots or read-compat forever?** OPEN, but low-stakes: the reader falls
+   back to a plain rename for dense pre-codec objects, so read-compat is free and
+   indefinite. A one-time re-pack is unnecessary; leave the fallback in.
+3. **Apply to metadata files too, or memory-only?** DECIDED: uniform — every file goes
+   through the codec. It's a cheap ~1× pass on the tiny metadata + incompressible images
+   (see §5.1) and keeps a single code path. No downside observed.
+4. **zstd level default.** DECIDED: `SpeedFastest`, always on. Benchmarked (§5.1) — higher
+   levels / long-distance matching don't pay off on either the sparse (already tiny) or the
+   dense/incompressible case, and cost far more CPU on the suspend hot path.
+5. **Sparse download vs CH OnDemand restore-dir lifetime** (microVM PRD §8 Q4). Not
+   exercised: CH v53 prefaults OnDemand, so restores are eager `Copy` and don't demand-page
+   from the staged file for the VM's lifetime — so a sparse-decoded local file is read fully
+   at restore and the interaction doesn't arise today. Re-check if a non-prefaulting CH
+   makes OnDemand usable (the decoded file is a normal sparse file with real extents at
+   their offsets, which CH can demand-page from, but this is untested).
 
 ## 8. Recommendation
 
-Do Phase 1 — it is a contained, one-file change with a proven reference implementation and
-a large, measured payoff (≈13× smaller S3 objects on the validated case, plus faster
-suspend/restore), and it benefits gVisor as well as microVM. It also removes the main
-reason restore needed a 10-minute timeout. Phases 2–3 follow naturally once it lands.
+DONE (Phase 1) — a contained change with a proven reference implementation and a large,
+measured payoff **for the microVM runtime**: a 2 GiB `clh-memory-ranges` → ~48 MiB (~43×),
+lossless teleport, ~4.4 s restore (§5.1). This directly removes the main reason microVM
+restore needed a 10-minute timeout.
+
+Correction to the original estimate: the win is **not** universal. gVisor's `checkpoint.img`
+is already dense and near-incompressible, so it stays ~1× — no regression (still correct,
+still fast to encode), but no benefit. The value is proportional to sparseness, and only the
+microVM memory image is sparse. We keep the codec always-on for both anyway (uniform, one
+path, negligible cost on dense data). Remaining work is Phase 2 telemetry + the microVM
+`restoreTimeout` revisit; Phase 3 tuning is deprioritized (benchmarked as not worthwhile).
