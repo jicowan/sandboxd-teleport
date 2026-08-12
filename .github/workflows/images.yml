@@ -80,9 +80,16 @@ jobs:
       - name: Lay out binaries for the Dockerfiles
         run: |
           set -euo pipefail
+          # The binaries may arrive as FILES named dist/operator, dist/router (release
+          # download) or from the build step. The Dockerfiles expect them under
+          # dist/{operator,router}/manager and dist/worker/{sandboxd,runsc}. Move the
+          # raw files aside FIRST (so mkdir of the same-named dirs can't collide), then
+          # place them.
+          mv dist/operator dist/operator-bin
+          mv dist/router   dist/router-bin
           mkdir -p dist/operator dist/router dist/worker
-          mv dist/operator dist/operator-bin && mv dist/operator-bin dist/operator/manager
-          mv dist/router   dist/router-bin   && mv dist/router-bin   dist/router/manager
+          mv dist/operator-bin dist/operator/manager
+          mv dist/router-bin   dist/router/manager
           mv dist/sandboxd dist/worker/sandboxd
           mv dist/runsc    dist/worker/runsc
           chmod +x dist/worker/sandboxd dist/worker/runsc dist/operator/manager dist/router/manager
