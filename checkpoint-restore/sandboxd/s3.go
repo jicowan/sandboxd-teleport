@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,7 +47,13 @@ func newS3(ctx context.Context, bucket string) (*s3Store, error) {
 	}, nil
 }
 
-// uploadDir uploads every file in localDir to s3://bucket/<prefix>/<file>.
+// uploadDir uploads every file in localDir to s3://bucket/<prefix>/<file>, encoding
+// each through the sparse-extent+zstd codec (sparse_linux.go): holes are dropped and
+// the resident set is compressed, so a large sparse memory image ships as a fraction
+// of its logical size. The codec streams into an io.Pipe whose reader is the upload
+// Body, so the manager.Uploader still buffers into 5MiB parts and uploads them
+// CONCURRENTLY (multipart) — the compression runs in the pipe-writer goroutine while
+// the parts upload in parallel. A dense/incompressible file just yields a ~1:1 object.
 func (s *s3Store) uploadDir(ctx context.Context, localDir, prefix string) error {
 	entries, err := os.ReadDir(localDir)
 	if err != nil {
@@ -55,18 +63,38 @@ func (s *s3Store) uploadDir(ctx context.Context, localDir, prefix string) error 
 		if e.IsDir() {
 			continue
 		}
-		f, err := os.Open(filepath.Join(localDir, e.Name()))
-		if err != nil {
+		if err := s.uploadOne(ctx, filepath.Join(localDir, e.Name()),
+			strings.TrimSuffix(prefix, "/")+"/"+e.Name()); err != nil {
 			return err
 		}
-		key := strings.TrimSuffix(prefix, "/") + "/" + e.Name()
-		_, err = s.up.Upload(ctx, &s3.PutObjectInput{
-			Bucket: &s.bucket, Key: &key, Body: f,
-		})
-		f.Close()
-		if err != nil {
-			return fmt.Errorf("put %s: %w", key, err)
-		}
+	}
+	return nil
+}
+
+// uploadOne sparse-zstd-encodes path and multipart-uploads it to key. The encode
+// runs in a goroutine writing into an io.Pipe; the uploader reads the pipe as the
+// object Body (buffering into concurrent parts). A pipe write error is surfaced by
+// CloseWithError so the uploader's read fails and Upload returns it.
+func (s *s3Store) uploadOne(ctx context.Context, path, key string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	pr, pw := io.Pipe()
+	go func() {
+		_, _, werr := writeSparseZstd(pw, f)
+		// Close the write end: nil => clean EOF for the reader; non-nil => the
+		// uploader's read returns werr, so Upload fails with the real cause.
+		pw.CloseWithError(werr)
+	}()
+
+	if _, err := s.up.Upload(ctx, &s3.PutObjectInput{
+		Bucket: &s.bucket, Key: &key, Body: pr,
+	}); err != nil {
+		pr.CloseWithError(err) // unblock the encoder goroutine if it's mid-write
+		return fmt.Errorf("put %s: %w", key, err)
 	}
 	return nil
 }
@@ -95,17 +123,68 @@ func (s *s3Store) downloadPrefix(ctx context.Context, prefix, localDir string) e
 }
 
 // downloadOne fetches a single object into localDir (named by its key's basename)
-// via the manager Downloader (concurrent ranged GETs for a large object). The dest
-// *os.File is an io.WriterAt, which the Downloader writes chunks into in parallel.
+// and decodes it back to the on-disk file.
+//
+// The object is first downloaded to a sibling .dl temp file via the manager
+// Downloader — CONCURRENT ranged GETs (the dest is an io.WriterAt written in
+// parallel) — so download parallelism is preserved. The compressed object is small
+// (holes dropped + zstd), so this ranged fetch is fast. Then we DECODE the temp file:
+//   - sparse-zstd magic present  -> readSparseZstd rebuilds the sparse file (holes
+//     never written), then the temp is removed.
+//   - magic absent (a DENSE object written before this codec)  -> the temp file IS
+//     the final content; rename it into place. This is the backward-compat path so
+//     snapshots already in S3 still restore.
+//
+// zstd decode is sequential, so it can't be fed the parallel Downloader directly;
+// downloading-then-decoding keeps the ranged-GET concurrency AND streams the (small)
+// compressed bytes through the decoder in one local pass.
 func (s *s3Store) downloadOne(ctx context.Context, key, localDir string) error {
 	name := key[strings.LastIndex(key, "/")+1:]
-	f, err := os.Create(filepath.Join(localDir, name))
+	final := filepath.Join(localDir, name)
+	tmp := final + ".dl"
+
+	tf, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	if _, err := s.down.Download(ctx, f, &s3.GetObjectInput{Bucket: &s.bucket, Key: &key}); err != nil {
+	if _, err := s.down.Download(ctx, tf, &s3.GetObjectInput{Bucket: &s.bucket, Key: &key}); err != nil {
+		tf.Close()
+		os.Remove(tmp)
 		return fmt.Errorf("get %s: %w", key, err)
+	}
+	if _, err := tf.Seek(0, io.SeekStart); err != nil {
+		tf.Close()
+		os.Remove(tmp)
+		return err
+	}
+
+	// Dispatch on the leading magic.
+	br := bufio.NewReader(tf)
+	peek, _ := br.Peek(sparseMagicLen)
+	if !hasSparseMagic(peek) {
+		// Legacy dense object: the temp file already holds the final content.
+		tf.Close()
+		return os.Rename(tmp, final)
+	}
+	if _, err := br.Discard(sparseMagicLen); err != nil { // consume the magic
+		tf.Close()
+		os.Remove(tmp)
+		return err
+	}
+
+	df, err := os.Create(final)
+	if err != nil {
+		tf.Close()
+		os.Remove(tmp)
+		return err
+	}
+	_, derr := readSparseZstd(df, br)
+	df.Close()
+	tf.Close()
+	os.Remove(tmp)
+	if derr != nil {
+		os.Remove(final)
+		return fmt.Errorf("decode %s: %w", key, derr)
 	}
 	return nil
 }

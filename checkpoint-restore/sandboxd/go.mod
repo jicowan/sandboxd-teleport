@@ -14,6 +14,7 @@ require (
 	github.com/containerd/ttrpc v1.2.8
 	github.com/google/nftables v0.3.0
 	github.com/hashicorp/go-reap v0.0.0-20260220095743-4e27870b4f51
+	github.com/klauspost/compress v1.18.6
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/opencontainers/runtime-spec v1.3.0
 	github.com/pelletier/go-toml/v2 v2.3.0
@@ -59,7 +60,6 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/klauspost/compress v1.18.6 // indirect
 	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42 // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/moby/locker v1.0.1 // indirect
