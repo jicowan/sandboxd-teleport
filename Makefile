@@ -46,12 +46,27 @@ RUNSC_DATE     = $(shell echo "$(RUNSC_VERSION)" | sed -E 's/release-([0-9]+).*/
 RUNSC_URL      = https://storage.googleapis.com/gvisor/releases/release/$(RUNSC_DATE)/$(RUNSC_ARCH)/runsc
 
 # Pinned microVM runtime versions — the CH microVM worker (SANDBOXD_RUNTIME=microvm)
-# bundles cloud-hypervisor + the kata-static guest kernel/rootfs/virtiofsd. Live-
-# validated on a nested-virtualization node (see PRD-microvm-runtime-cloud-hypervisor.md).
+# bundles cloud-hypervisor + the kata-static guest kernel/rootfs. Live-validated on a
+# nested-virtualization node (see PRD-microvm-runtime-cloud-hypervisor.md).
 CH_VERSION    ?= v53.0
 KATA_VERSION  ?= 4.0.0
 CH_URL         = https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/$(CH_VERSION)/cloud-hypervisor-static
 KATA_URL       = https://github.com/kata-containers/kata-containers/releases/download/$(KATA_VERSION)/kata-static-$(KATA_VERSION)-amd64.tar.zst
+
+# virtiofsd is pinned SEPARATELY, NOT taken from the kata-static bundle: kata-static
+# 4.0.0 ships virtiofsd v1.13.x, whose old vhost-user (pre vhost-0.16 /
+# vhost-user-backend-0.22) HANGS cloud-hypervisor's snapshot/restore migration
+# handshake — CH deadlocks in the vhost-user-fs find-paths exchange (live-diagnosed:
+# CH threads block in futex_wait/unix_stream_data_wait, virtiofsd at 0 CPU). v1.14.0
+# is the first release with the fix. Substrate pins the same for the same reason.
+# The x86_64-musl binary attached to the v1.14.0 release. The /-/project/<id>/uploads/
+# form is the canonical UNAUTHENTICATED URL (21523468 = gitlab project id of
+# virtio-fs/virtiofsd); the /-/releases/.../downloads/ and /<path>/-/uploads/ forms 403
+# outside a browser session. Sha pinned because a bad URL silently yields a login page.
+# Zip layout: target/x86_64-unknown-linux-musl/release/virtiofsd.
+VIRTIOFSD_VERSION  ?= v1.14.0
+VIRTIOFSD_URL       = https://gitlab.com/-/project/21523468/uploads/f505704014ae7a816e515f2a05a93d8b/virtiofsd-v1.14.0.zip
+VIRTIOFSD_SHA256    = 2e4fe9571f492b00baa34bc4e708e950039c5da05b830b31a8d179cb6ac8978e
 
 # Binary source for image builds: local (go build here) | release (download from GH).
 BINSRC        ?= local
@@ -170,21 +185,29 @@ image-worker: ## Build + push the worker image (sandboxd + pinned runsc)
 
 # ---- microVM worker (SANDBOXD_RUNTIME=microvm) --------------------------------
 .PHONY: fetch-microvm-assets image-worker-microvm
-fetch-microvm-assets: ## Download cloud-hypervisor + kata guest kernel/rootfs/virtiofsd -> dist/microvm-worker/
+fetch-microvm-assets: ## Download cloud-hypervisor + kata guest kernel/rootfs + virtiofsd v1.14 -> dist/microvm-worker/
 	@mkdir -p $(DIST)/microvm-worker
 	@echo "fetching cloud-hypervisor $(CH_VERSION)"
 	curl -fsSL -o $(DIST)/microvm-worker/cloud-hypervisor "$(CH_URL)"
-	@echo "fetching kata-static $(KATA_VERSION) (kernel + rootfs image + virtiofsd)"
+	@echo "fetching kata-static $(KATA_VERSION) (guest kernel + rootfs image)"
 	curl -fsSL -o $(DIST)/microvm-worker/kata.tar.zst "$(KATA_URL)"
 	@rm -rf $(DIST)/microvm-worker/kata && mkdir -p $(DIST)/microvm-worker/kata
 	tar --zstd -xf $(DIST)/microvm-worker/kata.tar.zst -C $(DIST)/microvm-worker/kata
-	@# Resolve the kata symlinks to the real kernel + rootfs image + virtiofsd and
-	@# stage them flat in the build context (Docker COPY doesn't follow symlinks well).
+	@# Resolve the kata symlinks to the real kernel + rootfs image and stage them flat
+	@# in the build context (Docker COPY doesn't follow symlinks well).
 	cp -L $(DIST)/microvm-worker/kata/opt/kata/share/kata-containers/vmlinux.container $(DIST)/microvm-worker/vmlinux.container
 	cp -L $(DIST)/microvm-worker/kata/opt/kata/share/kata-containers/kata-containers.img $(DIST)/microvm-worker/kata-containers.img
-	cp -L $(DIST)/microvm-worker/kata/opt/kata/libexec/virtiofsd $(DIST)/microvm-worker/virtiofsd
+	@# virtiofsd v1.14.0 from upstream — NOT the kata bundle's v1.13.x, which hangs CH's
+	@# snapshot/restore migration handshake (see VIRTIOFSD_* above). Verify the sha
+	@# (a bad URL silently returns a login page), then extract the musl static binary.
+	@echo "fetching virtiofsd $(VIRTIOFSD_VERSION) (upstream; kata's v1.13 breaks restore)"
+	curl -fsSL -o $(DIST)/microvm-worker/virtiofsd.zip "$(VIRTIOFSD_URL)"
+	@echo "$(VIRTIOFSD_SHA256)  $(DIST)/microvm-worker/virtiofsd.zip" | shasum -a 256 -c -
+	@rm -rf $(DIST)/microvm-worker/vfsd && mkdir -p $(DIST)/microvm-worker/vfsd
+	unzip -q -o $(DIST)/microvm-worker/virtiofsd.zip -d $(DIST)/microvm-worker/vfsd
+	cp $(DIST)/microvm-worker/vfsd/target/x86_64-unknown-linux-musl/release/virtiofsd $(DIST)/microvm-worker/virtiofsd
 	@chmod +x $(DIST)/microvm-worker/cloud-hypervisor $(DIST)/microvm-worker/virtiofsd
-	@rm -rf $(DIST)/microvm-worker/kata $(DIST)/microvm-worker/kata.tar.zst
+	@rm -rf $(DIST)/microvm-worker/kata $(DIST)/microvm-worker/kata.tar.zst $(DIST)/microvm-worker/vfsd $(DIST)/microvm-worker/virtiofsd.zip
 	@echo "microVM assets staged in $(DIST)/microvm-worker/"
 
 image-worker-microvm: build-worker fetch-microvm-assets ecr-login ecr-repos ## Build + push the microVM worker image (sandboxd + CH + kata kernel/rootfs/virtiofsd)

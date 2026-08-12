@@ -117,11 +117,14 @@ func (d *chDriver) createStart(id, bundle string) (retErr error) {
 	}()
 
 	// 6) Launch a bare VMM (CH + api-socket); we own this process for teardown.
+	//    Capture CH's stdout/stderr to clh.log so a VMM that exits early leaves a
+	//    diagnosable trail (its warnings + the reason it died) instead of vanishing.
 	apiSocket := filepath.Join(kata.VMDir(id), "clh-api.sock")
-	chCmd, client, err := ch.LaunchVMM(ctx, ch.LaunchVMMOptions{
-		Binary:    d.chBin,
-		APISocket: apiSocket,
-	})
+	launchOpts := ch.LaunchVMMOptions{Binary: d.chBin, APISocket: apiSocket}
+	if lf := chLog(id); lf != nil {
+		launchOpts.Stdout, launchOpts.Stderr = lf, lf
+	}
+	chCmd, client, err := ch.LaunchVMM(ctx, launchOpts)
 	if err != nil {
 		return fmt.Errorf("microvm launch VMM: %w", err)
 	}

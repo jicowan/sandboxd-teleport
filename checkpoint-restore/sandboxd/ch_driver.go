@@ -52,6 +52,16 @@ type chVM struct {
 	chCmd     *exec.Cmd         // the cloud-hypervisor VMM process we own
 	vfsdCmd   *exec.Cmd         // the virtiofsd process serving the rootfs RO lower
 	agent     *kata.AgentClient // open kata-agent ttrpc client (closed on delete)
+
+	// restoreSourceDir/snapshotSelfContained drive the suspend/resume merge chain
+	// (see microvm_checkpoint.go). A cold-booted VM has neither set. A restored VM
+	// records where CH is demand-paging from (restoreSourceDir) and whether that
+	// restore was eager (self-contained: the next snapshot is already complete, no
+	// merge) or OnDemand (the next snapshot is a sparse delta to overlay onto the
+	// source). CH v53 prefaults OnDemand, so restores are eager today; the field
+	// keeps the merge path correct for a future non-prefaulting CH.
+	restoreSourceDir      string
+	snapshotSelfContained bool
 }
 
 // chDriver implements runtimeDriver for Cloud Hypervisor microVMs.
@@ -118,18 +128,21 @@ func (d *chDriver) resolveVersion() string {
 // vmDir is the per-sandbox state directory (VM sockets, snapshot staging).
 func (d *chDriver) vmDir(id string) string { return filepath.Join(d.root, "vm", id) }
 
-// errNotWired is returned by verbs whose port lands in a later Phase 1b slice.
-func errNotWired(verb string) error {
-	return fmt.Errorf("microvm %s not yet implemented (Phase 1b: needs virtiofs rootfs + kata-agent + microvm networking port); the CH REST client + node KVM/CH/virtiofs prerequisites are validated — see PRD-microvm-runtime-cloud-hypervisor.md §6", verb)
+// chLog opens (truncating) a cloud-hypervisor log file under the sandbox's VMDir
+// so the VMM's own stdout/stderr — its warnings and the reason it exits — are
+// captured for diagnostics instead of discarded. Best-effort: a nil writer just
+// means CH output goes nowhere, exactly as before, so a failure here never blocks
+// a boot/restore. The file lives under kata.VMDir(id) alongside serial.log.
+func chLog(id string) *os.File {
+	f, err := os.OpenFile(filepath.Join(kata.VMDir(id), "clh.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil
+	}
+	return f
 }
 
-// --- runtimeDriver interface (createStart is in microvm_boot.go) ---
-
-func (d *chDriver) checkpoint(id, imageDir string, leaveRunning, compress bool) error {
-	return errNotWired("checkpoint")
-}
-
-func (d *chDriver) restore(id, bundle, imageDir string) error { return errNotWired("restore") }
+// --- runtimeDriver interface (createStart is in microvm_boot.go,
+// checkpoint/restore are in microvm_checkpoint.go) ---
 
 // state returns the CH VM state mapped to sandboxd's vocabulary. An absent sandbox
 // → "stopped" (matches how the supervisor treats a gone sandbox). A tracked one is
