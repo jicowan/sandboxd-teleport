@@ -263,6 +263,10 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              engineVersion:
+                description: engineVersion is the engine version that produced snapshotURI
+                  (restore identity).
+                type: string
               health:
                 description: health is the readiness/restart config (replayed on restore).
                 properties:
@@ -345,6 +349,11 @@ spec:
                   - container
                   type: object
                 type: array
+              runtime:
+                description: |-
+                  runtime is the sandbox engine that produced snapshotURI ("gvisor"|"microvm"),
+                  mirrored so a rebuilt KV entry still refuses a cross-runtime restore.
+                type: string
               snapshotURI:
                 description: snapshotURI is the current checkpoint location (set once
                   one exists).

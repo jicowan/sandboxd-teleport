@@ -125,7 +125,7 @@ func (s *server) reconcile() {
 		}
 		// keep metadata even if the container is gone IF it has a snapshot (it can
 		// still be restored). Drop only if it has neither a live container nor a snapshot.
-		if st, err := s.runsc.state(sb.ID); err == nil && st != "" {
+		if st, err := s.rt.state(sb.ID); err == nil && st != "" {
 			s.mu.Lock()
 			s.sb[sb.ID] = &sb
 			s.mu.Unlock()
@@ -180,7 +180,7 @@ func (s *server) gcOnce() {
 			if tracked[id] {
 				continue
 			}
-			if st, err := s.runsc.state(id); err == nil && st != "" {
+			if st, err := s.rt.state(id); err == nil && st != "" {
 				continue // still a live container; leave it
 			}
 			p := filepath.Join(dir, id)

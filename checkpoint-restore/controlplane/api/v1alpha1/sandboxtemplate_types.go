@@ -100,6 +100,22 @@ type SandboxTemplateSpec struct {
 	// +optional
 	IAM *IAMSpec `json:"iam,omitempty"`
 
+	// runtime selects the sandbox engine for this pool's workers: "gvisor" (default,
+	// a nested runsc sandbox) or "microvm" (a Cloud Hypervisor microVM). It picks the
+	// worker image's engine AND the worker pod shape (a microVM pool needs /dev/kvm
+	// and KVM-capable — bare-metal — nodes). A session only ever teleports within its
+	// own pool, so a pool is single-runtime by construction — which is also required,
+	// since a checkpoint is NOT restorable across runtimes (the worker's restore guard
+	// hard-refuses a cross-runtime restore). See
+	// docs/sandboxd/PRD/PRD-microvm-runtime-cloud-hypervisor.md.
+	//
+	// NOTE (Phase 0): the field is accepted API surface but only "gvisor" is wired;
+	// the microVM worker/driver land in later phases.
+	// +kubebuilder:validation:Enum=gvisor;microvm
+	// +kubebuilder:default=gvisor
+	// +optional
+	Runtime string `json:"runtime,omitempty"`
+
 	// resources is a worker sizing hint informing the WarmPool pod resources.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`

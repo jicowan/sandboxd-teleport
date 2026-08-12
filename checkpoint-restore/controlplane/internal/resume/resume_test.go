@@ -179,8 +179,12 @@ func TestResumeRollsBackToSuspendedOnRestoreFailure(t *testing.T) {
 	}
 }
 
+// lastRestoreReq captures the most recent /restore request body so tests can
+// assert what the operator sent (e.g. the runtime/version guard fields).
+var lastRestoreReq sbxapi.RestoreRequest
+
 // stubWorkerRestore serves /restore + /status; records whether /restore (not
-// /run) was called.
+// /run) was called, and captures the request into lastRestoreReq.
 func stubWorkerRestore(t *testing.T, gotRestore *bool) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -189,6 +193,7 @@ func stubWorkerRestore(t *testing.T, gotRestore *bool) *httptest.Server {
 			*gotRestore = true
 			var req sbxapi.RestoreRequest
 			json.NewDecoder(r.Body).Decode(&req)
+			lastRestoreReq = req
 			json.NewEncoder(w).Encode(sbxapi.RestoreResponse{SandboxID: req.SandboxID, Status: "running", RestoredFrom: req.Snapshot})
 		case strings.HasPrefix(r.URL.Path, "/run"):
 			t.Error("expected /restore, got /run")
@@ -237,6 +242,43 @@ func TestResumeFromSnapshot(t *testing.T) {
 	e, _ := kv.GetSession(ctx, "s1")
 	if e.State != resumeapi.StateRunning || e.WorkerPodIP != "10.0.0.2" || e.Image != "redis:7-alpine" {
 		t.Fatalf("post-restore entry wrong: %+v", e)
+	}
+}
+
+// TestResumeReplaysRuntimeGuard verifies the operator sends the snapshot's
+// {runtime, engineVersion} on /restore so the worker can refuse a cross-runtime or
+// incompatible-version resume (PRD-microvm-runtime-cloud-hypervisor.md §5.2). The
+// fields are recorded on the SessionEntry at suspend/checkpoint time.
+func TestResumeReplaysRuntimeGuard(t *testing.T) {
+	ctx := context.Background()
+	kv := testKV(t)
+	if err := kv.PutSessionCAS(ctx, &resumeapi.SessionEntry{
+		SID: "s1", State: resumeapi.StateSuspended, Pool: "p",
+		Image: "redis:7-alpine", SnapshotURI: "sandboxes/s1/snap-123",
+		Runtime: "gvisor", EngineVersion: "release-20260622.0",
+		Ports: []sbxapi.PortMap{{Container: 6379, Host: 6379}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	kv.UpsertWorker(ctx, &resumeapi.WorkerEntry{Pod: "w2", Pool: "p", PodIP: "10.0.0.2", State: resumeapi.WorkerIdle})
+
+	var gotRestore bool
+	lastRestoreReq = sbxapi.RestoreRequest{} // reset the shared capture
+	srv := stubWorkerRestore(t, &gotRestore)
+	wf := New(kv, lookupImage("unused"), clientForStub(srv),
+		func(context.Context, string, string, string, string) (*SessionPlan, error) {
+			return nil, fmt.Errorf("planFor must not be called on restore")
+		}, Options{ResumeDeadline: 3 * time.Second, PollInterval: 5 * time.Millisecond})
+
+	if _, err := wf.Resume(ctx, "s1", "alice", "", ""); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if !gotRestore {
+		t.Fatal("expected /restore to be called")
+	}
+	if lastRestoreReq.Runtime != "gvisor" || lastRestoreReq.EngineVersion != "release-20260622.0" {
+		t.Fatalf("restore guard fields not replayed: runtime=%q engineVersion=%q",
+			lastRestoreReq.Runtime, lastRestoreReq.EngineVersion)
 	}
 }
 

@@ -1,6 +1,8 @@
 # PRD — a second sandbox runtime: Cloud Hypervisor microVMs (direct-drive)
 
-Status: **Proposed / not scheduled.** Written 2026-08-11. Grounded in a read of the
+Status: **IMPLEMENTED (Phases 0–3), live-validated 2026-08-12.** Written 2026-08-11; updated
+2026-08-12 with implementation results (see §6 for per-phase status + fixes, §8 for answered
+open questions). On branch `feat/microvm-runtime` / PR #30. Grounded in a read of the
 live worker (`checkpoint-restore/sandboxd/{main,runsc,network,spec,bundle,containerd}.go`),
 the wire contract (`checkpoint-restore/shared/sbxapi/sbxapi.go`), the CRDs
 (`checkpoint-restore/controlplane/api/v1alpha1/*`), and the pod-construction path
@@ -307,30 +309,61 @@ The operator then, in `desiredDeployment` (`warmpool_controller.go:351-427`), ap
 
 ### 5.4 The Cloud Hypervisor driver (`chDriver`) — port from substrate
 
-New files under `checkpoint-restore/sandboxd/` (or a `runtime/microvm` subpackage):
-- `ch_driver.go` — implements `RuntimeDriver`; owns a `running map[id]*vm`.
-- `ch/` — CH REST client over the per-sandbox api-socket (`vm.create`, `vm.boot`,
-  `vm.pause`, `vm.snapshot`, `vm.restore`, `vm.resume`, plus `RestoreWithNetFDs` fd-passing
-  and `MergeDeltaIntoBase` for the sparse-snapshot merge). **Port from
-  `substrate-upstream/internal/ch`.**
-- `kata/` — kata-agent ttrpc client + OCI→kata spec conversion + virtiofsd launch + overlay
-  setup. **Port from `substrate-upstream/internal/kata`** (and its vendored kata-agent
-  protos, with provenance preserved per substrate's `PROVENANCE.md`).
-- `microvm_net.go` — the tap/TC-mirror/fd-passing networking (§4.1), sibling to
-  `network.go`.
+> **Source of truth (verified first-hand 2026-08-11 against `substrate-upstream`).**
+> Correcting the earlier (subagent-summarized) paths: substrate's CH + kata packages are
+> NOT top-level `internal/` — they live under the command tree at
+> **`cmd/ateom-microvm/internal/ch/`** and **`cmd/ateom-microvm/internal/kata/`**; the
+> vendored kata protos are at **`cmd/ateom-microvm/internal/third_party/kata/agentpb/`**
+> (kata tag **3.31.0**, Apache-2.0, message types only — no ttrpc service stub; the driver
+> calls agent RPCs by string method name). The ateom gRPC contract is at
+> `internal/proto/ateompb/ateom.proto`. Module `github.com/agent-substrate/substrate`, Go 1.26.
 
-Method mapping:
-- `CreateStart` → prepare overlay rootfs (reuse `containerd.go`) → launch virtiofsd on it →
-  boot CH with virtio-fs + fd-passed tap → drive kata-agent `CreateSandbox`/`CreateContainer`
-  → configure guest net.
+New files under `checkpoint-restore/sandboxd/` (or a `runtime/microvm` subpackage):
+- `ch_driver.go` — implements `RuntimeDriver`; owns a `running map[id]*vm` and serializes
+  ops under a mutex (substrate's `AteomService.lock`).
+- `ch/` — CH REST client over the per-sandbox api-socket. **Port from
+  `cmd/ateom-microvm/internal/ch/`** (`ch.go`, `api.go`, `createvm.go`, `restorefds.go`,
+  `merge.go`). CRITICAL detail: CH is driven **two ways over the same unix api-socket** —
+  (a) stdlib `net/http` with a unix-dialing `Transport` + `DisableKeepAlives` for normal
+  calls (`vm.create`/`vm.boot`/`vm.pause`/`vm.snapshot`/`vm.resume`/`vm.info`), and
+  (b) **raw HTTP/1.1 over `net.DialUnix` + `WriteMsgUnix`/`SCM_RIGHTS`** whenever fds ride
+  along (`vm.add-net` on boot, `vm.restore` on restore) — `net/http` can't attach ancillary
+  data. You need both. `MergeDeltaIntoBase` (merge.go, `//go:build linux`, uses
+  `SEEK_DATA`/`SEEK_HOLE`) reconstitutes a full snapshot after an OnDemand (sparse) restore.
+- `kata/` — kata-agent ttrpc client + OCI→kata spec conversion + virtiofsd launch + overlay
+  setup. **Port from `cmd/ateom-microvm/internal/kata/`** + `cmd/ateom-microvm/internal/
+  third_party/kata/agentpb/`. NO kata shim, NO containerd: the driver dials CH's hybrid-vsock
+  unix socket, does the plaintext `CONNECT 1024`/`OK` handshake itself, then `ttrpc.NewClient`
+  and calls `grpc.AgentService`/`<Method>` by name (containerd/ttrpc v1.2.8). Rootfs =
+  overlay(virtio-fs RO lower from the OCI image + guest **tmpfs** upper) so rootfs writes live
+  in guest RAM and are captured by the memory snapshot.
+- `microvm_net.go` — the veth-into-interior-netns + **tap/TC-mirror + fd extraction**
+  networking (§4.1). **Port from `cmd/ateom-microvm/net.go`.** Uses `google/nftables` (not
+  shelling `iptables`) and **fixed MACs** (`hostVethMAC`/`actorGuestMAC`) + constant
+  `169.254.17.0/30` so the guest's frozen ARP/MAC survive restore.
+
+Deps the port pulls in (from substrate go.mod): `containerd/ttrpc`, `google/nftables`,
+`vishvananda/netlink`+`netns`, `opencontainers/runtime-spec`, `pelletier/go-toml/v2`,
+`hashicorp/go-reap`, `golang.org/x/sys/unix`. All microVM files carry `//go:build linux`
+with a `*_unsupported.go` stub, matching substrate.
+
+Method mapping (RunWorkload boot order verified in `run.go:RunWorkload`):
+- `CreateStart` → resolve runtime assets → `setupActorNetwork` (veth into interior netns) →
+  build containers via `ensureKataCompatibleSpec` + reuse sandboxd's `containerd.go` for the
+  overlay rootfs → `StartVirtiofsd` (subprocess, `--migration-mode find-paths`) → `LaunchVMM`
+  (CH subprocess, NOT `CommandContext` — must outlive the RPC) → `CreateVM` → `setupRestoreTap`
+  + `AddNetWithFDs` (SCM_RIGHTS) → `BootVM` → `DialAgent` (hybrid-vsock) → `CreateSandbox` →
+  guest net (`UpdateInterface`/`UpdateRoutes`/`AddARPNeighbors`) → per-container carrier +
+  overlay `CreateContainer`/`StartContainer` → `readyz.WaitAll`.
 - `Checkpoint` → `vm.pause` → `vm.snapshot file://<imageDir>` → (if restored-from-OnDemand)
   `MergeDeltaIntoBase` → (leaveRunning ? `vm.resume` : teardown). The worker's existing
-  `uploadDir(imageDir)` ships it.
-- `Restore` → `LaunchVMM` bare → rewrite socket paths in `config.json` → rebuild RO lower
-  from re-pulled image → rebuild tap + fresh fds → `vm.restore {memory_restore_mode:
-  OnDemand}` + `vm.resume`.
-- `State`/`Delete`/`Version`/`Runtime` → CH VM state query / VMM teardown / CH `--version` /
-  `"microvm"`.
+  `uploadDir(imageDir)` ships it (report the written file list, as substrate's `snapshot_files`).
+- `Restore` → `LaunchVMM` bare → rewrite per-actor socket paths in snapshot `config.json` →
+  reconstruct RO lower from re-pulled image (`ReconstructSharedDirFromImage`) → rebuild tap +
+  fresh fds → `RestoreWithNetFDs {memory_restore_mode: OnDemand, net_fds}` (raw socket) →
+  `vm.resume`. Keep the snapshot dir for the VM's whole lifetime (OnDemand demand-pages from it).
+- `State`/`Delete`/`Version`/`Runtime` → CH `vm.info` state / VMM teardown + `CleanupSandboxState`
+  / CH `--version` / `"microvm"`.
 
 ### 5.5 Touch list (by layer)
 
@@ -359,18 +392,97 @@ Method mapping:
   (default gvisor). Generalize the wire to `{Runtime, EngineVersion}` with back-compat and
   make cross-runtime restore a hard 409. Add the `Runtime` CRD field (accepted, only
   `gvisor` wired). **Ships independently; de-risks everything; zero functional change.**
-- **Phase 1 — CH boot + run (no teleport).** Port `ch/` + `kata/` + overlay/virtiofsd;
-  `chDriver.CreateStart`/`State`/`Delete`. Bring up a microVM pool that runs a workload and
-  serves it (per-runtime pod shape + KVM nodes). Networking via `microvm_net.go`. Validates
-  the isolation + rootfs + net model end-to-end. **No checkpoint/restore yet** — `/suspend`
-  returns 501 for microVM pools.
-- **Phase 2 — CH teleport.** `chDriver.Checkpoint`/`Restore` (userfaultfd OnDemand,
-  delta-merge, fd-passed tap rebuild). Wire `/checkpoint`, `/restore`, `/suspend`,
-  checkpoint-on-terminate for microVM pools. This is the substrate-heavy port and the main
-  risk; it's the payoff (teleport parity with gVisor).
-- **Phase 3 — forkset + hardening.** microVM forkset fan-out from one base snapshot (CoW +
-  VMGenID reseed for entropy/identity §4.5); clock-fixup on long-suspended resume; density
-  and cold-start tuning; observability parity (OOM/exit visibility like the gVisor path).
+- **Phase 1 — CH boot + run (no teleport).**
+  - **1a — activate the restore guard (DONE 2026-08-11).** Thread the snapshot's
+    `{runtime, engineVersion}` end-to-end so the Phase 0 guard is live: worker `/suspend`
+    (and `/checkpoint`) responses carry `runtime`+`engineVersion` (`SuspendResponse`,
+    `CheckpointResponse`); the operator records them on `SessionEntry` + mirrors them into
+    `Session.status` (lossless durable rebuild); resume replays them on `RestoreRequest`.
+    A cross-runtime or version-mismatched resume now hard-409s at the worker. Prerequisite
+    to any microVM pool coexisting with gVisor. (Unit test: `TestResumeReplaysRuntimeGuard`.)
+  - **1b — CH boot + run (DONE 2026-08-12).** Ported `ch/` + `kata/` + `microvm_net.go` +
+    overlay/virtiofsd; `chDriver.createStart`/`state`/`delete`. A microVM pool boots a
+    workload and serves it (per-runtime pod shape + nested-virt KVM nodes). Validated
+    isolation + rootfs + net model end-to-end live (redis in a CH microVM via the driver).
+    Key fix: retry the kata-agent vsock CONNECT until the guest is up (CH creates the socket
+    file at vm.create, long before the agent listens). Commits `b83aaaf`, `43a850b`.
+- **Phase 2 — CH teleport (DONE 2026-08-12).** `chDriver.checkpoint`/`restore` (eager Copy
+  restore on CH v53, which prefaults OnDemand; delta-merge path retained for a future
+  non-prefaulting CH; fd-passed tap rebuild; snapshot socket-path rewrite). Wired through
+  the existing `/checkpoint`, `/restore`, `/suspend` handlers (runtime-neutral contract, no
+  handler changes) + the operator per-runtime pod shape (`/dev/kvm` + `SANDBOXD_RUNTIME`).
+  **Live-proven**: RUN → checkpoint (2GiB snapshot → S3) → reset → restore (same id) →
+  Running in ~11s, guest RAM resumed. Load-bearing fix: **virtiofsd v1.14.0**, sourced
+  separately from upstream — kata-static 4.0.0's bundled v1.13.x has an old vhost-user that
+  HANGS CH's snapshot/restore migration handshake. Commits `e28d21f`, `e7b4f72`.
+- **Phase 3 — forkset + hardening (DONE 2026-08-12; density tuning deferred).** The ForkSet
+  controller is runtime-neutral (it seeds each child Session `Suspended+snapshotURI` and the
+  existing resume path restores it via `chDriver.restore`), so no new *fan-out* code was
+  needed. But running the REAL forkset example live (golden Session → suspend → `BaseSnapshot`
+  → `ForkSet{count:2}`, driven through the router) surfaced that "fork" exercises paths the
+  Phase 1b/2 worker-local `/run` tests never did, and exposed three concrete gaps — all now
+  fixed and live-validated (commits `21d3305`, `0fc3370`). **Fork proof:** both forks restore
+  the IDENTICAL golden state (same `sum`, same `boot` uuid = frozen RAM+FS) yet return
+  DIFFERENT `/dev/urandom` — the clones diverge only because of the entropy reseed.
+  - **Entropy reseed (VMGenID analog).** After restore, `kata-agent ReseedRandomDev` injects
+    fresh per-clone host entropy, so clones restored from one memory image don't share the
+    frozen CRNG state and emit identical randomness (§4.5). This is the load-bearing fork
+    correctness fix — proven by the divergent `/rand` above.
+  - **Clock-fixup.** After restore, `kata-agent SetGuestDateTime` sets the guest wall clock
+    to the host's current time (the guest's clock is frozen at snapshot time).
+  - **Observability parity.** A per-VM background watcher loops on the agent's blocking
+    `GetOOMEvent` and logs + counts guest-cgroup OOMs (invisible to the host cgroup the
+    gVisor path scans). Both restore fixups are best-effort; the OOM watcher is started on
+    boot/restore and stopped on delete.
+  - **Inbound routing + IAM (the big one; commit `0fc3370`).** The router→guest datapath and
+    per-session IAM creds were BOTH silently unwired for microVM: gVisor's `setupSandboxNet`
+    installs the pod→sandbox DNAT *and* pins the credential-vendor IP (169.254.170.2) in the
+    POD netns, but the microVM guest lives one veth hop away in the `sbx-microvm` INTERIOR
+    netns, so a router request got `connection refused` and a guest's
+    `AWS_CONTAINER_CREDENTIALS_FULL_URI` fetch never reached the vendor. The Phase 1b/2 tests
+    missed this because they drove the sandbox over the worker's *own* localhost `/run`, never
+    through the router. Fix (deliberately RETAINS gVisor's routing model rather than
+    substrate's atunnel ingress): add `runtimeDriver.buildsOwnNetwork()` (gVisor=false,
+    microVM=true); the microVM driver installs the SAME `installNft` DNAT (pod netns →
+    169.254.17.2, the guest's IP over `ateom0`) and pins the cred-vendor IP on `ateom0`;
+    `/run`, `/restore`, and the supervisor skip `setupSandboxNet` when the driver owns its
+    network; `createStart`/`restore` gained a `ports []portMap` arg.
+    - **IAM live-validated end to end.** A microVM sandbox with `iam.roleArn` set (on the
+      AppTemplate/SandboxTemplate/Session) received real per-session STS credentials in-guest:
+      the guest read `AWS_CONTAINER_CREDENTIALS_FULL_URI=http://169.254.170.2:8091/creds/<sid>`,
+      reached the worker cred vendor over the `ateom0` pin, and got back temporary keys
+      (an `ASIA…` AccessKeyId + session token, ~1h expiry) for the assumed session role —
+      confirmed by a matching `sts:AssumeRole` event in CloudTrail. This is the same
+      cred-vendor + container-credentials contract the gVisor path uses, now working across
+      the microVM netns boundary. Two follow-ups from this validation are FIXED (commit
+      `ce15b50`): (i) the vendor's `sts:AssumeRole` now runs under a fresh context, not the
+      client request's, so a client that times out on the slow FIRST (cold) assume no longer
+      cancels it — it completes and caches, and the retry hits the warm cache (this hardens
+      BOTH runtimes, since the cred vendor is shared); (ii) the cred-vendor pin is now split
+      out of the `len(ports)>0` guard in `setupInboundPorts`, so a PORTLESS IAM-only sandbox
+      (an outbound-only agent — the shape that most needs IAM and has no reason to expose a
+      port) still gets the pin. Verified live: a portless sandbox boots with no inbound DNAT
+      yet the cred-vendor IP pinned on `ateom0`.
+  - **Fork base-id (commit `0fc3370`).** A fork restores under a NEW sandbox id, but the
+    guest's virtio-fs find-paths are frozen at the golden id's path
+    (`SharedDir(baseID)/<baseID>/rootfs`), so `vm.restore` failed with a vhost-user
+    `BackendInternalError`. Record the frozen base id at checkpoint (`clh-baseid`, from
+    `chVM.baseID`) and reconstruct the RO lower + serve virtiofsd at that base path on
+    restore; `baseID` is the sandbox's own id on cold boot and propagates across a fork
+    lineage. (This is sandboxd's analog of substrate's `baseIDFile`.) A same-id resume has
+    `baseID == id`, which is why Phase 2 teleport passed without it — only a fork exposed it.
+  - **Workload log forwarding (commit `0fc3370`).** `streamLogsToStdout` now forwards the
+    WORKLOAD container's stdout+stderr (kata-agent `ReadStdout`/`ReadStderr` for exec
+    `<id>_ovl` via `NewStdioReader`) to worker stdout → `kubectl logs`, not the VM/kata-agent
+    serial console. Opt-in per pool (`SANDBOXD_STREAM_CONSOLE=1` via
+    `SandboxTemplate.streamConsole`). `recentLogs` still returns the serial console as a
+    coarse `/logs` fallback.
+  - **Deferred:** microVM density / cold-start tuning (measurement-driven, no concrete need
+    yet); container-exit (non-OOM) surfacing via a `state()` agent query.
+- **Sparse-aware S3 transfer (separate PRD).** The current `uploadDir` streams the whole
+  dense memory-ranges file, so a small working set ships as the full guest RAM (a 154MiB
+  working set uploaded/downloaded as 2GiB), dominating suspend/restore latency and S3 cost.
+  Split into its own PRD: `PRD-sparse-checkpoint-s3-transfer.md` (answers §8 Q5).
 
 ## 7. Firecracker as a later, third driver (explicitly out of scope now)
 
@@ -385,24 +497,41 @@ tradeoff. Keeping the seam runtime-plural from Phase 0 is what makes this cheap 
 
 ## 8. Open questions
 
-1. **KVM on EKS.** Which node story — bare-metal `*.metal`, nested-virt instance families,
-   or Karpenter NodePool with a KVM-capable requirement + label? Nested virt has perf and
-   availability caveats; `.metal` is costlier/coarser. This gates Phase 1 hardware.
-2. **Guest image supply chain.** The microVM needs a guest **kernel** + a **kata-agent**-
-   bearing rootfs image. Build our own (control + provenance, more upkeep) or consume kata's
-   published assets (faster, external dependency)? Mirror substrate's `hack/microvm-assets`?
-3. **Cold-start budget.** CH microVM boot (~100s of ms + rootfs prep + agent handshake) vs
-   gVisor. Is warm-pool `minIdle` sizing per-runtime? Does virtio-fs rootfs prep dominate?
-4. **Restore-dir lifetime.** CH OnDemand restore demand-pages from the local snapshot dir
-   for the VM's *whole lifetime*; the worker must retain it until reset (unlike gVisor,
-   where the image dir is only needed during restore). Affects worker disk sizing + GC.
-5. **Snapshot size / S3 cost.** A full guest-RAM memory file is larger than a gVisor
-   checkpoint of the same workload (whole guest kernel + page cache). Does compression /
-   diff-snapshot help enough, or does per-runtime idle-suspend policy differ?
-6. **Is the isolation win worth the complexity?** gVisor already gives strong isolation for
-   the bursty-agent workload sandboxd targets. Quantify the concrete driver: which
-   workloads *require* a real guest kernel / hardware boundary that gVisor can't serve? If
-   none are on the roadmap, this is a capability bet, not a near-term need (see §9).
+1. **KVM on EKS — ANSWERED.** Nested virtualization on standard Nitro instances (C7i/M7i/
+   R7i/etc.) via Karpenter v1.14 `EC2NodeClass.spec.cpuOptions.nestedVirtualization: enabled`,
+   which auto-filters to capable types — NO bare metal, NO ODCR. Live-validated: `/dev/kvm`
+   present, CH boots + teleports. Bare-metal was a persistent capacity crunch and ODCRs were
+   account-unusable in this environment (both dead ends). The KVM AMI (`packer/`) is reused
+   as-is; the instance provides VT-x. See [[sandboxd-microvm-nested-virt]].
+2. **Guest image supply chain — ANSWERED (consume kata assets, pin virtiofsd separately).**
+   The worker image bundles the kata-static 4.0.0 guest kernel (`vmlinux.container`) + rootfs
+   (`kata-containers.img`), fetched by `make fetch-microvm-assets`. CRITICAL FINDING:
+   virtiofsd must be sourced SEPARATELY (`v1.14.0` from upstream, sha-pinned) — kata-static
+   4.0.0's bundled v1.13.x has an old vhost-user (pre vhost-0.16 / vhost-user-backend-0.22)
+   that HANGS CH's snapshot/restore migration handshake (diagnosed live: CH deadlocks in
+   `futex_wait`/`unix_stream_data_wait`, virtiofsd at 0 CPU). Substrate pins v1.14.0 for the
+   same reason.
+3. **Cold-start budget — PARTIALLY MEASURED.** Cold boot (RUN → Running) is ~2–3s incl.
+   image pull + CH boot + kata-agent handshake. A same-id teleport-restore is ~11s, dominated
+   by the DENSE memory-image download (see Q5) — NOT CH itself. The vsock CONNECT handshake
+   needs retrying until the guest agent listens (~4s into boot); a single early CONNECT gets
+   EOF (fixed in `DialAgentRetry`). Per-runtime `minIdle` sizing + fine virtio-fs prep cost
+   are still open (part of the deferred density tuning).
+4. **Restore-dir lifetime — CONFIRMED + moot today.** With CH v53 (which prefaults OnDemand),
+   restores use EAGER `Copy`, which reads the whole image up front and is self-contained — so
+   the worker drops the staged memory image after restore and there is NO whole-lifetime
+   demand-page dependency. The OnDemand delta-merge path + restore-source retention is kept in
+   code for a future non-prefaulting CH, gated on `chVM.snapshotSelfContained`.
+5. **Snapshot size / S3 cost — CONFIRMED as the main cost; own PRD.** A guest-RAM image is a
+   sparse file (e.g. 2GiB logical / ~154MiB resident), but the worker's S3 transfer is
+   hole-blind, so it ships + stores the full DENSE 2GiB and restore reads all of it (this is
+   why restore needs a 10-min budget, not 120s). Split into
+   `PRD-sparse-checkpoint-s3-transfer.md` (sparse-extent + zstd codec, lift from substrate).
+6. **Is the isolation win worth the complexity?** STILL the open strategic question. The
+   engineering is now DONE and proven (Phases 0–3, teleport + forkset at gVisor parity), so
+   the cost side is de-risked and known; what remains is a product call — is there a workload
+   that *requires* a real guest kernel / hardware boundary gVisor can't serve? Absent one on
+   the roadmap, microVM is a proven, ready capability bet rather than a near-term need (§9).
 
 ## 9. Relationship to Substrate & recommendation
 
@@ -411,12 +540,19 @@ substrate's own `docs/architecture.md` flags much of its microVM path as partly
 aspirational, and sandboxd's gVisor teleport is already live and proven
 ([[sandboxd-control-plane-state]]). So:
 
-- **Phase 0 (the seam) is a cheap, independently valuable cleanup** — it makes the runtime
-  pluggable, generalizes the restore guard (a correctness win even for gVisor-only: today a
-  `""`-version snapshot restores anywhere), and costs almost nothing. Recommend doing it
-  regardless.
-- **Phases 1–3 are a real project** gated on Q6 (is there a workload that *needs* a hardware
-  boundary gVisor can't provide?) and Q1 (KVM nodes on EKS). Recommend: land Phase 0 when
-  convenient; pursue Phases 1–3 only against a concrete requirement for VM-grade isolation
-  or kernel compatibility — at which point CH-direct-drive-ported-from-substrate is the
-  lowest-risk path to get there.
+**UPDATE 2026-08-12: Phases 0–3 are DONE and live-proven** (branch `feat/microvm-runtime`,
+PR #30). A microVM pool boots, serves via the router, teleports (checkpoint→S3→restore), and
+forks (N clones from one base with divergent entropy) at gVisor parity, on nested-virt EKS
+nodes. Q1/Q2/Q4 are answered above; Q5 (dense S3 transfer) is the one known-suboptimal area,
+split into its own PRD. So the original recommendation is now largely settled:
+
+- **Phase 0 (the seam) was a cheap, independently valuable cleanup** — it made the runtime
+  pluggable, generalized the restore guard (a correctness win even for gVisor-only: a
+  `""`-version snapshot no longer restores anywhere), and cost almost nothing.
+- **Phases 1–3 turned out to be tractable** (the substrate port + a handful of load-bearing
+  fixes: vsock-CONNECT retry, virtiofsd v1.14, base-id, inbound routing + IAM). The
+  engineering risk is now retired. What remains is the STRATEGIC call in Q6 — is there a
+  workload that *needs* a hardware boundary gVisor can't provide? With the capability now
+  built and proven, adopting it for a given pool is a config flip (`runtime: microvm` on the
+  SandboxTemplate), not a project; CH-direct-drive-ported-from-substrate was the lowest-risk
+  path and it landed.

@@ -1,0 +1,38 @@
+# microVM worker image: the sandboxd agent + the Cloud Hypervisor microVM runtime
+# (cloud-hypervisor, virtiofsd, the kata guest kernel + rootfs image). This is the
+# SANDBOXD_RUNTIME=microvm counterpart to Dockerfile.worker (gVisor/runsc).
+#
+# Unlike the gVisor worker (distroless), the microVM driver shells out to mount /
+# umount / cp for the virtio-fs overlay rootfs staging, so the base must ship
+# util-linux + coreutils. The worker runs privileged with /dev/kvm on a
+# nested-virtualization node (see packer/ + PRD-microvm-runtime-cloud-hypervisor.md).
+#
+# Build context = a directory containing:
+#   sandboxd            (the worker binary, GOOS=linux)
+#   cloud-hypervisor    (static v53 x86_64)
+#   virtiofsd           (from the kata-static bundle)
+#   vmlinux.container   (kata guest kernel, resolved from the bundle symlink)
+#   kata-containers.img (kata guest rootfs ext4, resolved from the bundle symlink)
+# Assembled by `make fetch-microvm-assets` into dist/microvm-worker/.
+FROM debian:12-slim
+# mount/umount (util-linux) + cp (coreutils) are needed by the kata overlay rootfs
+# staging; ca-certificates for registry/S3 TLS. Keep it lean.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends util-linux coreutils ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+# The microVM VMM + guest run as root (privileged, /dev/kvm, mounts).
+USER 0:0
+COPY sandboxd /usr/local/bin/sandboxd
+COPY cloud-hypervisor /usr/local/bin/cloud-hypervisor
+COPY virtiofsd /usr/local/bin/virtiofsd
+COPY vmlinux.container /usr/local/share/kata/vmlinux.container
+COPY kata-containers.img /usr/local/share/kata/kata-containers.img
+RUN chmod +x /usr/local/bin/cloud-hypervisor /usr/local/bin/virtiofsd
+ENV SANDBOXD_RUNTIME=microvm \
+    SANDBOXD_CH_BIN=/usr/local/bin/cloud-hypervisor \
+    SANDBOXD_VIRTIOFSD_BIN=/usr/local/bin/virtiofsd \
+    SANDBOXD_CH_KERNEL=/usr/local/share/kata/vmlinux.container \
+    SANDBOXD_CH_IMAGE=/usr/local/share/kata/kata-containers.img \
+    SANDBOXD_WORK=/work \
+    SANDBOXD_ADDR=:8090
+ENTRYPOINT ["/usr/local/bin/sandboxd"]

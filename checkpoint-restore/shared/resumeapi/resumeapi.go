@@ -31,6 +31,13 @@ type SessionEntry struct {
 	WorkerPod    string           `json:"workerPod,omitempty"`
 	Image        string           `json:"image,omitempty"`        // replayed on restore
 	SnapshotURI  string           `json:"snapshotURI,omitempty"`  // current checkpoint (one lineage)
+	// Runtime + EngineVersion identify the engine that produced SnapshotURI. Recorded
+	// from the worker's checkpoint/suspend response and replayed on the restore request
+	// so the worker's restore guard can refuse a cross-runtime or incompatible-version
+	// restore. Empty (older entries) => the worker treats it as "gvisor, no version
+	// check" for backward compatibility. See PRD-microvm-runtime-cloud-hypervisor.md §5.2.
+	Runtime       string          `json:"runtime,omitempty"`
+	EngineVersion string          `json:"engineVersion,omitempty"`
 	Ports        []sbxapi.PortMap `json:"ports,omitempty"`
 	Health       *sbxapi.Health   `json:"health,omitempty"`       // replayed on restore (probe config)
 	IAMRoleARN   string           `json:"iamRoleArn,omitempty"`   // session's assumable AWS role; replayed on restore

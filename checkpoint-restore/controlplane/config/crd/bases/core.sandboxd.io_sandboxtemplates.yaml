@@ -215,6 +215,24 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              runtime:
+                default: gvisor
+                description: |-
+                  runtime selects the sandbox engine for this pool's workers: "gvisor" (default,
+                  a nested runsc sandbox) or "microvm" (a Cloud Hypervisor microVM). It picks the
+                  worker image's engine AND the worker pod shape (a microVM pool needs /dev/kvm
+                  and KVM-capable — bare-metal — nodes). A session only ever teleports within its
+                  own pool, so a pool is single-runtime by construction — which is also required,
+                  since a checkpoint is NOT restorable across runtimes (the worker's restore guard
+                  hard-refuses a cross-runtime restore). See
+                  docs/sandboxd/PRD/PRD-microvm-runtime-cloud-hypervisor.md.
+
+                  NOTE (Phase 0): the field is accepted API surface but only "gvisor" is wired;
+                  the microVM worker/driver land in later phases.
+                enum:
+                - gvisor
+                - microvm
+                type: string
               scheduling:
                 description: |-
                   scheduling controls worker-pod placement (nodeSelector/tolerations/spread).

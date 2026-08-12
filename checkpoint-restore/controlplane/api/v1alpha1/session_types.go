@@ -154,6 +154,15 @@ type SessionStatus struct {
 	// +optional
 	Image string `json:"image,omitempty"`
 
+	// runtime is the sandbox engine that produced snapshotURI ("gvisor"|"microvm"),
+	// mirrored so a rebuilt KV entry still refuses a cross-runtime restore.
+	// +optional
+	Runtime string `json:"runtime,omitempty"`
+
+	// engineVersion is the engine version that produced snapshotURI (restore identity).
+	// +optional
+	EngineVersion string `json:"engineVersion,omitempty"`
+
 	// The following fields make the Session.status a LOSSLESS durable mirror of the
 	// KV assignment entry, so the Valkey cache can be rebuilt after a restart
 	// (PRD-durable-assignment-state) without re-resolving a possibly-changed

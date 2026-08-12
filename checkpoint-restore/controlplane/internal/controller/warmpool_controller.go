@@ -144,11 +144,19 @@ func workerReadinessProbe() *corev1.Probe {
 	}
 }
 
-// workerVolumeMounts adds the SPIFFE socket mount (read-only) when mTLS is on.
-func workerVolumeMounts(mtls bool, propagation *corev1.MountPropagationMode) []corev1.VolumeMount {
+// kvmVolume is the name of the /dev/kvm device passthrough for microVM workers.
+const kvmVolume = "dev-kvm"
+
+// workerVolumeMounts adds the SPIFFE socket mount (read-only) when mTLS is on, and
+// the /dev/kvm device when the pool runs the microVM runtime (Cloud Hypervisor
+// needs KVM; the worker already runs privileged, so this exposes the device node).
+func workerVolumeMounts(mtls, microvm bool, propagation *corev1.MountPropagationMode) []corev1.VolumeMount {
 	vm := []corev1.VolumeMount{
 		{Name: "containerd-sock", MountPath: "/run/containerd/containerd.sock"},
 		{Name: "containerd-data", MountPath: "/var/lib/containerd", MountPropagation: propagation},
+	}
+	if microvm {
+		vm = append(vm, corev1.VolumeMount{Name: kvmVolume, MountPath: "/dev/kvm"})
 	}
 	if mtls {
 		ro := true
@@ -157,13 +165,21 @@ func workerVolumeMounts(mtls bool, propagation *corev1.MountPropagationMode) []c
 	return vm
 }
 
-// workerVolumes adds the SPIFFE CSI volume when mTLS is on.
-func workerVolumes(mtls bool, hostPathSocket, hostPathDir *corev1.HostPathType) []corev1.Volume {
+// workerVolumes adds the SPIFFE CSI volume when mTLS is on, and the /dev/kvm host
+// device when the pool runs the microVM runtime. The node must expose /dev/kvm
+// (nested-virtualization or bare-metal); the template's scheduling pins workers to
+// such nodes. See PRD-microvm-runtime-cloud-hypervisor.md + packer/.
+func workerVolumes(mtls, microvm bool, hostPathSocket, hostPathDir *corev1.HostPathType) []corev1.Volume {
 	vols := []corev1.Volume{
 		{Name: "containerd-sock", VolumeSource: corev1.VolumeSource{
 			HostPath: &corev1.HostPathVolumeSource{Path: "/run/containerd/containerd.sock", Type: hostPathSocket}}},
 		{Name: "containerd-data", VolumeSource: corev1.VolumeSource{
 			HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/containerd", Type: hostPathDir}}},
+	}
+	if microvm {
+		charDev := corev1.HostPathCharDev
+		vols = append(vols, corev1.Volume{Name: kvmVolume, VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: "/dev/kvm", Type: &charDev}}})
 	}
 	if mtls {
 		ro := true
@@ -381,6 +397,19 @@ func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool, tmpl
 		workerImage = tmpl.Spec.WorkerImage
 	}
 
+	// Runtime engine for this pool (gvisor|microvm; default gvisor). It selects the
+	// worker POD SHAPE: a microVM pool's worker needs /dev/kvm and the
+	// SANDBOXD_RUNTIME=microvm env. The engine binaries themselves ride in the worker
+	// image (chosen via workerImage above / the operator's microVM default), and the
+	// KVM-capable node placement rides in the template's scheduling (nodeSelector +
+	// toleration for the nested-virt pool) — both already pass-through. See
+	// docs/sandboxd/PRD/PRD-microvm-runtime-cloud-hypervisor.md.
+	runtimeEngine := tmpl.Spec.Runtime
+	if runtimeEngine == "" {
+		runtimeEngine = "gvisor"
+	}
+	microvm := runtimeEngine == "microvm"
+
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sandboxd-worker-" + pool.Name,
@@ -411,15 +440,15 @@ func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool, tmpl
 							{ContainerPort: 8090, Name: "http"},
 							{ContainerPort: workerHealthPort, Name: "health"},
 						},
-						Env:             r.workerEnv(tmpl),
+						Env:             r.workerEnv(tmpl, runtimeEngine),
 						Resources:       workerResources,
 						SecurityContext: &corev1.SecurityContext{Privileged: &privileged},
 						// kubelet probes hit the dedicated plain health port (:8092), never
 						// the mTLS control API on :8090 — so probing is mode-independent.
 						ReadinessProbe: workerReadinessProbe(),
-						VolumeMounts:   workerVolumeMounts(r.Worker.MTLS, &propagation),
+						VolumeMounts:   workerVolumeMounts(r.Worker.MTLS, microvm, &propagation),
 					}},
-					Volumes: workerVolumes(r.Worker.MTLS, &hostPathSocket, &hostPathDir),
+					Volumes: workerVolumes(r.Worker.MTLS, microvm, &hostPathSocket, &hostPathDir),
 				},
 			},
 		},
@@ -429,11 +458,19 @@ func (r *WarmPoolReconciler) desiredDeployment(pool *corev1alpha1.WarmPool, tmpl
 // workerEnv builds the env for a worker container: pod IP (downward API),
 // debug off, per-pool console streaming, and — when configured — the S3
 // bucket/region for checkpoint/restore.
-func (r *WarmPoolReconciler) workerEnv(tmpl *corev1alpha1.SandboxTemplate) []corev1.EnvVar {
+func (r *WarmPoolReconciler) workerEnv(tmpl *corev1alpha1.SandboxTemplate, runtimeEngine string) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "SANDBOXD_DEBUG", Value: "0"},
 		{Name: "SANDBOXD_POD_IP", ValueFrom: &corev1.EnvVarSource{
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}},
+	}
+	// Select the sandbox engine. Only set it for non-default runtimes so gVisor
+	// workers stay byte-identical (the worker defaults to gvisor when unset). A
+	// microVM worker image also bakes SANDBOXD_RUNTIME=microvm, but setting it here
+	// too makes the pod shape self-describing and lets a single image serve both if
+	// ever desired.
+	if runtimeEngine != "" && runtimeEngine != "gvisor" {
+		env = append(env, corev1.EnvVar{Name: "SANDBOXD_RUNTIME", Value: runtimeEngine})
 	}
 	// Agent OOM-protection: when (and ONLY when) the template sets an explicit
 	// memory LIMIT on the worker pod, surface that limit to the worker in bytes via

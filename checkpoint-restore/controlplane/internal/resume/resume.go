@@ -381,6 +381,7 @@ func (wf *Workflow) resumeFromSnapshot(ctx context.Context, cur *resumeapi.Sessi
 	ip, err := wf.startAndBind(ctx, cur.SID, w, bindSpec{
 		restore: true, img: cur.Image, ports: cur.Ports, health: cur.Health,
 		snapshot: cur.SnapshotURI, roleARN: cur.IAMRoleARN,
+		runtime: cur.Runtime, engineVersion: cur.EngineVersion,
 		idleTimeoutSeconds: cur.IdleTimeoutSeconds, checkpointIntervalSeconds: cur.CheckpointIntervalSeconds,
 		seed: cur, // resume() already read this entry; seed the Resuming CAS
 	})
@@ -423,6 +424,11 @@ type bindSpec struct {
 	ports                     []sbxapi.PortMap
 	health                    *sbxapi.Health
 	snapshot, roleARN         string
+	// runtime/engineVersion identify the engine that produced the snapshot; sent on
+	// /restore so the worker refuses a cross-runtime or incompatible-version resume.
+	// Empty on cold start (no snapshot) and for pre-existing entries (worker then
+	// skips the check — backward compatible).
+	runtime, engineVersion    string
 	idleTimeoutSeconds        int
 	checkpointIntervalSeconds int
 	// seed is the SessionEntry the resume path already loaded (cur). When non-nil it
@@ -463,6 +469,7 @@ func (wf *Workflow) startAndBind(ctx context.Context, sid string, w *resumeapi.W
 	if b.restore {
 		if _, err := cl.Restore(ctx, sbxapi.RestoreRequest{
 			SandboxID: sid, Image: b.img, Snapshot: b.snapshot, Ports: b.ports, Health: b.health, IAMRoleARN: b.roleARN,
+			Runtime: b.runtime, EngineVersion: b.engineVersion,
 		}); err != nil {
 			return "", fmt.Errorf("worker /restore: %w", err)
 		}

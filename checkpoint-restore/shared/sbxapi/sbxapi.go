@@ -52,22 +52,35 @@ type CheckpointRequest struct {
 
 // CheckpointResponse is the body of a successful POST /checkpoint.
 type CheckpointResponse struct {
-	SandboxID    string `json:"sandboxId"`
-	Snapshot     string `json:"snapshot"`
-	SizeBytes    int64  `json:"sizeBytes"`
-	Image        string `json:"image"`
-	Digest       string `json:"digest"`
-	RunscVersion string `json:"runscVersion"`
+	SandboxID string `json:"sandboxId"`
+	Snapshot  string `json:"snapshot"`
+	SizeBytes int64  `json:"sizeBytes"`
+	Image     string `json:"image"`
+	Digest    string `json:"digest"`
+	// Runtime + EngineVersion identify the engine that produced this snapshot so a
+	// restore can refuse a cross-runtime or incompatible-version image. RunscVersion
+	// is retained as the back-compat alias for EngineVersion (empty Runtime =>
+	// "gvisor"; empty EngineVersion => RunscVersion). See
+	// docs/sandboxd/PRD/PRD-microvm-runtime-cloud-hypervisor.md §5.2.
+	Runtime       string `json:"runtime,omitempty"`
+	EngineVersion string `json:"engineVersion,omitempty"`
+	RunscVersion  string `json:"runscVersion"`
 }
 
 // RestoreRequest is the body of POST /restore.
 type RestoreRequest struct {
-	SandboxID    string    `json:"sandboxId"`
-	Image        string    `json:"image"`
-	Snapshot     string    `json:"snapshot"`
-	RunscVersion string    `json:"runscVersion,omitempty"`
-	Ports        []PortMap `json:"ports,omitempty"`
-	Health       *Health   `json:"health,omitempty"`
+	SandboxID string `json:"sandboxId"`
+	Image     string `json:"image"`
+	Snapshot  string `json:"snapshot"`
+	// Runtime + EngineVersion pin the snapshot's engine. The worker refuses a
+	// cross-runtime restore (hard, version-independent) and an incompatible engine
+	// version within the same runtime. RunscVersion is the back-compat alias for
+	// EngineVersion. See PRD-microvm-runtime-cloud-hypervisor.md §5.2.
+	Runtime       string    `json:"runtime,omitempty"`
+	EngineVersion string    `json:"engineVersion,omitempty"`
+	RunscVersion  string    `json:"runscVersion,omitempty"`
+	Ports         []PortMap `json:"ports,omitempty"`
+	Health        *Health   `json:"health,omitempty"`
 	// IAMRoleARN re-establishes the session's AWS credential vending after teleport
 	// (same role the session ran with). Travels with the session. See RunRequest.
 	IAMRoleARN string `json:"iamRoleArn,omitempty"`
@@ -92,6 +105,11 @@ type SuspendResponse struct {
 	Snapshot  string `json:"snapshot"` // S3 prefix of the checkpoint
 	Image     string `json:"image"`
 	Suspended bool   `json:"suspended"`
+	// Runtime + EngineVersion identify the engine that produced this checkpoint, so
+	// the control plane can record them on the session and refuse a cross-runtime /
+	// incompatible-version restore later. See PRD-microvm-runtime-cloud-hypervisor.md §5.2.
+	Runtime       string `json:"runtime,omitempty"`
+	EngineVersion string `json:"engineVersion,omitempty"`
 }
 
 // StatusResponse is the body of GET /status?sandboxId=.

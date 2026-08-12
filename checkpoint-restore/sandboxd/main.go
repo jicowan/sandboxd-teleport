@@ -20,8 +20,8 @@ import (
 )
 
 type server struct {
-	work     string // base workdir (bundles, runsc root, image staging)
-	runsc    *runscDriver
+	work     string        // base workdir (bundles, runtime root, image staging)
+	rt       runtimeDriver // the sandbox runtime engine (gVisor today; see runtime.go)
 	s3       *s3Store
 	bucket   string
 	podIP    string      // worker pod's routable IP (for nftables DNAT target)
@@ -39,16 +39,22 @@ type server struct {
 // sandbox is the metadata needed to teleport: which image it is + its config
 // digest + latest snapshot URI + port mappings. Persisted to <work>/meta/<id>.json.
 type sandbox struct {
-	ID         string    `json:"id"`
-	Image      string    `json:"image"`
-	Digest     string    `json:"digest"`
-	Bundle     string    `json:"bundle"`
-	Snapshot   string    `json:"snapshot"` // s3 prefix of the latest checkpoint
-	Ports      []portMap `json:"ports"`    // podIP:host -> interior:container
-	Health     health    `json:"health"`   // restart policy + readiness probe + idle
-	RunscVer   string    `json:"runscVersion"`
-	IAMRoleARN string    `json:"iamRoleArn,omitempty"` // session's assumable role (cred vendor)
-	CreatedAt  string    `json:"createdAt"`
+	ID       string    `json:"id"`
+	Image    string    `json:"image"`
+	Digest   string    `json:"digest"`
+	Bundle   string    `json:"bundle"`
+	Snapshot string    `json:"snapshot"` // s3 prefix of the latest checkpoint
+	Ports    []portMap `json:"ports"`    // podIP:host -> interior:container
+	Health   health    `json:"health"`   // restart policy + readiness probe + idle
+	// Runtime + EngineVersion identify the engine that produced this sandbox's
+	// snapshots (recorded so a restore can refuse a cross-runtime or incompatible-
+	// version image). RunscVer is retained for backward-compat with metadata written
+	// by older workers; new writes set EngineVersion (== RunscVer for gVisor).
+	Runtime       string `json:"runtime,omitempty"`
+	EngineVersion string `json:"engineVersion,omitempty"`
+	RunscVer      string `json:"runscVersion"`
+	IAMRoleARN    string `json:"iamRoleArn,omitempty"` // session's assumable role (cred vendor)
+	CreatedAt     string `json:"createdAt"`
 }
 
 func main() {
@@ -65,7 +71,7 @@ func main() {
 
 	s := &server{
 		work:     work,
-		runsc:    newRunsc(runscBin, filepath.Join(work, "rt")),
+		rt:       newRuntimeDriver(runscBin, runtimeStateRoot(work)),
 		bucket:   bucket,
 		podIP:    os.Getenv("SANDBOXD_POD_IP"),          // set via downward API
 		compress: os.Getenv("SANDBOXD_COMPRESS") != "0", // default ON (A/B: ~4x smaller, ~2x faster suspend); opt out with =0
@@ -98,7 +104,7 @@ func main() {
 	}
 	// Networking: only the "sandbox" (netstack) mode supports the checkpointable
 	// veth/interior-netns data path. With host-net there's no netns to build.
-	if s.runsc.network == "sandbox" && s.podIP != "" {
+	if s.rt.networkMode() == "sandbox" && s.podIP != "" {
 		if err := ensureInteriorNetNS(); err != nil {
 			log.Printf("WARN: interior netns setup failed (no sandbox networking): %v", err)
 		} else {
@@ -109,7 +115,7 @@ func main() {
 			ensureCredVendorAddr()
 		}
 	} else {
-		log.Printf("networking: sandbox data path disabled (network=%s podIP=%q)", s.runsc.network, s.podIP)
+		log.Printf("networking: sandbox data path disabled (network=%s podIP=%q)", s.rt.networkMode(), s.podIP)
 	}
 
 	// Reconcile in-memory state from persisted metadata + runsc on startup.
@@ -120,7 +126,7 @@ func main() {
 	go s.supervise(envDuration("SANDBOXD_SUPERVISE_INTERVAL", 10*time.Second))
 	// Stream nested gVisor (sentry/gofer) debug logs to stdout so they show up in
 	// `kubectl logs` (in addition to the /logs endpoint).
-	go s.runsc.tailToStdout()
+	go s.rt.streamLogsToStdout()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/run", s.handleRun)
@@ -136,7 +142,14 @@ func main() {
 	mux.HandleFunc("/metrics", s.handleMetrics)   // GET : basic counters
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, 200, map[string]string{"runsc": s.runsc.version(), "bucket": bucket})
+		// "runsc" retained for back-compat with existing scrapers; "runtime" +
+		// "engineVersion" are the runtime-neutral fields.
+		writeJSON(w, 200, map[string]string{
+			"runsc":         s.rt.version(),
+			"runtime":       s.rt.runtimeName(),
+			"engineVersion": s.rt.version(),
+			"bucket":        bucket,
+		})
 	})
 
 	// Dedicated PLAIN-HTTP health listener for kubelet probes. It is ALWAYS plain
@@ -220,8 +233,8 @@ func main() {
 		}
 		defer closeSrc()
 		srv.TLSConfig = cfg
-		log.Printf("sandboxd listening on %s with SPIFFE mTLS (authorize caller=%s) (work=%s runsc=%s bucket=%s gc=%s)",
-			addr, operatorID, work, runscBin, bucket, gcEvery)
+		log.Printf("sandboxd listening on %s with SPIFFE mTLS (authorize caller=%s) (work=%s runtime=%s engine=%s bucket=%s gc=%s)",
+			addr, operatorID, work, s.rt.runtimeName(), s.rt.version(), bucket, gcEvery)
 		if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
 		}
@@ -229,7 +242,7 @@ func main() {
 		return
 	}
 
-	log.Printf("sandboxd listening on %s (work=%s runsc=%s bucket=%s gc=%s)", addr, work, runscBin, bucket, gcEvery)
+	log.Printf("sandboxd listening on %s (work=%s runtime=%s engine=%s bucket=%s gc=%s)", addr, work, s.rt.runtimeName(), s.rt.version(), bucket, gcEvery)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
@@ -294,15 +307,21 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 				req.Ports[i].Host = req.Ports[i].Container
 			}
 		}
-		if err := setupSandboxNet(s.podIP, req.Ports); err != nil {
-			lg("network setup FAILED: %v", err)
-			s.cleanupArtifacts(id)
-			writeErr(w, 500, "network: "+err.Error())
-			return
+		// A driver that builds its OWN interior network (microVM) sets up the veth +
+		// inbound DNAT + cred-vendor routing itself, inside createStart (from the ports
+		// arg). Only build it here (and point the spec at the gVisor netns) for drivers
+		// that don't (gVisor). See runtimeDriver.buildsOwnNetwork.
+		if !s.rt.buildsOwnNetwork() {
+			if err := setupSandboxNet(s.podIP, req.Ports); err != nil {
+				lg("network setup FAILED: %v", err)
+				s.cleanupArtifacts(id)
+				writeErr(w, 500, "network: "+err.Error())
+				return
+			}
+			// DNS (/etc/resolv.conf) was already written into the rootfs by
+			// prepareRootfsContainerd on the correct mount-ns thread; nothing to do here.
+			netnsPath = interiorNetNSPath
 		}
-		// DNS (/etc/resolv.conf) was already written into the rootfs by
-		// prepareRootfsContainerd on the correct mount-ns thread; nothing to do here.
-		netnsPath = interiorNetNSPath
 		lg("network up: %s:%v -> %s", s.podIP, req.Ports, interiorIP)
 	}
 	if err := writeOCISpec(bundle, ic, req.Cmd, req.Env, netnsPath, s.memLimit); err != nil {
@@ -312,20 +331,21 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "spec: "+err.Error())
 		return
 	}
-	lg("runsc run -detach")
-	if err := s.runsc.createStart(id, bundle); err != nil {
-		lg("runsc FAILED: %v", err)
-		s.runsc.delete(id) // clear any partial runsc state
+	lg("%s createStart", s.rt.runtimeName())
+	if err := s.rt.createStart(id, bundle, req.Ports); err != nil {
+		lg("runtime FAILED: %v", err)
+		s.rt.delete(id) // clear any partial runtime state
 		teardownSandboxNet()
 		s.cleanupArtifacts(id)
 		s.dropCred(id)
-		writeErr(w, 500, "runsc: "+err.Error())
+		writeErr(w, 500, "runtime: "+err.Error())
 		return
 	}
-	st, _ := s.runsc.state(id)
+	st, _ := s.rt.state(id)
 	lg("started, status=%s", st)
 	s.put(&sandbox{ID: id, Image: req.Image, Digest: ic.Digest, Bundle: bundle,
-		Ports: req.Ports, Health: req.Health, RunscVer: s.runsc.version(),
+		Ports: req.Ports, Health: req.Health,
+		Runtime: s.rt.runtimeName(), EngineVersion: s.rt.version(), RunscVer: s.rt.version(),
 		IAMRoleARN: req.IAMRoleARN,
 		CreatedAt:  time.Now().UTC().Format(time.RFC3339)})
 	writeJSON(w, 200, map[string]any{"sandboxId": id, "status": st, "image": req.Image, "ports": req.Ports})
@@ -371,13 +391,13 @@ func (s *server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		os.WriteFile(filepath.Join(imgDir, "config.json"), b, 0o644)
 	}
 	t0 := time.Now()
-	if err := s.runsc.checkpoint(req.SandboxID, imgDir, req.LeaveRunning, compress); err != nil {
-		lg("runsc checkpoint FAILED: %v", err)
+	if err := s.rt.checkpoint(req.SandboxID, imgDir, req.LeaveRunning, compress); err != nil {
+		lg("checkpoint FAILED: %v", err)
 		writeErr(w, 500, err.Error())
 		return
 	}
 	sz := dirSize(imgDir)
-	lg("runsc checkpoint OK in %s (%d bytes)", time.Since(t0), sz)
+	lg("checkpoint OK in %s (%d bytes)", time.Since(t0), sz)
 	snapID := fmt.Sprintf("snap-%d", time.Now().UnixNano())
 	prefix := fmt.Sprintf("sandboxes/%s/%s", req.SandboxID, snapID)
 	lg("uploading %d bytes -> s3://%s/%s", sz, s.bucket, prefix)
@@ -400,19 +420,22 @@ func (s *server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	metrics.inc("checkpoints")
 	lg("DONE: snapshot=%s uploaded in %s", prefix, time.Since(tu))
 	writeJSON(w, 200, map[string]any{"sandboxId": req.SandboxID, "snapshot": prefix,
-		"sizeBytes": sz, "image": sb.Image, "digest": sb.Digest, "runscVersion": sb.RunscVer})
+		"sizeBytes": sz, "image": sb.Image, "digest": sb.Digest,
+		"runtime": s.rt.runtimeName(), "engineVersion": s.rt.version(), "runscVersion": sb.RunscVer})
 }
 
 // POST /restore {sandboxId, image, snapshot, runscVersion?}
 func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SandboxID    string    `json:"sandboxId"`
-		Image        string    `json:"image"`
-		Snapshot     string    `json:"snapshot"`
-		RunscVersion string    `json:"runscVersion"`
-		Ports        []portMap `json:"ports"`
-		Health       health    `json:"health"`
-		IAMRoleARN   string    `json:"iamRoleArn"`
+		SandboxID     string    `json:"sandboxId"`
+		Image         string    `json:"image"`
+		Snapshot      string    `json:"snapshot"`
+		Runtime       string    `json:"runtime"`       // engine that produced the snapshot ("gvisor"|"microvm")
+		EngineVersion string    `json:"engineVersion"` // engine version of the snapshot
+		RunscVersion  string    `json:"runscVersion"`  // back-compat alias for EngineVersion (gVisor)
+		Ports         []portMap `json:"ports"`
+		Health        health    `json:"health"`
+		IAMRoleARN    string    `json:"iamRoleArn"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -430,9 +453,13 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "sandbox already exists: "+id)
 		return
 	}
-	if req.RunscVersion != "" && req.RunscVersion != s.runsc.version() {
-		writeJSON(w, 409, map[string]string{"error": "runsc version mismatch",
-			"want": req.RunscVersion, "have": s.runsc.version()})
+	// Restore guard, generalized to {runtime, version} (see checkRestoreCompat):
+	// refuse a cross-runtime restore unconditionally, and an engine-version mismatch
+	// within the same runtime. EngineVersion is the new field; RunscVersion is its
+	// back-compat alias so older callers/snapshots keep working.
+	if v := checkRestoreCompat(req.Runtime, req.EngineVersion, req.RunscVersion, s.rt.runtimeName(), s.rt.version()); !v.OK {
+		writeJSON(w, 409, map[string]string{"error": v.Kind,
+			"runtime": s.rt.runtimeName(), "want": v.Want, "have": v.Have})
 		return
 	}
 	if s.s3 == nil {
@@ -477,11 +504,15 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 				req.Ports[i].Host = req.Ports[i].Container
 			}
 		}
-		if err := setupSandboxNet(s.podIP, req.Ports); err != nil {
-			lg("network setup FAILED: %v", err)
-			s.cleanupArtifacts(id)
-			writeErr(w, 500, "network: "+err.Error())
-			return
+		// microVM rebuilds its own veth + DNAT + cred routing inside restore (from the
+		// ports arg); gVisor's is built here. See runtimeDriver.buildsOwnNetwork.
+		if !s.rt.buildsOwnNetwork() {
+			if err := setupSandboxNet(s.podIP, req.Ports); err != nil {
+				lg("network setup FAILED: %v", err)
+				s.cleanupArtifacts(id)
+				writeErr(w, 500, "network: "+err.Error())
+				return
+			}
 		}
 		// write resolv.conf into the freshly-rebuilt rootfs (the saved config.json
 		// no longer bind-mounts it; DNS is a direct file in the rootfs).
@@ -515,20 +546,21 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		s.cred.register(id, req.IAMRoleARN)
 	}
 	tr := time.Now()
-	if err := s.runsc.restore(id, bundle, imgDir); err != nil {
-		lg("runsc restore FAILED: %v", err)
-		s.runsc.delete(id)
+	if err := s.rt.restore(id, bundle, imgDir, req.Ports); err != nil {
+		lg("restore FAILED: %v", err)
+		s.rt.delete(id)
 		teardownSandboxNet()
 		s.cleanupArtifacts(id)
 		s.dropCred(id)
 		writeErr(w, 500, err.Error())
 		return
 	}
-	st, _ := s.runsc.state(id)
+	st, _ := s.rt.state(id)
 	metrics.inc("restores")
 	lg("DONE in %s, status=%s", time.Since(tr), st)
 	s.put(&sandbox{ID: id, Image: req.Image, Digest: ic.Digest, Bundle: bundle,
-		Snapshot: req.Snapshot, Ports: req.Ports, Health: req.Health, RunscVer: s.runsc.version(),
+		Snapshot: req.Snapshot, Ports: req.Ports, Health: req.Health,
+		Runtime: s.rt.runtimeName(), EngineVersion: s.rt.version(), RunscVer: s.rt.version(),
 		IAMRoleARN: req.IAMRoleARN,
 		CreatedAt:  time.Now().UTC().Format(time.RFC3339)})
 	writeJSON(w, 200, map[string]any{"sandboxId": id, "status": st, "restoredFrom": req.Snapshot, "ports": req.Ports})
@@ -540,7 +572,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	st, err := s.runsc.state(id)
+	st, err := s.rt.state(id)
 	if err != nil {
 		writeErr(w, 404, err.Error())
 		return
@@ -580,7 +612,7 @@ func (s *server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 	if b, err := os.ReadFile(filepath.Join(sb.Bundle, "config.json")); err == nil {
 		os.WriteFile(filepath.Join(imgDir, "config.json"), b, 0o644)
 	}
-	if err := s.runsc.checkpoint(req.SandboxID, imgDir, false, s.compress); err != nil {
+	if err := s.rt.checkpoint(req.SandboxID, imgDir, false, s.compress); err != nil {
 		lg("checkpoint FAILED: %v", err)
 		writeErr(w, 500, "checkpoint: "+err.Error())
 		return
@@ -596,7 +628,7 @@ func (s *server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// free the worker
-	s.runsc.delete(req.SandboxID)
+	s.rt.delete(req.SandboxID)
 	if len(sb.Ports) > 0 {
 		teardownSandboxNet()
 	}
@@ -606,7 +638,8 @@ func (s *server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 	metrics.inc("suspends")
 	lg("SUSPENDED: snapshot=%s, worker freed", prefix)
 	writeJSON(w, 200, map[string]any{"sandboxId": req.SandboxID, "snapshot": prefix,
-		"image": sb.Image, "suspended": true})
+		"image": sb.Image, "suspended": true,
+		"runtime": s.rt.runtimeName(), "engineVersion": s.rt.version()})
 }
 
 // POST /reset {sandboxId} — free the worker WITHOUT checkpointing (discard state).
@@ -622,7 +655,7 @@ func (s *server) handleReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sb := s.get(req.SandboxID)
-	s.runsc.delete(req.SandboxID)
+	s.rt.delete(req.SandboxID)
 	if sb != nil && len(sb.Ports) > 0 {
 		teardownSandboxNet()
 	}
@@ -654,7 +687,7 @@ func (s *server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// best-effort delete of runsc state, then network, artifacts + metadata
-	if err := s.runsc.delete(id); err != nil {
+	if err := s.rt.delete(id); err != nil {
 		reqLogger(r, "delete", id)("runsc delete: %v (continuing cleanup)", err)
 	}
 	if sb := s.get(id); sb != nil && len(sb.Ports) > 0 {
@@ -685,7 +718,7 @@ func (s *server) handleLogs(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	fmt.Fprint(w, s.runsc.tailGvisorLogs(64*1024))
+	fmt.Fprint(w, s.rt.recentLogs(64*1024))
 }
 
 func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
