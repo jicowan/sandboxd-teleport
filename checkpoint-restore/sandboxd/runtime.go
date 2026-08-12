@@ -63,8 +63,11 @@ func newRuntimeDriver(runscBin, root string) runtimeDriver {
 	case "gvisor":
 		return newRunsc(runscBin, root)
 	case "microvm":
-		log.Fatalf("SANDBOXD_RUNTIME=microvm is not implemented yet (see docs/sandboxd/PRD/PRD-microvm-runtime-cloud-hypervisor.md, Phase 1); this worker image only supports gvisor")
-		return nil
+		// Cloud Hypervisor microVM engine (Phase 1b). The CH REST client + node
+		// KVM/CH/virtiofs prerequisites are validated; boot/checkpoint/restore verbs
+		// land in later slices (chDriver returns a clear not-implemented error until
+		// then). Uses the same state root as gVisor would.
+		return newCH(root)
 	default:
 		log.Fatalf("unknown SANDBOXD_RUNTIME=%q (want gvisor|microvm)", rt)
 		return nil
