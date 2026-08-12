@@ -79,6 +79,68 @@ var _ = Describe("WarmPool Controller", func() {
 		Expect(dep.OwnerReferences[0].Name).To(Equal("pool-a"))
 	})
 
+	It("shapes a microVM pool's worker pod with /dev/kvm + SANDBOXD_RUNTIME (gVisor has neither)", func() {
+		ctx := context.Background()
+
+		// A microVM-runtime template.
+		mvTmpl := &corev1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "tmpl-mv", Namespace: ns},
+			Spec: corev1alpha1.SandboxTemplateSpec{
+				Image: "redis:7-alpine", Runtime: "microvm", Ports: testPorts(), Health: testHealth(),
+			},
+		}
+		Expect(k8sClient.Create(ctx, mvTmpl)).To(Succeed())
+		mvPool := &corev1alpha1.WarmPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "pool-mv", Namespace: ns},
+			Spec:       corev1alpha1.WarmPoolSpec{TemplateRef: corev1alpha1.LocalRef{Name: "tmpl-mv"}, Replicas: 1},
+		}
+		Expect(k8sClient.Create(ctx, mvPool)).To(Succeed())
+		reconcileOnce("pool-mv")
+
+		var mvDep appsv1.Deployment
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "sandboxd-worker-pool-mv"}, &mvDep)).To(Succeed())
+		podSpec := mvDep.Spec.Template.Spec
+		ctr := podSpec.Containers[0]
+
+		// SANDBOXD_RUNTIME=microvm env is injected.
+		Expect(ctr.Env).To(ContainElement(corev1.EnvVar{Name: "SANDBOXD_RUNTIME", Value: "microvm"}))
+		// /dev/kvm device: a CharDevice hostPath volume + a mount.
+		var kvmVol *corev1.Volume
+		for i := range podSpec.Volumes {
+			if podSpec.Volumes[i].Name == kvmVolume {
+				kvmVol = &podSpec.Volumes[i]
+			}
+		}
+		Expect(kvmVol).NotTo(BeNil(), "microVM worker must have a /dev/kvm volume")
+		Expect(kvmVol.HostPath).NotTo(BeNil())
+		Expect(kvmVol.HostPath.Path).To(Equal("/dev/kvm"))
+		Expect(*kvmVol.HostPath.Type).To(Equal(corev1.HostPathCharDev))
+		Expect(ctr.VolumeMounts).To(ContainElement(corev1.VolumeMount{Name: kvmVolume, MountPath: "/dev/kvm"}))
+
+		// A default (gVisor) pool gets NEITHER — the pod shape stays unchanged.
+		gvTmpl := &corev1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "tmpl-gv", Namespace: ns},
+			Spec:       corev1alpha1.SandboxTemplateSpec{Image: "python:3.12-slim", Ports: testPorts(), Health: testHealth()},
+		}
+		Expect(k8sClient.Create(ctx, gvTmpl)).To(Succeed())
+		gvPool := &corev1alpha1.WarmPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "pool-gv", Namespace: ns},
+			Spec:       corev1alpha1.WarmPoolSpec{TemplateRef: corev1alpha1.LocalRef{Name: "tmpl-gv"}, Replicas: 1},
+		}
+		Expect(k8sClient.Create(ctx, gvPool)).To(Succeed())
+		reconcileOnce("pool-gv")
+
+		var gvDep appsv1.Deployment
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "sandboxd-worker-pool-gv"}, &gvDep)).To(Succeed())
+		gvCtr := gvDep.Spec.Template.Spec.Containers[0]
+		for _, e := range gvCtr.Env {
+			Expect(e.Name).NotTo(Equal("SANDBOXD_RUNTIME"), "gVisor worker must not set SANDBOXD_RUNTIME")
+		}
+		for _, v := range gvDep.Spec.Template.Spec.Volumes {
+			Expect(v.Name).NotTo(Equal(kvmVolume), "gVisor worker must not mount /dev/kvm")
+		}
+	})
+
 	It("updates replicas when the pool spec changes", func() {
 		ctx := context.Background()
 		var pool corev1alpha1.WarmPool
