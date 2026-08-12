@@ -20,10 +20,14 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
+
+	"github.com/jicowan/aio-sandbox/sandboxd/ateomnet"
+	"github.com/vishvananda/netns"
 )
 
 // runOnce execs a command and returns trimmed stdout (best-effort; errors bubble).
@@ -51,7 +55,12 @@ type chDriver struct {
 	virtiofsd string // virtiofsd binary path
 	kernel    string // guest kernel (virtiofs-enabled, e.g. kata vmlinux.container)
 	ver       string // resolved cloud-hypervisor version (recorded in snapshots)
-	network   string // data-path mode; microVM path is "sandbox" (see microvm_net.go, later)
+	network   string // data-path mode; microVM path is "sandbox" (see microvm_net.go)
+
+	// interiorNetNS is the persistent per-worker netns that hosts each sandbox's
+	// veth peer (the actor eth0); the tap that CH's virtio-net attaches to is
+	// cross-connected to that eth0 (see microvm_net.go). Created once at newCH.
+	interiorNetNS netns.NsHandle
 
 	mu  sync.Mutex
 	vms map[string]*chVM
@@ -71,8 +80,22 @@ func newCH(root string) *chDriver {
 		vms:       map[string]*chVM{},
 	}
 	d.ver = d.resolveVersion()
+	// Create the persistent interior netns for the sandbox veth peers (idempotent
+	// by name). Best-effort at construction: a failure only disables the sandbox
+	// data path (createStart will error clearly), it must not crash a worker whose
+	// SANDBOXD_RUNTIME=microvm but which is only, say, answering /healthz.
+	if ns, err := ateomnet.CreateNetNSWithoutSwitching(microvmInteriorNetNSName); err != nil {
+		log.Printf("WARN: microvm interior netns setup failed (no sandbox networking): %v", err)
+	} else {
+		d.interiorNetNS = ns
+	}
 	return d
 }
+
+// microvmInteriorNetNSName is the persistent per-worker interior netns for microVM
+// sandbox veth peers (one worker hosts one sandbox today, matching gVisor's
+// single interior netns).
+const microvmInteriorNetNSName = "sbx-microvm"
 
 // resolveVersion runs `cloud-hypervisor --version` once (best-effort). An empty
 // result disables the checkpoint/restore engine-version guard, same as runsc.
