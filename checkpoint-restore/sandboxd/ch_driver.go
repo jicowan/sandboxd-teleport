@@ -19,14 +19,18 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/jicowan/aio-sandbox/sandboxd/ateomnet"
+	"github.com/jicowan/aio-sandbox/sandboxd/ch"
+	"github.com/jicowan/aio-sandbox/sandboxd/kata"
 	"github.com/vishvananda/netns"
 )
 
@@ -44,8 +48,10 @@ func runOnce(bin string, args ...string) (string, error) {
 // chVM tracks one running microVM sandbox on this worker.
 type chVM struct {
 	id        string
-	apiSocket string // cloud-hypervisor REST api-socket for this sandbox
-	// (later slices: virtiofsd cmd, kata-agent conn, tap fds, snapshot dir, ...)
+	apiSocket string            // cloud-hypervisor REST api-socket for this sandbox
+	chCmd     *exec.Cmd         // the cloud-hypervisor VMM process we own
+	vfsdCmd   *exec.Cmd         // the virtiofsd process serving the rootfs RO lower
+	agent     *kata.AgentClient // open kata-agent ttrpc client (closed on delete)
 }
 
 // chDriver implements runtimeDriver for Cloud Hypervisor microVMs.
@@ -117,9 +123,7 @@ func errNotWired(verb string) error {
 	return fmt.Errorf("microvm %s not yet implemented (Phase 1b: needs virtiofs rootfs + kata-agent + microvm networking port); the CH REST client + node KVM/CH/virtiofs prerequisites are validated — see PRD-microvm-runtime-cloud-hypervisor.md §6", verb)
 }
 
-// --- runtimeDriver interface ---
-
-func (d *chDriver) createStart(id, bundle string) error { return errNotWired("createStart") }
+// --- runtimeDriver interface (createStart is in microvm_boot.go) ---
 
 func (d *chDriver) checkpoint(id, imageDir string, leaveRunning, compress bool) error {
 	return errNotWired("checkpoint")
@@ -127,25 +131,54 @@ func (d *chDriver) checkpoint(id, imageDir string, leaveRunning, compress bool) 
 
 func (d *chDriver) restore(id, bundle, imageDir string) error { return errNotWired("restore") }
 
-// state returns the CH VM state mapped to sandboxd's vocabulary. Unknown/absent
-// sandbox → "stopped" (matches how the supervisor treats a gone sandbox).
+// state returns the CH VM state mapped to sandboxd's vocabulary. An absent sandbox
+// → "stopped" (matches how the supervisor treats a gone sandbox). A tracked one is
+// queried via the CH api-socket: Running/Paused → "running", else "stopped".
 func (d *chDriver) state(id string) (string, error) {
 	d.mu.Lock()
-	_, ok := d.vms[id]
+	vm, ok := d.vms[id]
 	d.mu.Unlock()
 	if !ok {
 		return "stopped", nil
 	}
-	// Later slice: query ch.Client.State() and map Running->running, Paused->paused.
-	return "stopped", nil
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	st, err := ch.NewClient(vm.apiSocket).State(ctx)
+	if err != nil {
+		return "stopped", nil // VMM gone/unreachable → treat as stopped
+	}
+	switch st {
+	case "Running", "Paused":
+		return "running", nil
+	default:
+		return "stopped", nil
+	}
 }
 
-// delete tears down the microVM + its VMM/virtiofsd and frees the slot. With no
-// VMs wired yet this is a no-op cleanup of any per-sandbox dir.
+// delete tears down the microVM sandbox: close the agent, kill the VMM +
+// virtiofsd, clean per-sandbox host state, and free the slot. Best-effort and
+// idempotent.
 func (d *chDriver) delete(id string) error {
 	d.mu.Lock()
+	vm := d.vms[id]
 	delete(d.vms, id)
 	d.mu.Unlock()
+	if vm != nil {
+		if vm.agent != nil {
+			_ = vm.agent.Close()
+		}
+		if vm.chCmd != nil && vm.chCmd.Process != nil {
+			_ = vm.chCmd.Process.Kill()
+			_, _ = vm.chCmd.Process.Wait()
+		}
+		if vm.vfsdCmd != nil && vm.vfsdCmd.Process != nil {
+			_ = vm.vfsdCmd.Process.Kill()
+			_, _ = vm.vfsdCmd.Process.Wait()
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	kata.CleanupSandboxState(ctx, id)
+	cancel()
 	os.RemoveAll(d.vmDir(id))
 	return nil
 }
