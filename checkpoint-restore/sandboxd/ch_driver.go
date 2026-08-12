@@ -62,6 +62,9 @@ type chVM struct {
 	// keeps the merge path correct for a future non-prefaulting CH.
 	restoreSourceDir      string
 	snapshotSelfContained bool
+
+	// stopOOM signals the per-VM OOM-watcher goroutine to exit (closed on delete).
+	stopOOM chan struct{}
 }
 
 // chDriver implements runtimeDriver for Cloud Hypervisor microVMs.
@@ -168,6 +171,31 @@ func (d *chDriver) state(id string) (string, error) {
 	}
 }
 
+// watchOOM runs the per-VM OOM-event watcher: it loops on the kata-agent's blocking
+// GetOOMEvent and logs + counts each guest-cgroup OOM. This is observability parity
+// with the gVisor path (which scans the HOST cgroup in supervisor.checkOne) — a
+// microVM workload OOMs INSIDE the guest, invisible to the host cgroup, so the only
+// way to see it is to ask the in-guest agent. The goroutine exits when the agent
+// connection closes (VM torn down) or delete() closes stop. Best-effort diagnostics:
+// it never affects sandbox lifecycle, matching the gVisor OOM scan.
+func (d *chDriver) watchOOM(id string, agent *kata.AgentClient, stop <-chan struct{}) {
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		cid, err := agent.GetOOMEvent(context.Background())
+		if err != nil {
+			// Agent gone (VM torn down) or ctx done → end the watcher. Not logged as an
+			// error: a normal teardown closes the connection, which lands here.
+			return
+		}
+		log.Printf("microvm %s: guest OOM-kill in container %q (workload exceeded guest memory)", id, cid)
+		metrics.inc("sandbox_oom_kills")
+	}
+}
+
 // delete tears down the microVM sandbox: close the agent, kill the VMM +
 // virtiofsd, clean per-sandbox host state, and free the slot. Best-effort and
 // idempotent.
@@ -177,6 +205,9 @@ func (d *chDriver) delete(id string) error {
 	delete(d.vms, id)
 	d.mu.Unlock()
 	if vm != nil {
+		if vm.stopOOM != nil {
+			close(vm.stopOOM) // stop the OOM-watcher goroutine
+		}
 		if vm.agent != nil {
 			_ = vm.agent.Close()
 		}

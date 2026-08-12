@@ -21,8 +21,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -31,6 +33,22 @@ import (
 	"github.com/jicowan/aio-sandbox/sandboxd/ch"
 	"github.com/jicowan/aio-sandbox/sandboxd/kata"
 )
+
+// entropyReseedBytes is how many fresh random bytes we inject into the guest CRNG on
+// restore. 32 bytes (256 bits) is plenty to reseed — the kernel mixes it into the
+// pool; the point is uniqueness per clone, not volume.
+const entropyReseedBytes = 32
+
+// reseedGuestEntropy reads fresh host entropy and injects it into the restored
+// guest's CRNG via the kata-agent, forking each clone's randomness apart (see the
+// VMGenID note at the call site).
+func reseedGuestEntropy(ctx context.Context, ac *kata.AgentClient) error {
+	seed := make([]byte, entropyReseedBytes)
+	if _, err := rand.Read(seed); err != nil {
+		return fmt.Errorf("reading host entropy: %w", err)
+	}
+	return ac.ReseedRandomDev(ctx, seed)
+}
 
 // chSnapshotFiles are the CH snapshot artifacts, namespaced with a clh- prefix so
 // they sit flat in imageDir alongside the /checkpoint handler's own config.json
@@ -311,19 +329,43 @@ func (d *chDriver) restore(id, bundle, imageDir string) (retErr error) {
 	}
 
 	// Re-attach the kata-agent client (the restored guest's agent is alive) so
-	// delete() can close it and log surfacing can resume. Best-effort — a failed
-	// dial must not fail an already-running restore.
+	// delete() can close it and log surfacing can resume, AND so we can apply the two
+	// post-restore guest fixups below. Best-effort — a failed dial must not fail an
+	// already-running restore.
 	var ac *kata.AgentClient
 	if a, derr := kata.DialAgentRetry(ctx, kata.VsockSocketPath(id), 15*time.Second); derr == nil {
 		ac = a
+		// Post-restore guest fixups (see PRD §4.5). Both are best-effort: the sandbox
+		// is already Running, so a failure here is logged, not fatal.
+		//
+		// 1) Entropy reseed (VMGenID analog). The guest resumes with the CRNG state
+		//    frozen at snapshot time; N clones from one base snapshot would generate
+		//    IDENTICAL randomness. Inject fresh host entropy so each clone diverges.
+		if err := reseedGuestEntropy(ctx, ac); err != nil {
+			log.Printf("[microvm restore %s] WARN: entropy reseed failed (clones may share randomness): %v", id, err)
+		}
+		// 2) Clock-fixup. The guest wall clock is frozen at snapshot time; correct it
+		//    to the host's current time so TLS/token/log timestamps are sane on resume.
+		now := time.Now()
+		if err := ac.SetGuestDateTime(ctx, now.Unix(), int64(now.Nanosecond()/1000)); err != nil {
+			log.Printf("[microvm restore %s] WARN: guest clock fixup failed (guest clock stale until NTP): %v", id, err)
+		}
 	}
 
+	var stopOOM chan struct{}
+	if ac != nil {
+		stopOOM = make(chan struct{})
+	}
 	d.mu.Lock()
 	d.vms[id] = &chVM{
 		id: id, apiSocket: apiSocket, chCmd: chCmd, vfsdCmd: vfsdCmd, agent: ac,
 		restoreSourceDir: restoreDir, snapshotSelfContained: selfContained,
+		stopOOM: stopOOM,
 	}
 	d.mu.Unlock()
+	if ac != nil {
+		go d.watchOOM(id, ac, stopOOM) // observability parity: surface guest OOM-kills
+	}
 	return nil
 }
 

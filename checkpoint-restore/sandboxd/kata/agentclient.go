@@ -230,6 +230,50 @@ func (a *AgentClient) AddARPNeighbors(ctx context.Context, neighbors []*agentpb.
 	return nil
 }
 
+// ReseedRandomDev injects fresh entropy into the guest CRNG (writes to the guest's
+// random device). This is the microVM analog of a VMGenID change: a guest restored
+// from a snapshot resumes with the EXACT CRNG state frozen at snapshot time, so N
+// clones forked from one base snapshot would otherwise produce identical "random"
+// output (UUIDs, TLS nonces, session keys). Reseeding with host-unique entropy right
+// after restore forks each clone's randomness apart. Mirrors grpc.AgentService/
+// ReseedRandomDev. seed should be fresh, per-clone random bytes.
+func (a *AgentClient) ReseedRandomDev(ctx context.Context, seed []byte) error {
+	req := &agentpb.ReseedRandomDevRequest{Data: seed}
+	if err := a.client.Call(ctx, "grpc.AgentService", "ReseedRandomDev", req, &emptypb.Empty{}); err != nil {
+		return fmt.Errorf("agent ReseedRandomDev: %w", err)
+	}
+	return nil
+}
+
+// SetGuestDateTime sets the guest wall clock to sec.usec since the Unix epoch. A
+// guest restored from a snapshot wakes with the wall clock frozen at snapshot time;
+// after a long suspend that skew can be minutes to days, breaking TLS validity
+// windows, token expiry, and logs until NTP (if any) catches up. Setting it from the
+// host's current time on restore corrects the jump immediately. Mirrors
+// grpc.AgentService/SetGuestDateTime.
+func (a *AgentClient) SetGuestDateTime(ctx context.Context, sec, usec int64) error {
+	req := &agentpb.SetGuestDateTimeRequest{Sec: sec, Usec: usec}
+	if err := a.client.Call(ctx, "grpc.AgentService", "SetGuestDateTime", req, &emptypb.Empty{}); err != nil {
+		return fmt.Errorf("agent SetGuestDateTime: %w", err)
+	}
+	return nil
+}
+
+// GetOOMEvent blocks in the agent until the guest fires a cgroup OOM event, then
+// returns the offending container id. It is the microVM analog of the gVisor path's
+// host-cgroup OOM scan (sandboxOOMKills): a guest-internal OOM is invisible to the
+// host cgroup, so the only way to see it is to ask the in-guest agent. Callers run
+// this in a loop on a background goroutine (each call returns ONE event); it returns
+// an error when the agent connection closes (VM torn down), which ends the loop.
+// Mirrors grpc.AgentService/GetOOMEvent.
+func (a *AgentClient) GetOOMEvent(ctx context.Context) (string, error) {
+	var ev agentpb.OOMEvent
+	if err := a.client.Call(ctx, "grpc.AgentService", "GetOOMEvent", &agentpb.GetOOMEventRequest{}, &ev); err != nil {
+		return "", fmt.Errorf("agent GetOOMEvent: %w", err)
+	}
+	return ev.ContainerId, nil
+}
+
 // ReadStdout reads up to max bytes from the container process's stdout. It is a
 // unary RPC (NOT a server stream): each call returns whatever bytes the agent has
 // buffered (up to max), so callers loop until it returns an error — the agent

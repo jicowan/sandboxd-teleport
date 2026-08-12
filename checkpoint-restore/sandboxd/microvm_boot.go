@@ -201,9 +201,11 @@ func (d *chDriver) createStart(id, bundle string) (retErr error) {
 		return fmt.Errorf("microvm start workload: %w", err)
 	}
 
+	stopOOM := make(chan struct{})
 	d.mu.Lock()
-	d.vms[id] = &chVM{id: id, apiSocket: apiSocket, chCmd: chCmd, vfsdCmd: vfsdCmd, agent: ac}
+	d.vms[id] = &chVM{id: id, apiSocket: apiSocket, chCmd: chCmd, vfsdCmd: vfsdCmd, agent: ac, stopOOM: stopOOM}
 	d.mu.Unlock()
+	go d.watchOOM(id, ac, stopOOM) // observability parity: surface guest OOM-kills
 	return nil
 }
 
