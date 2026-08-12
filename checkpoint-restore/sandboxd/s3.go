@@ -47,6 +47,43 @@ func newS3(ctx context.Context, bucket string) (*s3Store, error) {
 	}, nil
 }
 
+// sparseSavings renders a compact human summary of the sparse-codec win for a log
+// line, e.g. "logical=2048.0MiB transferred=47.9MiB ratio=42.8x". Ratio is the whole
+// point of the codec (how much smaller the object is vs a hole-blind dense transfer);
+// a ~1x on incompressible/dense data (gVisor) is expected and honest to show.
+func sparseSavings(st uploadStats) string {
+	ratio := 0.0
+	if st.TransferredBytes > 0 {
+		ratio = float64(st.LogicalBytes) / float64(st.TransferredBytes)
+	}
+	const mib = 1 << 20
+	return fmt.Sprintf("logical=%.1fMiB transferred=%.1fMiB ratio=%.1fx",
+		float64(st.LogicalBytes)/mib, float64(st.TransferredBytes)/mib, ratio)
+}
+
+// uploadStats reports what an upload actually moved, so the checkpoint/suspend
+// handlers can log + surface the sparse-codec win (see PRD-sparse-checkpoint-s3
+// §5.1). LogicalBytes is the sum of the files' logical sizes (what a hole-blind
+// transfer would have shipped); TransferredBytes is the compressed object bytes
+// actually PUT to S3 (holes dropped + zstd). Ratio = Logical/Transferred.
+type uploadStats struct {
+	LogicalBytes     int64
+	TransferredBytes int64
+}
+
+// countingWriter tallies bytes written through it (the compressed object stream), so
+// we can report the true transferred size without a second pass or an S3 HEAD.
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
+}
+
 // uploadDir uploads every file in localDir to s3://bucket/<prefix>/<file>, encoding
 // each through the sparse-extent+zstd codec (sparse_linux.go): holes are dropped and
 // the resident set is compressed, so a large sparse memory image ships as a fraction
@@ -54,37 +91,48 @@ func newS3(ctx context.Context, bucket string) (*s3Store, error) {
 // Body, so the manager.Uploader still buffers into 5MiB parts and uploads them
 // CONCURRENTLY (multipart) — the compression runs in the pipe-writer goroutine while
 // the parts upload in parallel. A dense/incompressible file just yields a ~1:1 object.
-func (s *s3Store) uploadDir(ctx context.Context, localDir, prefix string) error {
+// Returns the aggregate logical vs transferred (compressed) byte counts.
+func (s *s3Store) uploadDir(ctx context.Context, localDir, prefix string) (uploadStats, error) {
+	var st uploadStats
 	entries, err := os.ReadDir(localDir)
 	if err != nil {
-		return err
+		return st, err
 	}
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
-		if err := s.uploadOne(ctx, filepath.Join(localDir, e.Name()),
-			strings.TrimSuffix(prefix, "/")+"/"+e.Name()); err != nil {
-			return err
+		one, err := s.uploadOne(ctx, filepath.Join(localDir, e.Name()),
+			strings.TrimSuffix(prefix, "/")+"/"+e.Name())
+		if err != nil {
+			return st, err
 		}
+		st.LogicalBytes += one.LogicalBytes
+		st.TransferredBytes += one.TransferredBytes
 	}
-	return nil
+	return st, nil
 }
 
 // uploadOne sparse-zstd-encodes path and multipart-uploads it to key. The encode
 // runs in a goroutine writing into an io.Pipe; the uploader reads the pipe as the
 // object Body (buffering into concurrent parts). A pipe write error is surfaced by
-// CloseWithError so the uploader's read fails and Upload returns it.
-func (s *s3Store) uploadOne(ctx context.Context, path, key string) error {
+// CloseWithError so the uploader's read fails and Upload returns it. Returns the
+// file's logical size and the compressed bytes actually uploaded.
+func (s *s3Store) uploadOne(ctx context.Context, path, key string) (uploadStats, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return uploadStats{}, err
 	}
 	defer f.Close()
 
 	pr, pw := io.Pipe()
+	cw := &countingWriter{w: pw} // count the compressed object bytes as they stream out
+	// logicalCh carries the codec's logical size out of the goroutine (the uploader
+	// only sees the compressed stream). Buffered so the goroutine never blocks on it.
+	logicalCh := make(chan int64, 1)
 	go func() {
-		_, _, werr := writeSparseZstd(pw, f)
+		logical, _, werr := writeSparseZstd(cw, f)
+		logicalCh <- logical
 		// Close the write end: nil => clean EOF for the reader; non-nil => the
 		// uploader's read returns werr, so Upload fails with the real cause.
 		pw.CloseWithError(werr)
@@ -94,9 +142,10 @@ func (s *s3Store) uploadOne(ctx context.Context, path, key string) error {
 		Bucket: &s.bucket, Key: &key, Body: pr,
 	}); err != nil {
 		pr.CloseWithError(err) // unblock the encoder goroutine if it's mid-write
-		return fmt.Errorf("put %s: %w", key, err)
+		<-logicalCh            // drain so the goroutine can exit
+		return uploadStats{}, fmt.Errorf("put %s: %w", key, err)
 	}
-	return nil
+	return uploadStats{LogicalBytes: <-logicalCh, TransferredBytes: cw.n}, nil
 }
 
 // downloadPrefix downloads all objects under s3://bucket/<prefix>/ into localDir.

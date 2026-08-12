@@ -182,11 +182,14 @@ on incompressible data, and uniformity keeps one code path.
   an `io.Pipe`, download keeps ranged-GET concurrency via a temp file + local decode.
   Round-trip unit test (holes preserved, bytes identical, decoded file stays sparse) passes
   on linux. Live-validated on microVM + gVisor (see §5.1). The big win is microVM-specific.
-- **Phase 2 — telemetry + timeout revisit (NOT DONE).** Still to do: surface
-  logical-vs-transferred bytes in the checkpoint/suspend responses + logs so the win is
-  observable/monitorable; revisit the microVM `restoreTimeout` (a working-set-sized restore
-  — the microVM case is now ~48 MiB, not 2 GiB — likely fits a far smaller budget than the
-  10-min interim). Live functional validation is already done (§5.1).
+- **Phase 2 — telemetry + timeout revisit (DONE 2026-08-12).** `uploadDir`/`uploadOne`
+  return `uploadStats{LogicalBytes, TransferredBytes}` (compressed object bytes counted via
+  a `countingWriter` on the upload pipe; logical size returned from the encoder goroutine
+  over a channel). `/checkpoint` and `/suspend` log the win (`sparseSavings`:
+  `logical=… transferred=… ratio=…x`) and return `logicalBytes`+`transferredBytes` in their
+  JSON. microVM `restoreTimeout` cut 10min → 3min (the 10min was for the dense era; the
+  sparse object is ~48 MiB and a live restore was ~4.4 s). Live functional validation was
+  already done in §5.1.
 - **Phase 3 (optional) — tuning.** DEPRIORITIZED by §5.1: a zstd level knob / long-distance
   matching was benchmarked and doesn't pay off (entropy ceiling on dense data; sparse data
   is already tiny at `SpeedFastest`). Parallel extent compression only if the single-stream
