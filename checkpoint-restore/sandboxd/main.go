@@ -403,7 +403,7 @@ func (s *server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	lg("uploading %d bytes -> s3://%s/%s", sz, s.bucket, prefix)
 	tu := time.Now()
 	upCtx, upCancel := opCtx()
-	upErr := s.s3.uploadDir(upCtx, imgDir, prefix)
+	upSt, upErr := s.s3.uploadDir(upCtx, imgDir, prefix)
 	upCancel()
 	if upErr != nil {
 		lg("S3 upload FAILED: %v", upErr)
@@ -418,9 +418,10 @@ func (s *server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		teardownSandboxNet()
 	}
 	metrics.inc("checkpoints")
-	lg("DONE: snapshot=%s uploaded in %s", prefix, time.Since(tu))
+	lg("DONE: snapshot=%s uploaded in %s (%s)", prefix, time.Since(tu), sparseSavings(upSt))
 	writeJSON(w, 200, map[string]any{"sandboxId": req.SandboxID, "snapshot": prefix,
-		"sizeBytes": sz, "image": sb.Image, "digest": sb.Digest,
+		"sizeBytes": upSt.TransferredBytes, "logicalBytes": upSt.LogicalBytes,
+		"transferredBytes": upSt.TransferredBytes, "image": sb.Image, "digest": sb.Digest,
 		"runtime": s.rt.runtimeName(), "engineVersion": s.rt.version(), "runscVersion": sb.RunscVer})
 }
 
@@ -620,7 +621,7 @@ func (s *server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 	snapID := fmt.Sprintf("snap-%d", time.Now().UnixNano())
 	prefix := fmt.Sprintf("sandboxes/%s/%s", req.SandboxID, snapID)
 	suCtx, suCancel := opCtx()
-	suErr := s.s3.uploadDir(suCtx, imgDir, prefix)
+	upSt, suErr := s.s3.uploadDir(suCtx, imgDir, prefix)
 	suCancel()
 	if suErr != nil {
 		lg("upload FAILED: %v", suErr)
@@ -636,9 +637,10 @@ func (s *server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 	s.forget(req.SandboxID)
 	s.dropCred(req.SandboxID)
 	metrics.inc("suspends")
-	lg("SUSPENDED: snapshot=%s, worker freed", prefix)
+	lg("SUSPENDED: snapshot=%s, worker freed (%s)", prefix, sparseSavings(upSt))
 	writeJSON(w, 200, map[string]any{"sandboxId": req.SandboxID, "snapshot": prefix,
 		"image": sb.Image, "suspended": true,
+		"logicalBytes": upSt.LogicalBytes, "transferredBytes": upSt.TransferredBytes,
 		"runtime": s.rt.runtimeName(), "engineVersion": s.rt.version()})
 }
 

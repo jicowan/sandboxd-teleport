@@ -75,13 +75,15 @@ const (
 // /checkpoint or /suspend forever.
 const checkpointTimeout = 120 * time.Second
 
-// restoreTimeout bounds the whole restore. It is much larger than the cold-boot
-// bootTimeout because an eager (Copy) vm.restore reads the ENTIRE memory image
-// off disk — and S3 does not preserve sparseness, so a snapshot downloads DENSE
-// (a 2GiB guest = 2GiB read) even when its working set was small. CH's restore of
-// a multi-GiB image legitimately runs past the 120s boot budget; capping it there
-// kills a restore that would otherwise have succeeded.
-const restoreTimeout = 10 * time.Minute
+// restoreTimeout bounds the whole restore. Historically this was 10min: S3 stored
+// checkpoints DENSE (a 2GiB guest = 2GiB download + eager read) so a restore could
+// run well past the 120s cold-boot budget. With the sparse-extent+zstd codec
+// (PRD-sparse-checkpoint-s3-transfer, sparse_linux.go) the object is now working-set
+// sized — a 2GiB guest / ~150MiB resident ships as ~48MiB, and a live restore
+// (download + local decode + eager CH read) completed in ~4.4s. So the 10min budget
+// is vastly oversized; 3min is generous headroom for a large-working-set guest on a
+// slow S3/CPU while still failing a genuinely wedged restore in bounded time.
+const restoreTimeout = 3 * time.Minute
 
 // checkpoint pauses the running microVM and writes a portable snapshot into
 // imageDir: the CH snapshot (VM config + device state + guest memory) namespaced
