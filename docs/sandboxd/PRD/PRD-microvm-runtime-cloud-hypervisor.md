@@ -454,11 +454,15 @@ Method mapping (RunWorkload boot order verified in `run.go:RunWorkload`):
       (an `ASIA…` AccessKeyId + session token, ~1h expiry) for the assumed session role —
       confirmed by a matching `sts:AssumeRole` event in CloudTrail. This is the same
       cred-vendor + container-credentials contract the gVisor path uses, now working across
-      the microVM netns boundary. NOTE: the vendor's FIRST (cold) `sts:AssumeRole` can take
-      >8s; a too-tight client timeout can miss it, but the vendor caches the result so a real
-      AWS SDK's retry succeeds immediately after. A portless IAM-only sandbox is a known gap —
-      `setupInboundPorts` currently returns early when `len(ports)==0`, so the cred-vendor pin
-      is skipped; split the pin out of the ports guard so IAM works without exposed ports.
+      the microVM netns boundary. Two follow-ups from this validation are FIXED (commit
+      `ce15b50`): (i) the vendor's `sts:AssumeRole` now runs under a fresh context, not the
+      client request's, so a client that times out on the slow FIRST (cold) assume no longer
+      cancels it — it completes and caches, and the retry hits the warm cache (this hardens
+      BOTH runtimes, since the cred vendor is shared); (ii) the cred-vendor pin is now split
+      out of the `len(ports)>0` guard in `setupInboundPorts`, so a PORTLESS IAM-only sandbox
+      (an outbound-only agent — the shape that most needs IAM and has no reason to expose a
+      port) still gets the pin. Verified live: a portless sandbox boots with no inbound DNAT
+      yet the cred-vendor IP pinned on `ateom0`.
   - **Fork base-id (commit `0fc3370`).** A fork restores under a NEW sandbox id, but the
     guest's virtio-fs find-paths are frozen at the golden id's path
     (`SharedDir(baseID)/<baseID>/rootfs`), so `vm.restore` failed with a vhost-user
