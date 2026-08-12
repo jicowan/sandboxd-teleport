@@ -125,8 +125,22 @@ func (v *credVendor) sessionToken(sid string) string {
 	return hex.EncodeToString(m.Sum(nil))
 }
 
+// assumeTimeout bounds a single sts:AssumeRole. Generous because the FIRST (cold)
+// assume from a worker can take several seconds (SDK/endpoint warmup), longer than a
+// typical client's per-request timeout — see the decoupled context below.
+const assumeTimeout = 20 * time.Second
+
 // credsFor returns valid credentials for a session, assuming/refreshing as needed.
-func (v *credVendor) credsFor(ctx context.Context, sid string) (*credSet, error) {
+//
+// The assume runs under a FRESH context (assumeTimeout), NOT the caller's ctx: the
+// caller is an HTTP request from the sandbox, and a client that times out and
+// disconnects would otherwise cancel the in-flight sts:AssumeRole (context canceled,
+// no result cached) — so every retry restarts a cold assume and never makes forward
+// progress. Decoupling lets the assume COMPLETE and cache even if the triggering
+// request already gave up; the client's next retry then hits the warm cache
+// instantly. (The first cold assume can exceed a tight client timeout; that's fine —
+// a real AWS SDK retries, and by then the creds are cached.)
+func (v *credVendor) credsFor(_ context.Context, sid string) (*credSet, error) {
 	v.mu.Lock()
 	role, ok := v.roles[sid]
 	cached := v.cache[sid]
@@ -138,6 +152,8 @@ func (v *credVendor) credsFor(ctx context.Context, sid string) (*credSet, error)
 	if cached != nil && time.Until(cached.Expiration) > v.skew {
 		return cached, nil
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), assumeTimeout)
+	defer cancel()
 	cs, err := v.assume(ctx, role, sid)
 	if err != nil {
 		return nil, err

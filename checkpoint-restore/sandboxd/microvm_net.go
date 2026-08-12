@@ -129,7 +129,28 @@ func (d *chDriver) setupRestoreTap(ctx context.Context, name string, queuePairs 
 // installNft uses its own nft table (sbx_net), distinct from ateomnet's
 // (ateom_actor), so the two coexist; the masquerade is harmlessly duplicated.
 // Called from createStart/restore AFTER SetupActorNetwork (ateom0 must exist).
+//
+// The two halves are INDEPENDENT: the cred-vendor pin is IAM plumbing that must
+// happen for EVERY sandbox (a role can be assigned without exposing any port), so it
+// runs unconditionally; the inbound DNAT is only meaningful when there are ports. An
+// earlier version gated the whole function on len(ports)>0, which silently skipped
+// the pin for portless IAM-only sandboxes.
 func (d *chDriver) setupInboundPorts(ports []portMap) error {
+	// IAM: pin the credential-vendor IP (169.254.170.2) on the gateway veth (ateom0),
+	// so a guest request to AWS_CONTAINER_CREDENTIALS_FULL_URI — routed via its default
+	// gateway 169.254.17.1 — is delivered locally to the vendor. Always: independent of
+	// ports, and harmless when no role is registered (the vendor just 404s). Best-effort.
+	if hostLink, err := netlink.LinkByName(ateomnet.HostVethName); err == nil {
+		if credAddr, perr := netlink.ParseAddr(credVendorIP + "/32"); perr == nil {
+			if err := netlink.AddrReplace(hostLink, credAddr); err != nil {
+				slog.Warn("microvm: pin cred vendor IP on host veth", slog.Any("err", err))
+			}
+		}
+	} else {
+		slog.Warn("microvm: lookup host veth for cred vendor pin", slog.String("link", ateomnet.HostVethName), slog.Any("err", err))
+	}
+
+	// Inbound DNAT: only when the sandbox exposes ports.
 	if len(ports) == 0 {
 		return nil
 	}
@@ -141,16 +162,6 @@ func (d *chDriver) setupInboundPorts(ports []portMap) error {
 		if ports[i].Host == 0 {
 			ports[i].Host = ports[i].Container
 		}
-	}
-	// Pin the credential-vendor IP on the gateway veth (ateom0) — the IAM fix.
-	if hostLink, err := netlink.LinkByName(ateomnet.HostVethName); err == nil {
-		if credAddr, perr := netlink.ParseAddr(credVendorIP + "/32"); perr == nil {
-			if err := netlink.AddrReplace(hostLink, credAddr); err != nil {
-				slog.Warn("microvm: pin cred vendor IP on host veth", slog.Any("err", err))
-			}
-		}
-	} else {
-		slog.Warn("microvm: lookup host veth for cred vendor pin", slog.String("link", ateomnet.HostVethName), slog.Any("err", err))
 	}
 	// Inbound DNAT (+ masq) in the pod netns, reusing gVisor's rules.
 	if err := installNft(podIP, ports); err != nil {
