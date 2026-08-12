@@ -33,6 +33,34 @@ Paths are relative to `checkpoint-restore/controlplane/` unless noted.
 
 - ~100Gi root disk per gVisor node (a browser‑class rootfs is ~9GB + checkpoints).
 
+> **microVM pools (optional).** To run a pool with `SandboxTemplate.spec.runtime:
+> microvm` (Cloud Hypervisor microVMs), you additionally need **KVM‑capable nodes**
+> and the microVM worker image:
+>
+> - A **KVM‑enabled node AMI.** Build it with `make ami-microvm AWS_REGION=…
+>   K8S_VERSION=…` — Packer (`packer/microvm-node.pkr.hcl` + `packer/scripts/
+>   provision-kvm.sh`) takes the stock EKS‑optimized AL2023 AMI and adds the KVM
+>   modules + `/dev/kvm` udev rule; everything else (kubelet, containerd) is
+>   unchanged, so the node joins EKS normally. The resulting AMI id is written to
+>   `packer/manifest.json`. See [`packer/README.md`](../../packer/README.md).
+> - Nodes exposing `/dev/kvm`. Bare metal works, but the validated path is **nested
+>   virtualization on standard Nitro instances** (C7i/M7i/R7i/… ) — no bare metal.
+>   Reference the AMI above in a Karpenter **`EC2NodeClass`** (`spec.amiSelectorTerms`)
+>   and set `spec.cpuOptions.nestedVirtualization: enabled` (Karpenter v1.14+
+>   auto‑filters to instance types that advertise nested virt). The AMI provides the
+>   KVM enablement; the instance provides VT‑x.
+> - Label + taint those nodes `sandbox=microvm` (mirror the gVisor node stanza) and
+>   set the pool's `SandboxTemplate.spec.scheduling` to match. The operator injects
+>   `/dev/kvm` + `SANDBOXD_RUNTIME=microvm` into the worker pod automatically for a
+>   `runtime: microvm` template.
+> - A microVM worker image (`sandboxd-microvm`) — `sandboxd` + cloud‑hypervisor +
+>   the kata guest kernel/rootfs + **virtiofsd v1.14** (the kata‑bundled v1.13 hangs
+>   CH's restore migration). Built by `make image-worker-microvm`.
+>
+> See [PRD-microvm-runtime-cloud-hypervisor.md](PRD/PRD-microvm-runtime-cloud-hypervisor.md)
+> for the full node/asset story. The rest of this guide (control plane, S3, RBAC) is
+> runtime‑neutral; only the node group + worker image differ.
+
 ### Tooling
 
 - `kubectl` pointed at the target cluster. **Always confirm context first:**
@@ -48,8 +76,9 @@ Paths are relative to `checkpoint-restore/controlplane/` unless noted.
 ### Container registry
 
 An ECR (or other) registry for three images: `sandboxd-operator`,
-`sandboxd-router` (both pure‑Go, built with `ko`), and `sandboxd` (the worker,
-built with Docker because it ships the non‑Go `runsc` binary).
+`sandboxd-router` (both pure‑Go, built with `ko`), and `sandboxd` (the gVisor worker,
+built with Docker because it ships the non‑Go `runsc` binary). A microVM pool also
+needs a fourth, `sandboxd-microvm` (the worker + CH + kata assets + virtiofsd).
 
 ## Step 1 — S3 bucket + worker Pod Identity
 

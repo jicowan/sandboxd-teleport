@@ -18,7 +18,7 @@ client, e.g. Claude code. Behind each endpoint:
   and routes the path to the right app.
 - **the broker** derives a durable session for you **per app** and transparently
   proxies your MCP calls.
-- **sandboxd** runs the actual tools inside a gVisor sandbox and preserves your
+- **sandboxd** runs the actual tools inside an isolated sandbox and preserves your
   session's state across disconnects (it checkpoints to storage when idle and
   restores when you return).
 

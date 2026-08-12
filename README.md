@@ -1,11 +1,13 @@
 # sandboxd-teleport
 
 **sandboxd** is a **session‑teleport control plane on Amazon EKS**. Warm pools of
-privileged worker pods run arbitrary OCI images as **nested gVisor sandboxes**; a
-session's RAM + filesystem state is checkpointed to S3 and restored ("teleported")
-onto any interchangeable worker on any node — surviving suspend/resume, scale‑in,
-node drain, and eviction. Many mostly‑idle sessions share few workers (temporal
-oversubscription), and idle sessions park in S3.
+privileged worker pods run arbitrary OCI images as isolated sandboxes — **nested
+gVisor (`runsc`)** by default, or **Cloud Hypervisor microVMs** for a hardware
+isolation boundary (selectable per pool via `SandboxTemplate.spec.runtime`). A
+session's RAM + filesystem state is checkpointed to S3 (sparse + zstd‑compressed) and
+restored ("teleported") onto any interchangeable worker on any node — surviving
+suspend/resume, scale‑in, node drain, and eviction. Many mostly‑idle sessions share
+few workers (temporal oversubscription), and idle sessions park in S3.
 
 sandboxd is **standalone**: you install the operator, router, and workers and drive
 it directly through its **CRDs** (`SandboxTemplate`, `AppTemplate`, `WarmPool`,
@@ -17,7 +19,7 @@ require a broker, gateway, or identity provider.
    your client / harness  │  router ──resume──▶ operator ◀──▶ Valkey        │
    ──X-Session-ID──▶ router│    │  (assignment + teleport workflow)          │
                           │    ▼                                            │
-                          │  worker pod ──runsc──▶ nested gVisor sandbox    │
+                          │  worker pod ─▶ nested gVisor sandbox (or microVM)│
                           │    │  checkpoint / restore                      │
                           │    ▼                                            │
                           │   S3  (per-session snapshots)                   │

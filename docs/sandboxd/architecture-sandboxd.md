@@ -65,6 +65,17 @@ already reserved room when it placed each worker (one sandbox per worker).
                               S3   sandboxes/<sid>/<snap>/{checkpoint.img,pages.img,pages_meta.img,config.json}
 ```
 
+> **Runtime & checkpoint format.** The diagram shows the default **gVisor** worker
+> (`runsc`); a pool can instead run **Cloud Hypervisor microVMs**
+> (`SandboxTemplate.spec.runtime: microvm`), which needs `/dev/kvm` (nested‑virt or
+> bare‑metal nodes) and writes CH snapshot files (`clh-memory-ranges`, `clh-state.json`,
+> …) instead of runsc's `checkpoint.img`/`pages.img`. The control‑plane contract, router,
+> and S3 layout are runtime‑neutral. Every checkpoint file is shipped to S3 through a
+> **sparse‑extent + zstd** codec (holes dropped, resident set compressed): a microVM's
+> 2 GiB sparse memory image stores as tens of MiB, while gVisor's already‑dense image is
+> ~unchanged. See [PRD-microvm-runtime-cloud-hypervisor.md](PRD/PRD-microvm-runtime-cloud-hypervisor.md)
+> and [PRD-sparse-checkpoint-s3-transfer.md](PRD/PRD-sparse-checkpoint-s3-transfer.md).
+
 ### Router (`cmd/router`)
 
 A thin, stateless, session‑aware reverse proxy. Per request:

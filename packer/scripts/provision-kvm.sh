@@ -72,7 +72,7 @@ if [[ -e /dev/kvm ]]; then
   exit 0
 fi
 echo "sandboxd-kvm-check: WARNING /dev/kvm ABSENT. This node cannot run microVM sandboxes." >&2
-echo "sandboxd-kvm-check: /dev/kvm is only exposed on BARE-METAL (*.metal) EC2 instances." >&2
+echo "sandboxd-kvm-check: /dev/kvm needs nested virtualization enabled (EC2NodeClass cpuOptions.nestedVirtualization=enabled on a supported Nitro family) or a *.metal instance." >&2
 echo "sandboxd-kvm-check: check the instance type and that kvm_intel/kvm_amd loaded (lsmod | grep kvm)." >&2
 exit 0  # non-fatal: do not block node join; the failure is logged for diagnosis.
 EOF
@@ -90,7 +90,7 @@ modprobe kvm 2>/dev/null || echo "==> (build host has no KVM module loadable —
 if [[ -e /dev/kvm ]]; then
   echo "==> build host DOES expose /dev/kvm: $(stat -c '%A %G' /dev/kvm)"
 else
-  echo "==> build host does NOT expose /dev/kvm (expected on non-metal); runtime *.metal node will."
+  echo "==> build host does NOT expose /dev/kvm (expected — the build host needs no KVM); a runtime nested-virt or *.metal node will."
 fi
 
 echo "==> KVM enablement written. Node hygiene: cleaning cloud-init/build artifacts."

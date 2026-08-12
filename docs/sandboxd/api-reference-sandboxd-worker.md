@@ -2,7 +2,9 @@
 
 The sandboxd worker agent exposes a small HTTP API on **`:8090`** (configurable
 via `SANDBOXD_ADDR`). It is the low‑level interface the operator drives to run,
-checkpoint, restore, suspend, and inspect nested gVisor sandboxes on a worker pod.
+checkpoint, restore, suspend, and inspect sandboxes on a worker pod. The worker's
+engine is gVisor (`runsc`) or a Cloud Hypervisor microVM depending on its image /
+`SANDBOXD_RUNTIME`; the HTTP surface is identical either way.
 
 > **Audience & trust.** This API is an **internal control interface**, not a
 > user‑facing one. In normal operation only the operator (resume/suspend/checkpoint
@@ -171,18 +173,26 @@ Checkpoint a sandbox to S3 as a single atomic RAM+FS image. The exact
 {
   "sandboxId": "sess-…",
   "snapshot": "sandboxes/sess-…/snap-1700000000000000000",
-  "sizeBytes": 123456789,
+  "sizeBytes": 47900160,          // = transferredBytes (compressed object size)
+  "logicalBytes": 2147483648,     // what a hole-blind transfer would have shipped
+  "transferredBytes": 47900160,   // bytes actually PUT to S3 (sparse + zstd)
   "image": "…",
   "digest": "sha256:…",
-  "runscVersion": "release-20260622.0"
+  "runtime": "microvm",           // "gvisor" | "microvm"
+  "engineVersion": "…",
+  "runscVersion": "…"             // back-compat alias for engineVersion
 }
 ```
 
 **Errors:** `400` bad id; `404` unknown sandbox; `503` S3 not configured;
 `500` checkpoint failed; `502` S3 upload failed.
 
-> `compress` (flate) makes the image ~6.5× smaller on S3 but forces eager
-> page‑load on restore (compressed images can't use background restore).
+> **Transfer encoding.** The checkpoint's files are shipped to S3 through a
+> sparse‑extent + zstd codec (holes dropped, resident set compressed), so
+> `transferredBytes` can be far below `logicalBytes` — a 2 GiB microVM memory image
+> typically stores as tens of MiB (`ratio` is logged). A gVisor `checkpoint.img` is
+> already dense/incompressible, so it stays ~1×. This is always‑on and independent of
+> the request‑level `compress` flag (which only affects runsc's own page encoding).
 
 ---
 
@@ -240,7 +250,9 @@ S3 and the worker becomes reusable.
 **Response `200`**
 
 ```json
-{ "sandboxId": "sess-…", "snapshot": "sandboxes/sess-…/snap-…", "image": "…", "suspended": true }
+{ "sandboxId": "sess-…", "snapshot": "sandboxes/sess-…/snap-…", "image": "…", "suspended": true,
+  "logicalBytes": 2147483648, "transferredBytes": 47900160,
+  "runtime": "microvm", "engineVersion": "…" }
 ```
 
 **Errors:** `400` bad id; `404` unknown sandbox; `503` S3 not configured;

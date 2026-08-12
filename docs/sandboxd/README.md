@@ -1,8 +1,10 @@
 # sandboxd documentation
 
 `sandboxd` is a session‑teleport control plane on Amazon EKS. Warm pools of
-privileged worker pods run arbitrary OCI images as **nested gVisor sandboxes**;
-a session's RAM + filesystem state is checkpointed to S3 and can be restored
+privileged worker pods run arbitrary OCI images as isolated sandboxes — **nested
+gVisor (`runsc`)** by default, or **Cloud Hypervisor microVMs** for a hardware
+isolation boundary (per‑pool, via `SandboxTemplate.spec.runtime`). A session's RAM +
+filesystem state is checkpointed to S3 (sparse + zstd‑compressed) and can be restored
 ("teleported") onto a different worker or node. An MCP client (e.g. Claude) talks
 to it through an authenticating front door and a session‑aware router, so a user
 keeps one durable session that survives suspend/resume.
@@ -87,6 +89,8 @@ the reference for each layer. For *how it all fits*, read
 | [PRD-snapshot-fork.md](PRD/PRD-snapshot-fork.md) | **Implemented** | **ForkSet:** fan out N independent sessions from one common source — a **snapshot** (`BaseSnapshot` copy-on-promote → restore, identical RAM+FS state) or an **image** (cold-start, independent per-boot init), via optional `baseRef`. RL parallel rollouts / branch-from-common-start. Live-verified; finalizer-backed base reclaim + refCount; no router change. Fan-out hardening in operator **v42** (worker double-booking, CR-delete worker release, per-fork idle policy, pool-count fix — see the PRD's As-built update). Worked example: [`examples/forkset/`](../../examples/forkset/). |
 | [PRD-on-demand-suspend.md](PRD/PRD-on-demand-suspend.md) | **Implemented** | Declarative, edge-triggered checkpoint+suspend on request via `Session.spec.suspendRequest` (opaque token) + `status.lastSuspendHandled` watermark. The "save my state now" primitive; a `SessionReconciler` performs one suspend per token, never fighting reactive resume. Live-verified (operator v29). |
 | [PRD-broker-fork-session.md](PRD/PRD-broker-fork-session.md) | Proposed | The **example** broker's `fork_session` MCP tool composing the CRDs (suspendRequest → BaseSnapshot → ForkSet → return ids; increment 2 = per-call `target` routing to a fork by id). Reference/example scope — the product API is the CRDs. Depends on on-demand-suspend. |
+| [PRD-microvm-runtime-cloud-hypervisor.md](PRD/PRD-microvm-runtime-cloud-hypervisor.md) | **Implemented** (Phases 0–3) | A **second sandbox runtime**: Cloud Hypervisor microVMs (direct‑drive CH + kata‑agent), selectable per pool via `SandboxTemplate.spec.runtime: microvm`, at gVisor parity (boot, serve, teleport, forkset). KVM via nested virtualization on standard Nitro EKS nodes — no bare metal. Ported from Agent Substrate; live‑validated. Phase 3 hardening (entropy reseed, clock‑fixup, OOM visibility, inbound routing + IAM) done; density/cold‑start tuning deferred. |
+| [PRD-sparse-checkpoint-s3-transfer.md](PRD/PRD-sparse-checkpoint-s3-transfer.md) | **Implemented** (Phases 1–2) | Sparse‑extent + zstd codec behind the S3 checkpoint seam: a checkpoint's memory image ships/stores at working‑set size, not logical size (a 2 GiB microVM guest → ~48 MiB, ~43×). Preserves multipart upload + ranged‑GET download concurrency; backward‑compatible with dense objects. Big win is microVM‑specific (gVisor's `checkpoint.img` is already dense/incompressible). |
 
 ## The whole picture in one diagram
 

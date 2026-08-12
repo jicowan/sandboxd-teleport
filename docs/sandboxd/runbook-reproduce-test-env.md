@@ -130,10 +130,12 @@ curl -s -X POST http://'"$WAIP"':8090/checkpoint -H "Content-Type: application/j
 # → {"sandboxId":"demo","snapshot":"sandboxes/demo/snap-…","sizeBytes":…,"image":"…",…}
 ```
 
-Note the `snapshot` prefix (call it `SNAP`). The S3 objects are `checkpoint.img`,
-`pages.img`, `pages_meta.img`, `config.json` under
-`s3://<bucket>/sandboxes/demo/snap-…/`. (`/checkpoint` leaves the sandbox in place;
-`/suspend` would also free worker A.)
+Note the `snapshot` prefix (call it `SNAP`). For a gVisor pool the S3 objects are
+`checkpoint.img`, `pages.img`, `pages_meta.img`, `config.json` under
+`s3://<bucket>/sandboxes/demo/snap-…/` (a microVM pool writes `clh-*` files instead);
+each is sparse‑extent + zstd‑encoded, so the stored size can be far below the logical
+image (see the `logicalBytes`/`transferredBytes` in the response). (`/checkpoint`
+leaves the sandbox in place; `/suspend` would also free worker A.)
 
 ### A5. Restore onto worker B (teleport)
 

@@ -24,9 +24,13 @@ containerd are unchanged from the stock EKS AMI, so the node joins EKS normally.
 ## Requirements
 
 - [Packer](https://www.packer.io) ≥ 1.3, AWS credentials with EC2/AMI build permissions.
-- The produced AMI must **run on a bare-metal instance** (`*.metal`, e.g.
-  `c7a.metal-48xl` (AMD) or `c5.metal` (Intel)). AWS only exposes `/dev/kvm` on
-  bare-metal; standard Nitro instances do **not** provide nested virtualization.
+- A node type that exposes `/dev/kvm`. **The validated path is nested virtualization
+  on standard Nitro instances** (C7i/M7i/R7i/… ) — enable it with Karpenter v1.14+
+  `EC2NodeClass.spec.cpuOptions.nestedVirtualization: enabled` (auto‑filters to
+  capable instance types), or `run-instances --cpu-options NestedVirtualization=enabled`.
+  Bare‑metal (`*.metal`) also works but is costlier/coarser and was capacity‑constrained
+  in practice. (This AMI provides the KVM *enablement*; the instance provides VT‑x —
+  earlier revisions of this README wrongly claimed only bare metal exposes `/dev/kvm`.)
 - `k8s_version` **must match your EKS control-plane minor version** (it selects the
   base AMI).
 
@@ -52,8 +56,10 @@ make ami-microvm-validate    # packer init + validate + fmt -check
 
 This repo is **bring-your-own-cluster** (Terraform wires only IAM/S3/Pod-Identity; it
 does not create node groups — see `terraform/`). The AMI is consumed by a **Karpenter
-`EC2NodeClass`** that references it in `amiSelectorTerms`, paired with a `NodePool`
-constrained to **bare-metal** instance types (the only ones that expose `/dev/kvm`).
+`EC2NodeClass`** that references it in `amiSelectorTerms` and enables **nested
+virtualization** (`spec.cpuOptions.nestedVirtualization: enabled`, Karpenter v1.14+),
+so standard Nitro instances expose `/dev/kvm` — no bare metal required. Karpenter then
+auto‑filters the `NodePool` to instance types that advertise nested virt.
 
 ```yaml
 apiVersion: karpenter.k8s.aws/v1
@@ -68,6 +74,8 @@ spec:
     # - tags:
     #     "sandboxd.io/node-runtime": microvm
     #     "sandboxd.io/k8s-version": "1.31"
+  cpuOptions:
+    nestedVirtualization: enabled         # ← exposes /dev/kvm on standard Nitro nodes
   role: <your-node-instance-role>
   # ... subnetSelectorTerms / securityGroupSelectorTerms as for your cluster
 ---
@@ -90,17 +98,21 @@ spec:
           value: microvm
           effect: NoSchedule
       requirements:
-        # BARE METAL ONLY — /dev/kvm is not exposed on non-metal Nitro instances.
+        # Standard Nitro families that support nested virt (C7i/M7i/R7i/… + -flex,
+        # C8i/M8i/R8i, I7i, X8i). Karpenter drops any that don't advertise it, given
+        # cpuOptions.nestedVirtualization above. NO *.metal needed.
         - key: karpenter.k8s.aws/instance-family
           operator: In
-          values: ["c7a"]         # c7a.metal-48xl (AMD); keep ONE family for teleport
-        - key: karpenter.k8s.aws/instance-size
-          operator: In
-          values: ["metal-48xl"]
+          values: ["c7i", "m7i", "r7i"]
         - key: kubernetes.io/arch
           operator: In
           values: ["amd64"]
+      # Optional: pin one family/size if teleport CPU-feature homogeneity matters.
 ```
+
+> Bare metal (`*.metal`) still works if you prefer it — drop `cpuOptions` and
+> constrain the `NodePool` to a `*.metal` size — but it is costlier/coarser and was
+> capacity‑constrained in practice; nested virt is the validated default.
 
 > **`amiFamily`/`amiSelectorTerms`.** Because we bake KVM onto the EKS-optimized AL2023
 > AMI (bootstrap unchanged), set `amiFamily: AL2023` and pin the AMI by id or by the

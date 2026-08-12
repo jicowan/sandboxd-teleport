@@ -47,7 +47,8 @@ subresource; no printer columns.
 
 | Field | Type | Required | Default / validation | Meaning |
 |-------|------|----------|----------------------|---------|
-| `image` | string | No | empty ⇒ **generic** pool | OCI image run **as the sandbox** (nested gVisor workload) — not the worker pod image. **Set ⇒ dedicated single‑image pool; empty ⇒ generic pool** (workload comes from a Session's `appRef`). |
+| `image` | string | No | empty ⇒ **generic** pool | OCI image run **as the sandbox** (the nested workload) — not the worker pod image. **Set ⇒ dedicated single‑image pool; empty ⇒ generic pool** (workload comes from a Session's `appRef`). |
+| `runtime` | string (`gvisor`\|`microvm`) | No | `gvisor` | Isolation engine for this pool's workers. `gvisor` = nested `runsc`; `microvm` = a Cloud Hypervisor microVM (hardware boundary). Selects the worker image's engine **and** the pod shape — a `microvm` pool's workers get `/dev/kvm` + `SANDBOXD_RUNTIME=microvm` injected, and must be placed on KVM‑capable nodes via `scheduling` (nested‑virt or bare‑metal). A pool is single‑runtime by construction (a checkpoint is not restorable across runtimes; the worker's restore guard hard‑refuses it). See [PRD-microvm-runtime-cloud-hypervisor.md](PRD/PRD-microvm-runtime-cloud-hypervisor.md). |
 | `cmd` | []string | No | — | Overrides the image entrypoint+cmd. |
 | `env` | []string | No | — | Added to the sandbox process environment. |
 | `ports` | []PortMap | No | — | Exposed via the worker's DNAT (`podIP:host → interiorIP:container`). |

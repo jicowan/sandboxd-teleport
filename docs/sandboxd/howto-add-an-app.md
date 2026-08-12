@@ -64,7 +64,11 @@ kubectl apply -f checkpoint-restore/controlplane/deploy/aio/generic-pool.yaml
 ```
 
 > No scheduling/resources here — those are the *pool's* worker‑shape
-> (`SandboxTemplate`). An app runs on whatever generic pool it's assigned to.
+> (`SandboxTemplate`), including its **runtime** (`gvisor` default, or `microvm`). An
+> app runs on whatever generic pool it's assigned to; to run it as a microVM, point
+> its session/app at a `runtime: microvm` pool (a microVM‑capable node group + the
+> `sandboxd-microvm` worker image — see the install guide). The AppTemplate itself is
+> runtime‑neutral.
 
 ## 2. Broker registry (`SANDBOXD_APPS`) — *map an id → app + entitlement*
 

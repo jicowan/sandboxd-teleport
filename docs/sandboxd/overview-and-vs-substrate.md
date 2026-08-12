@@ -18,8 +18,9 @@ For the shipped design in depth, read
 ## 1. What sandboxd is
 
 sandboxd is a **session‑teleport control plane on Amazon EKS**. It runs warm pools
-of privileged worker pods; each worker runs an arbitrary OCI image as a **nested
-gVisor sandbox** (`runsc`). A user's **session** — the sandbox's full RAM +
+of privileged worker pods; each worker runs an arbitrary OCI image as an isolated
+sandbox — a **nested gVisor sandbox** (`runsc`) by default, or a **Cloud Hypervisor
+microVM** for a hardware boundary (per pool). A user's **session** — the sandbox's full RAM +
 filesystem state — is decoupled from any particular pod: it can be checkpointed to
 **S3**, its worker freed, and later restored (**"teleported"**) onto *any*
 interchangeable warm worker on *any* node, with state intact. That gives temporal
@@ -192,7 +193,7 @@ platform.)
 | Dimension | **sandboxd** | **Agent Substrate** |
 |---|---|---|
 | Core model | Teleport a session (RAM+FS) across warm workers | Multiplex actors across warm workers |
-| Isolation runtime | **Nested** gVisor `runsc` inside a normal pod | Pluggable herder: `ateom-gvisor` (runsc) **or** `ateom-microvm` |
+| Isolation runtime | **Nested** gVisor `runsc` (default) **or** Cloud Hypervisor microVMs, per pool (`spec.runtime`) | Pluggable herder: `ateom-gvisor` (runsc) **or** `ateom-microvm` |
 | Target platform | **Amazon EKS** (runs today) | GKE / kind; **blocked on managed EKS** (§4) |
 | Snapshot store | **S3** (first‑class) | GCS first‑class; S3 in code |
 | Dynamic state | Valkey cache **+ etcd durability** (rebuilt on restart) | Redis/Valkey (no documented etcd/durability backing) |
@@ -244,7 +245,10 @@ it ships the layers Substrate leaves to the user (or hadn't built):
   **generic pools + `AppTemplate`** let one pool run many admin‑authored workloads;
   raw caller‑supplied *arbitrary* images remain a proposed, governed extension.)
 - **A pluggable isolation backend** — `ateom` abstracts the herder over **gVisor and
-  microVMs** (`ateom-microvm`). sandboxd is committed to nested gVisor `runsc`.
+  microVMs** (`ateom-microvm`). sandboxd now has the same seam: `runtimeDriver` with a
+  nested‑gVisor `runsc` default and a Cloud Hypervisor microVM driver, selected per pool
+  via `SandboxTemplate.spec.runtime` (see
+  [PRD-microvm-runtime-cloud-hypervisor.md](PRD/PRD-microvm-runtime-cloud-hypervisor.md)).
 - **gRPC lifecycle API + `kubectl-ate` CLI** as a first‑class programmatic surface;
   per‑actor DNS names and Envoy‑based routing (vs sandboxd's header‑keyed proxy).
 - **A much larger multiplexing story** — explicit design targets of ~1B actors, 1000

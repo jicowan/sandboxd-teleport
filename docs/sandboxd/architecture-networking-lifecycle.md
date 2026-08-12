@@ -182,12 +182,19 @@ Two details that make run/restore reliable:
   and probed for writability before exec, so it propagates into runsc's gofer mount
   namespace.
 
-Checkpoints are **compressed** by default (`-compression=flate-best-speed
--exclude-committed-zero-pages`): the S3 transfer dominates real teleport time, and
-compression shrinks the checkpoint image several-fold, making suspend/resume
-markedly faster overall (restore is unaffected — the worker uses `-detach`, not
-`-background`). Set `SANDBOXD_COMPRESS=0` (or per-request `compress:false`) to opt
-out.
+Checkpoints are compressed at **two** independent layers, because the S3 transfer
+dominates real teleport time:
+
+1. **runsc page encoding** (gVisor only) — `-compression=flate-best-speed
+   -exclude-committed-zero-pages` by default; shrinks the checkpoint image runsc
+   writes. Set `SANDBOXD_COMPRESS=0` (or per-request `compress:false`) to opt out.
+   Restore is unaffected (the worker uses `-detach`, not `-background`).
+2. **S3 transfer encoding** (both runtimes, always on) — every checkpoint file is
+   shipped through a sparse-extent + zstd codec (holes dropped, resident set
+   compressed). This is where the big win is for the microVM runtime, whose memory
+   image is a mostly-hole sparse mmap (a 2 GiB guest stores as tens of MiB); gVisor's
+   already-dense `checkpoint.img` is ~unchanged. See
+   [PRD-sparse-checkpoint-s3-transfer.md](PRD/PRD-sparse-checkpoint-s3-transfer.md).
 
 ---
 

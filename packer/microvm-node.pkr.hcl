@@ -15,10 +15,12 @@
 # public SSM parameter), so nodeadm/kubelet/containerd are unchanged and the node
 # joins EKS exactly like a stock node. We only layer KVM config on top.
 #
-# TARGET NODES: /dev/kvm is only exposed on BARE-METAL EC2 instances (e.g.
-# c7a.metal-48xl (AMD) or c5.metal (Intel)); standard Nitro instances do NOT
-# provide nested virtualization. This AMI is built on a cheap instance (no KVM
-# needed at BUILD time — we only write config), but is meant to RUN on *.metal.
+# TARGET NODES: /dev/kvm is exposed on standard Nitro instances (C7i/M7i/R7i/…) when
+# NESTED VIRTUALIZATION is enabled (Karpenter v1.14+ EC2NodeClass
+# cpuOptions.nestedVirtualization: enabled, or run-instances --cpu-options
+# NestedVirtualization=enabled) — no bare metal required (bare-metal *.metal also
+# works). This AMI is built on a cheap instance (no KVM needed at BUILD time — we only
+# write config); KVM is exercised at RUNTIME on a nested-virt (or metal) node.
 
 packer {
   required_plugins {
@@ -44,7 +46,7 @@ variable "k8s_version" {
 variable "build_instance_type" {
   type        = string
   default     = "m5.large"
-  description = "Instance type used to BUILD the AMI. Need not be bare-metal — the build only writes config; /dev/kvm is exercised at RUNTIME on *.metal nodes."
+  description = "Instance type used to BUILD the AMI. Need not expose /dev/kvm — the build only writes config; /dev/kvm is exercised at RUNTIME on nested-virt (or *.metal) nodes."
 }
 
 variable "subnet_id" {

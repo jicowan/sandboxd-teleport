@@ -248,7 +248,7 @@ PACKER_DIR    := packer
 K8S_VERSION   ?= 1.31
 
 .PHONY: ami-microvm ami-microvm-validate
-ami-microvm: ## Build the KVM-enabled microVM node AMI (Packer; run result on *.metal)
+ami-microvm: ## Build the KVM-enabled microVM node AMI (Packer; run on nested-virt Nitro or *.metal)
 	cd $(PACKER_DIR) && packer init microvm-node.pkr.hcl && \
 		packer build -var region=$(AWS_REGION) -var k8s_version=$(K8S_VERSION) microvm-node.pkr.hcl
 
