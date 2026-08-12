@@ -1,7 +1,16 @@
-// PROVENANCE: ported from Agent Substrate's cmd/ateom-microvm/internal/ch/ch_test.go
-// (Apache-2.0, Copyright 2026 Google LLC). See api.go for the full note.
+// Copyright 2026 Google LLC
 //
-// Licensed under the Apache License, Version 2.0.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package ch
 
@@ -52,6 +61,12 @@ func startFakeCH(t *testing.T) (*Client, *fakeCH) {
 		f.mu.Lock()
 		f.requests = append(f.requests, recordedReq{method: r.Method, path: r.URL.Path, body: string(body)})
 		f.mu.Unlock()
+		if r.URL.Path == "/api/v1/vmm.ping" {
+			// Mirror what a real VMM answers, which callers parse for its version.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"build_version":"v52.0","version":"52.0.0","pid":1,"features":["kvm"]}`))
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 	f.srv = &http.Server{Handler: mux}
@@ -73,7 +88,7 @@ func TestClientLifecycleCalls(t *testing.T) {
 	client, fake := startFakeCH(t)
 	ctx := context.Background()
 
-	if err := client.WaitReady(ctx, time.Second); err != nil {
+	if _, err := client.WaitReady(ctx, time.Second); err != nil {
 		t.Fatalf("WaitReady: %v", err)
 	}
 	if err := client.Pause(ctx); err != nil {
@@ -126,7 +141,7 @@ func TestClientLifecycleCalls(t *testing.T) {
 func TestWaitReadyTimesOut(t *testing.T) {
 	// Socket that never exists -> WaitReady should time out, not hang.
 	client := NewClient(filepath.Join(t.TempDir(), "nonexistent.sock"))
-	err := client.WaitReady(context.Background(), 50*time.Millisecond)
+	_, err := client.WaitReady(context.Background(), 50*time.Millisecond)
 	if err == nil {
 		t.Fatal("WaitReady returned nil for a dead socket, want timeout error")
 	}

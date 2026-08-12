@@ -1,13 +1,17 @@
-// Package ch drives a single cloud-hypervisor VMM over its REST api-socket.
+// Copyright 2026 Google LLC
 //
-// PROVENANCE: ported from Agent Substrate's cmd/ateom-microvm/internal/ch
-// (github.com/agent-substrate/substrate, Apache-2.0, Copyright 2026 Google LLC).
-// Adapted for sandboxd's microVM RuntimeDriver (see
-// docs/sandboxd/PRD/PRD-microvm-runtime-cloud-hypervisor.md §5.4). The REST wire
-// format is the one cloud-hypervisor documents for vm.create/boot/pause/snapshot/
-// restore/resume.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Licensed under the Apache License, Version 2.0.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package ch
 
 import (
@@ -20,11 +24,14 @@ import (
 	"net/http"
 )
 
-// apiBase is a placeholder host; the transport always dials the unix api-socket,
-// so the host portion of the URL is ignored.
+// apiBase is a placeholder host; the real transport always dials the unix
+// api-socket, so the host portion of the URL is ignored.
 const apiBase = "http://localhost"
 
 // apiClient speaks the cloud-hypervisor REST API over its unix api-socket.
+//
+// cloud-hypervisor serves an HTTP/1.1 REST API on the api-socket, and we drive snapshot/restore
+// through it (vm.pause, vm.snapshot, vm.resume, vmm.ping, ...).
 type apiClient struct {
 	http *http.Client
 }
@@ -33,11 +40,12 @@ func newAPIClient(socketPath string) *apiClient {
 	return &apiClient{
 		http: &http.Client{
 			Transport: &http.Transport{
-				// CH's API server closes idle connections (and can be heavily
-				// swapped during reclaim). Reusing a kept-alive connection then
-				// blocks forever on the next request (observed in substrate:
-				// vm.resume hangs on a reused connection while a fresh one works
-				// instantly). Force a fresh connection per request.
+				// CH's API server closes idle connections (and can get heavily
+				// swapped out during reclaim). Reusing a kept-alive connection
+				// then blocks forever on the next request (observed
+				// empirically: vm.resume hangs on a reused connection while
+				// a fresh one works instantly). Force a fresh connection per
+				// request.
 				DisableKeepAlives: true,
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 					var d net.Dialer
@@ -46,24 +54,6 @@ func newAPIClient(socketPath string) *apiClient {
 			},
 		},
 	}
-}
-
-// get issues a GET and checks for a 2xx status.
-func (c *apiClient) get(ctx context.Context, path string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiBase+path, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("GET %s: status %d", path, resp.StatusCode)
-	}
-	return nil
 }
 
 // getJSON issues a GET and decodes the 2xx JSON response into out.

@@ -1,7 +1,16 @@
-// PROVENANCE: ported from Agent Substrate's cmd/ateom-microvm/internal/ch/createvm.go
-// (Apache-2.0, Copyright 2026 Google LLC). See api.go for the full note.
+// Copyright 2026 Google LLC
 //
-// Licensed under the Apache License, Version 2.0.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package ch
 
@@ -11,8 +20,8 @@ import (
 )
 
 // VmConfig is the body of /api/v1/vm.create — the subset of cloud-hypervisor's
-// VmConfig needed to boot a microVM guest. Modeled on kata's clh driver.
-// vm.create + vm.boot are issued with PUT.
+// VmConfig ateom sets to boot the kata guest. Modeled on kata's clh driver
+// (src/runtime/virtcontainers/clh.go). vm.create + vm.boot are issued with PUT.
 type VmConfig struct {
 	Cpus     CpusConfig      `json:"cpus"`
 	Memory   MemoryConfig    `json:"memory"`
@@ -27,8 +36,7 @@ type VmConfig struct {
 }
 
 // FsConfig is a virtio-fs device backed by a vhost-user (virtiofsd) socket. The
-// sandbox rootfs is served over this as the guest's root (virtiofs-boot proven on
-// the nested-virt node); the guest mounts it via the Tag.
+// overlay rootfs path uses it as the RO lower; the guest mounts it via the FsTag.
 type FsConfig struct {
 	Tag        string `json:"tag"`
 	Socket     string `json:"socket"`
@@ -51,20 +59,22 @@ type CpusConfig struct {
 
 // MemoryConfig sets guest RAM. Shared=true makes CH back RAM with a memfd, which
 // is what lets vm.snapshot write a SPARSE image (the memory-only snapshot the
-// checkpoint/restore path relies on).
+// rest of ateom relies on).
 type MemoryConfig struct {
 	Size   int64 `json:"size"`
 	Shared bool  `json:"shared"`
 }
 
-// PayloadConfig points at the guest kernel + its cmdline.
+// PayloadConfig points at the guest kernel + its cmdline (initramfs/firmware
+// unused: the kata guest boots from a virtio-blk image disk, root=/dev/vda1).
 type PayloadConfig struct {
 	Kernel  string `json:"kernel"`
 	Cmdline string `json:"cmdline"`
 }
 
-// DiskConfig is one virtio-blk disk (e.g. the guest image). The sandbox rootfs is
-// served over virtio-fs, not a disk.
+// DiskConfig is one virtio-blk disk. The only disk is the kata guest image
+// (/dev/vda, read-only); the actor rootfs is an overlay served over virtio-fs, not a
+// disk. NumQueues/QueueSize mirror kata's clh (num_queues = vcpus, queue_size = 1024).
 type DiskConfig struct {
 	Path      string `json:"path"`
 	Readonly  bool   `json:"readonly"`
@@ -74,7 +84,7 @@ type DiskConfig struct {
 	ImageType string `json:"image_type,omitempty"`
 }
 
-// RngConfig sets the entropy source (e.g. /dev/urandom).
+// RngConfig sets the entropy source (kata uses /dev/urandom).
 type RngConfig struct {
 	Src string `json:"src"`
 }
@@ -86,9 +96,9 @@ type ConsoleConfig struct {
 	File string `json:"file,omitempty"`
 }
 
-// VsockConfig is the hybrid-vsock the kata-agent listens on. Cid is the guest CID
-// (kata uses 3); Socket is the host unix socket the driver then dials to drive the
-// agent.
+// VsockConfig is the hybrid-vsock the kata-agent listens on. Cid is the guest
+// CID (kata uses 3); Socket is the host unix socket (kata.VsockSocketPath) that
+// ateom then dials (DialAgent) to drive the agent.
 type VsockConfig struct {
 	Cid    int64  `json:"cid"`
 	Socket string `json:"socket"`

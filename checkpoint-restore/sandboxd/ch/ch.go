@@ -1,8 +1,27 @@
-// PROVENANCE: ported from Agent Substrate's cmd/ateom-microvm/internal/ch/ch.go
-// (Apache-2.0, Copyright 2026 Google LLC). See api.go for the full note.
+// Copyright 2026 Google LLC
 //
-// Licensed under the Apache License, Version 2.0.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
+// Package ch drives a single cloud-hypervisor instance over its REST
+// api-socket: pause, snapshot, resume against a running VMM (e.g. the socket
+// kata creates at /run/vc/vm/<id>/clh-api.sock), plus relaunching a fresh VMM
+// from a snapshot directory for restore.
+//
+// This is the snapshot/restore half of the ateom-microvm model: kata
+// owns RUN (boot the micro-VM + run the OCI container), and ateom drives the CH
+// REST API underneath for suspend (pause+snapshot) and owns the bare-CH
+// relaunch for restore (see LaunchVMM + RestoreWithNetFDs in restorefds.go). The
+// REST wire format is the one cloud-hypervisor documents for snapshot/restore.
 package ch
 
 import (
@@ -16,6 +35,7 @@ import (
 type Client struct {
 	apiSocket string
 	api       *apiClient
+	info      VMMInfo
 }
 
 // NewClient returns a Client bound to a cloud-hypervisor api-socket path. The
@@ -24,35 +44,53 @@ func NewClient(apiSocket string) *Client {
 	return &Client{apiSocket: apiSocket, api: newAPIClient(apiSocket)}
 }
 
-// APISocket returns the api-socket path this client dials.
-func (c *Client) APISocket() string { return c.apiSocket }
+// Info returns what the VMM last reported about itself, zero until a successful
+// Ping or WaitReady. A Client belongs to one actor's VMM and is used from that
+// actor's goroutine, so this needs no synchronization.
+func (c *Client) Info() VMMInfo { return c.info }
 
-// Ping returns nil if the VMM api-socket answers vmm.ping.
-func (c *Client) Ping(ctx context.Context) error {
-	return c.api.get(ctx, "/api/v1/vmm.ping")
+// VMMInfo is what vmm.ping reports about the running VMM. Version is a semver
+// ("53.0.0"); BuildVersion is the release tag it was built from ("v53.0").
+type VMMInfo struct {
+	Version      string   `json:"version"`
+	BuildVersion string   `json:"build_version"`
+	Features     []string `json:"features"`
 }
 
-// WaitReady blocks until the api-socket answers vmm.ping or the deadline passes.
-func (c *Client) WaitReady(ctx context.Context, deadline time.Duration) error {
+// Ping reports what the VMM says about itself, or an error if the api-socket does
+// not answer vmm.ping.
+func (c *Client) Ping(ctx context.Context) (VMMInfo, error) {
+	var info VMMInfo
+	if err := c.api.getJSON(ctx, "/api/v1/vmm.ping", &info); err != nil {
+		return VMMInfo{}, err
+	}
+	c.info = info
+	return info, nil
+}
+
+// WaitReady blocks until the api-socket answers vmm.ping or the deadline passes,
+// returning what that answer said. Callers get the VMM's version for free this way:
+// the handshake already happens before every boot and restore, so nothing has to
+// run the binary again to ask.
+func (c *Client) WaitReady(ctx context.Context, deadline time.Duration) (VMMInfo, error) {
 	end := time.Now().Add(deadline)
 	for {
-		if err := c.Ping(ctx); err == nil {
-			return nil
+		info, err := c.Ping(ctx)
+		if err == nil {
+			return info, nil
 		}
 		if !time.Now().Before(end) {
-			return fmt.Errorf("cloud-hypervisor api socket %q not ready after %s", c.apiSocket, deadline)
+			return VMMInfo{}, fmt.Errorf("cloud-hypervisor api socket %q not ready after %s", c.apiSocket, deadline)
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return VMMInfo{}, ctx.Err()
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
 }
 
-// State returns the VM state as reported by vm.info (e.g. "Running", "Paused",
-// "Created"). Empty string with a nil error is not possible; a query failure
-// returns the error.
+// State returns the VM state as reported by vm.info (e.g. "Running", "Paused").
 func (c *Client) State(ctx context.Context) (string, error) {
 	var info struct {
 		State string `json:"state"`
@@ -64,8 +102,8 @@ func (c *Client) State(ctx context.Context) (string, error) {
 }
 
 // Pause pauses the running guest (quiescing it before snapshot). Idempotent:
-// already-paused is success (CH 500s on pausing a paused VM, which would wedge
-// checkpoint retries after a partial earlier attempt).
+// already-paused is success (CH itself 500s on pausing a paused VM, which would
+// otherwise wedge checkpoint retries after a partial earlier attempt).
 func (c *Client) Pause(ctx context.Context) error {
 	if state, err := c.State(ctx); err == nil && state == "Paused" {
 		return nil
