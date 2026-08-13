@@ -540,6 +540,24 @@ tradeoff. Keeping the seam runtime-plural from Phase 0 is what makes this cheap 
    default stays image-disk) since it boots correctly and may help a future slimmer initrd, but
    it is NOT the cold-start lever.
 
+   **Guest sizing from the template (issue #38, DONE).** The guest's vCPU/memory now derives
+   from the `SandboxTemplate.resources.LIMITS` instead of the hardcoded 2048MiB/1vCPU: the
+   operator surfaces `limits.cpu`/`limits.memory` to the microVM worker via the downward API
+   (`SANDBOXD_POD_CPU_LIMIT` — microVM-only, gated on the runtime so gVisor pod templates stay
+   byte-identical + don't churn; `SANDBOXD_POD_MEM_LIMIT` was already injected for both runtimes
+   to drive the agent OOM-reserve). The worker's `guestConfig` then boots the guest with
+   `vcpus = ceil(limits.cpu)` (min 1) and `memory = limits.memory − agent-reserve` (via
+   `sandboxMemLimit`, so the guest can never allocate past its own cgroup and OOM-kill the
+   sandboxd agent). Precedence: explicit `SANDBOXD_KATA_CONFIG`/`SANDBOXD_CH_VCPUS`/
+   `SANDBOXD_CH_MEMORY_MIB` > pod limits > the 2048/1 default. Different VM sizes = set
+   `resources.limits` per template (no hand-mounted kata config). Restore reuses the snapshot's
+   baked topology (`vm.restore` takes no VmConfig), so size is fixed at first boot. Live-verified
+   through the control plane: template `limits {cpu:2, memory:4Gi}` → guest `nproc=2`,
+   `MemTotal≈3.4GiB` (4Gi − reserve), under `acpi=off`; a gVisor pool with the same limits got
+   `POD_MEM_LIMIT` but NOT `POD_CPU_LIMIT` (regression guard). NOTE: sizing is per-*pool/template*,
+   not per-*session* (the worker is 1:1 with its sandbox, so a pool's workers share one size);
+   true per-session sizing would need the size plumbed through `/run`.
+
    Per-runtime `minIdle` sizing + fine virtio-fs prep cost are still open (deferred density tuning).
 4. **Restore-dir lifetime — CONFIRMED + moot today.** With CH v53 (which prefaults OnDemand),
    restores use EAGER `Copy`, which reads the whole image up front and is self-contained — so

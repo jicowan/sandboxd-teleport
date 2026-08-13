@@ -493,6 +493,26 @@ func (r *WarmPoolReconciler) workerEnv(tmpl *corev1alpha1.SandboxTemplate, runti
 				}}})
 		}
 	}
+	// microVM guest CPU sizing (issue #38): surface the pod's CPU LIMIT (whole cores,
+	// ceil'd by the downward API's "1" divisor) so the worker boots the guest with
+	// ceil(limits.cpu) vCPUs — the guest's vCPU count tracks the SandboxTemplate's
+	// resources.limits.cpu instead of the hardcoded 1. microVM ONLY: gated on the
+	// runtime so a gVisor pod's template stays byte-identical (deploymentMatches is a
+	// DeepEqual over the whole template — an extra env would needlessly roll gVisor
+	// workers). Memory is already surfaced above (SANDBOXD_POD_MEM_LIMIT) for BOTH
+	// runtimes (it also drives the agent OOM-reserve); the worker reuses it for the
+	// microVM guest memory size. Gated on a CPU limit existing because
+	// resourceFieldRef:limits.cpu FALLS BACK TO NODE ALLOCATABLE when unset.
+	if runtimeEngine == "microvm" && tmpl != nil && tmpl.Spec.Resources != nil {
+		if _, ok := tmpl.Spec.Resources.Limits[corev1.ResourceCPU]; ok {
+			env = append(env, corev1.EnvVar{Name: "SANDBOXD_POD_CPU_LIMIT", ValueFrom: &corev1.EnvVarSource{
+				ResourceFieldRef: &corev1.ResourceFieldSelector{
+					ContainerName: "sandboxd",
+					Resource:      "limits.cpu",
+					Divisor:       resource.MustParse("1"),
+				}}})
+		}
+	}
 	// Per-pool opt-in: surface the nested workload console to kubectl logs.
 	if tmpl != nil && tmpl.Spec.StreamConsole {
 		env = append(env, corev1.EnvVar{Name: "SANDBOXD_STREAM_CONSOLE", Value: "1"})

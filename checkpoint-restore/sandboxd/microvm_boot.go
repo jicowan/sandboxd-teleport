@@ -249,8 +249,19 @@ func (d *chDriver) initrd() string {
 	return envOr("SANDBOXD_CH_INITRD", "")
 }
 
-// guestConfig reads guest sizing + agent kernel params from the kata config,
-// enabling the debug console for diagnostics.
+// guestConfig reads guest sizing + agent kernel params. The vCPU/memory the guest
+// boots with is resolved by this precedence (highest first):
+//  1. an explicit kata config (SANDBOXD_KATA_CONFIG default_vcpus/default_memory) or
+//     the explicit SANDBOXD_CH_VCPUS / SANDBOXD_CH_MEMORY_MIB overrides — an operator
+//     escape hatch for hand-tuned guests;
+//  2. the worker POD's resource LIMITS, surfaced by the operator via the downward API
+//     (SANDBOXD_POD_CPU_LIMIT / SANDBOXD_POD_MEM_LIMIT) — so a SandboxTemplate's
+//     resources.limits size the guest (issue #38). Memory is limit MINUS the agent
+//     reserve (sandboxMemLimit) so the guest can never allocate past its own cgroup and
+//     OOM-kill the sandboxd agent; vCPUs is ceil(cpu limit), min 1.
+//  3. the built-in default (2048 MiB / 1 vCPU).
+// This is a chDriver method, so it is microVM-ONLY: the gVisor (runsc) driver never
+// calls it and its worker pods are unaffected.
 func (d *chDriver) guestConfig() (memMiB, vcpus int, kparams string, err error) {
 	var cfgBytes []byte
 	if cf := envOr("SANDBOXD_KATA_CONFIG", ""); cf != "" {
@@ -260,7 +271,66 @@ func (d *chDriver) guestConfig() (memMiB, vcpus int, kparams string, err error) 
 	if err != nil {
 		return 0, 0, "", fmt.Errorf("parse kata config: %w", err)
 	}
-	return cfg.MemoryMiB, cfg.VCPUs, kata.WithDebugConsole(cfg.KernelParams), nil
+	memMiB, vcpus = deriveGuestSize(
+		cfg.MemoryMiB, cfg.VCPUs,
+		envInt64("SANDBOXD_CH_MEMORY_MIB", 0),
+		envInt64("SANDBOXD_CH_VCPUS", 0),
+		envInt64("SANDBOXD_POD_MEM_LIMIT", 0),
+		envInt64("SANDBOXD_POD_CPU_LIMIT", 0),
+		loadMemReserveConfig(),
+	)
+	return memMiB, vcpus, kata.WithDebugConsole(cfg.KernelParams), nil
+}
+
+// deriveGuestSize resolves the guest vCPU/memory per the precedence documented on
+// guestConfig. Pure (no env/IO) so it is table-tested.
+//
+//   - cfgMemMiB/cfgVCPUs: values from ParseConfig (kata config or its 2048/1 default).
+//     ParseConfig already substitutes the default when a key is absent, so a value that
+//     differs from the default means the kata config set it explicitly — that wins.
+//   - envMemMiB/envVCPUs: explicit SANDBOXD_CH_MEMORY_MIB / SANDBOXD_CH_VCPUS (0 = unset).
+//   - podMemLimit/podCPULimit: the pod's limits.memory (bytes) / limits.cpu (whole
+//     cores, ceil'd by the downward API) from the operator (0 = unset).
+//   - reserve: the agent memory-reserve config, so guest RAM = podMemLimit − reserve.
+func deriveGuestSize(cfgMemMiB, cfgVCPUs int, envMemMiB, envVCPUs, podMemLimit, podCPULimit int64, reserve memReserveConfig) (memMiB, vcpus int) {
+	const defMemMiB, defVCPUs = 2048, 1
+
+	// Memory. Explicit CH env or a non-default kata config wins; else derive from the
+	// pod memory limit (minus the agent reserve); else the default.
+	switch {
+	case envMemMiB > 0:
+		memMiB = int(envMemMiB)
+	case cfgMemMiB != defMemMiB && cfgMemMiB > 0:
+		memMiB = cfgMemMiB
+	case podMemLimit > 0:
+		if guest := sandboxMemLimit(podMemLimit, true, reserve); guest > 0 {
+			memMiB = int(guest >> 20) // bytes → MiB
+		}
+	}
+	if memMiB <= 0 {
+		memMiB = cfgMemMiB // falls back to the kata default (2048) when nothing derived
+		if memMiB <= 0 {
+			memMiB = defMemMiB
+		}
+	}
+
+	// vCPUs. Explicit CH env or a non-default kata config wins; else ceil(cpu limit),
+	// min 1 (the downward API already delivers a whole-core, ceil'd value); else default.
+	switch {
+	case envVCPUs > 0:
+		vcpus = int(envVCPUs)
+	case cfgVCPUs != defVCPUs && cfgVCPUs > 0:
+		vcpus = cfgVCPUs
+	case podCPULimit > 0:
+		vcpus = int(podCPULimit)
+	}
+	if vcpus < 1 {
+		vcpus = cfgVCPUs
+		if vcpus < 1 {
+			vcpus = defVCPUs
+		}
+	}
+	return memMiB, vcpus
 }
 
 // configureGuestNetwork performs the shim's guest-side networking via the agent:
