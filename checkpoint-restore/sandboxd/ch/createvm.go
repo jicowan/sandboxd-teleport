@@ -46,7 +46,11 @@ type FsConfig struct {
 }
 
 // PlatformConfig sets VM-wide platform options. NumPciSegments must be >1 when a
-// virtio-fs device sits on a non-zero PCI segment (kata puts fs on segment 1).
+// virtio-fs device sits on a non-zero PCI segment (kata's default puts fs on
+// segment 1). sandboxd keeps fs on segment 1 ONLY when the guest has ACPI; with
+// acpi=off (the amd64 fast-boot path) there is no MCFG table to enumerate non-zero
+// segments, so the fs must go on segment 0 and this whole struct is omitted (see
+// buildVMConfig in microvm_boot.go).
 type PlatformConfig struct {
 	NumPciSegments int32 `json:"num_pci_segments,omitempty"`
 }
@@ -65,11 +69,17 @@ type MemoryConfig struct {
 	Shared bool  `json:"shared"`
 }
 
-// PayloadConfig points at the guest kernel + its cmdline (initramfs/firmware
-// unused: the kata guest boots from a virtio-blk image disk, root=/dev/vda1).
+// PayloadConfig points at the guest kernel + its cmdline, and OPTIONALLY an initramfs.
+// Two guest-rootfs models:
+//   - image (Initramfs=""): the kata guest boots from a virtio-blk image disk
+//     (root=/dev/vda1, systemd → kata-containers.target). ~256 MiB image.
+//   - initrd (Initramfs set): CH loads the kata AGENT-INIT initrd as the rootfs
+//     (tmpfs); the kata-agent is PID 1 — no /dev/vda disk, no systemd. Smaller
+//     (~41 MiB) and faster to the agent. See buildVMConfig.
 type PayloadConfig struct {
-	Kernel  string `json:"kernel"`
-	Cmdline string `json:"cmdline"`
+	Kernel    string `json:"kernel"`
+	Cmdline   string `json:"cmdline"`
+	Initramfs string `json:"initramfs,omitempty"`
 }
 
 // DiskConfig is one virtio-blk disk. The only disk is the kata guest image

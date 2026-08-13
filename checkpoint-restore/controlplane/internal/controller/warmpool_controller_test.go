@@ -25,6 +25,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -139,6 +140,66 @@ var _ = Describe("WarmPool Controller", func() {
 		for _, v := range gvDep.Spec.Template.Spec.Volumes {
 			Expect(v.Name).NotTo(Equal(kvmVolume), "gVisor worker must not mount /dev/kvm")
 		}
+	})
+
+	It("surfaces pod resource LIMITS so the microVM guest is sized from them (issue #38), without touching gVisor", func() {
+		ctx := context.Background()
+		limits := corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("2"),
+				corev1.ResourceMemory: resource.MustParse("4Gi"),
+			},
+		}
+
+		// microVM pool WITH limits: worker gets BOTH POD_MEM_LIMIT and POD_CPU_LIMIT
+		// (downward API from limits.memory / limits.cpu) so guestConfig can size the VM.
+		mvTmpl := &corev1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "tmpl-mv-sz", Namespace: ns},
+			Spec: corev1alpha1.SandboxTemplateSpec{
+				Image: "redis:7-alpine", Runtime: "microvm", Resources: &limits,
+				Ports: testPorts(), Health: testHealth(),
+			},
+		}
+		Expect(k8sClient.Create(ctx, mvTmpl)).To(Succeed())
+		Expect(k8sClient.Create(ctx, &corev1alpha1.WarmPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "pool-mv-sz", Namespace: ns},
+			Spec:       corev1alpha1.WarmPoolSpec{TemplateRef: corev1alpha1.LocalRef{Name: "tmpl-mv-sz"}, Replicas: 1},
+		})).To(Succeed())
+		reconcileOnce("pool-mv-sz")
+
+		var mvDep appsv1.Deployment
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "sandboxd-worker-pool-mv-sz"}, &mvDep)).To(Succeed())
+		mvEnv := mvDep.Spec.Template.Spec.Containers[0].Env
+		Expect(envNames(mvEnv)).To(ContainElement("SANDBOXD_POD_CPU_LIMIT"))
+		Expect(envNames(mvEnv)).To(ContainElement("SANDBOXD_POD_MEM_LIMIT"))
+		// The CPU limit is surfaced whole-core via the downward API (divisor "1").
+		cpuEnv := envByName(mvEnv, "SANDBOXD_POD_CPU_LIMIT")
+		Expect(cpuEnv).NotTo(BeNil())
+		Expect(cpuEnv.ValueFrom).NotTo(BeNil())
+		Expect(cpuEnv.ValueFrom.ResourceFieldRef).NotTo(BeNil())
+		Expect(cpuEnv.ValueFrom.ResourceFieldRef.Resource).To(Equal("limits.cpu"))
+
+		// gVisor pool WITH the SAME limits: it gets POD_MEM_LIMIT (agent OOM-reserve,
+		// both runtimes) but MUST NOT get POD_CPU_LIMIT — that's the microVM-only knob,
+		// and adding it would needlessly roll every gVisor worker. Regression guard.
+		gvTmpl := &corev1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "tmpl-gv-sz", Namespace: ns},
+			Spec: corev1alpha1.SandboxTemplateSpec{
+				Image: "python:3.12-slim", Resources: &limits, Ports: testPorts(), Health: testHealth(),
+			},
+		}
+		Expect(k8sClient.Create(ctx, gvTmpl)).To(Succeed())
+		Expect(k8sClient.Create(ctx, &corev1alpha1.WarmPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "pool-gv-sz", Namespace: ns},
+			Spec:       corev1alpha1.WarmPoolSpec{TemplateRef: corev1alpha1.LocalRef{Name: "tmpl-gv-sz"}, Replicas: 1},
+		})).To(Succeed())
+		reconcileOnce("pool-gv-sz")
+
+		var gvDep appsv1.Deployment
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "sandboxd-worker-pool-gv-sz"}, &gvDep)).To(Succeed())
+		gvEnv := gvDep.Spec.Template.Spec.Containers[0].Env
+		Expect(envNames(gvEnv)).NotTo(ContainElement("SANDBOXD_POD_CPU_LIMIT"), "gVisor worker must not get the microVM CPU-sizing env")
+		Expect(envNames(gvEnv)).To(ContainElement("SANDBOXD_POD_MEM_LIMIT"), "gVisor still gets the mem limit for the agent OOM-reserve")
 	})
 
 	It("updates replicas when the pool spec changes", func() {
@@ -270,3 +331,22 @@ var _ = Describe("WarmPool Controller", func() {
 		Expect(cost("wdc-busy")).To(Equal(deletionCostIdle), "released worker should become cheap to delete")
 	})
 })
+
+// envNames returns just the names of an env list (order-independent membership checks).
+func envNames(env []corev1.EnvVar) []string {
+	names := make([]string, len(env))
+	for i := range env {
+		names[i] = env[i].Name
+	}
+	return names
+}
+
+// envByName returns a pointer to the first env var with the given name, or nil.
+func envByName(env []corev1.EnvVar, name string) *corev1.EnvVar {
+	for i := range env {
+		if env[i].Name == name {
+			return &env[i]
+		}
+	}
+	return nil
+}
