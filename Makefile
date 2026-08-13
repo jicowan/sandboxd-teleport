@@ -197,6 +197,10 @@ fetch-microvm-assets: ## Download cloud-hypervisor + kata guest kernel/rootfs + 
 	@# in the build context (Docker COPY doesn't follow symlinks well).
 	cp -L $(DIST)/microvm-worker/kata/opt/kata/share/kata-containers/vmlinux.container $(DIST)/microvm-worker/vmlinux.container
 	cp -L $(DIST)/microvm-worker/kata/opt/kata/share/kata-containers/kata-containers.img $(DIST)/microvm-worker/kata-containers.img
+	@# Also stage the AGENT-INIT initrd (kata-agent as PID 1, no systemd; ~41MiB vs the
+	@# 256MiB image). The worker picks image vs initrd at runtime via SANDBOXD_CH_INITRD
+	@# — bundling both keeps one image able to boot either way (A/B cold-start).
+	cp -L $(DIST)/microvm-worker/kata/opt/kata/share/kata-containers/kata-ubuntu-noble.initrd $(DIST)/microvm-worker/kata-containers.initrd
 	@# virtiofsd v1.14.0 from upstream — NOT the kata bundle's v1.13.x, which hangs CH's
 	@# snapshot/restore migration handshake (see VIRTIOFSD_* above). Verify the sha
 	@# (a bad URL silently returns a login page), then extract the musl static binary.

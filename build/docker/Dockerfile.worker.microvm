@@ -27,6 +27,9 @@ COPY cloud-hypervisor /usr/local/bin/cloud-hypervisor
 COPY virtiofsd /usr/local/bin/virtiofsd
 COPY vmlinux.container /usr/local/share/kata/vmlinux.container
 COPY kata-containers.img /usr/local/share/kata/kata-containers.img
+# The agent-init initrd is bundled too; boot from it by setting SANDBOXD_CH_INITRD
+# (see below). Default boot stays the image disk unless that env is set.
+COPY kata-containers.initrd /usr/local/share/kata/kata-containers.initrd
 RUN chmod +x /usr/local/bin/cloud-hypervisor /usr/local/bin/virtiofsd
 ENV SANDBOXD_RUNTIME=microvm \
     SANDBOXD_CH_BIN=/usr/local/bin/cloud-hypervisor \
@@ -35,4 +38,8 @@ ENV SANDBOXD_RUNTIME=microvm \
     SANDBOXD_CH_IMAGE=/usr/local/share/kata/kata-containers.img \
     SANDBOXD_WORK=/work \
     SANDBOXD_ADDR=:8090
+# To boot the agent-init initrd instead of the image disk (smaller guest, faster to
+# the agent), set: SANDBOXD_CH_INITRD=/usr/local/share/kata/kata-containers.initrd
+# (initrd takes precedence over SANDBOXD_CH_IMAGE). Left unset here so the default is
+# the proven image-disk path; flip it per-pool or in a canary to A/B cold-start.
 ENTRYPOINT ["/usr/local/bin/sandboxd"]

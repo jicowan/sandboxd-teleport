@@ -511,12 +511,36 @@ tradeoff. Keeping the seam runtime-plural from Phase 0 is what makes this cheap 
    that HANGS CH's snapshot/restore migration handshake (diagnosed live: CH deadlocks in
    `futex_wait`/`unix_stream_data_wait`, virtiofsd at 0 CPU). Substrate pins v1.14.0 for the
    same reason.
-3. **Cold-start budget — PARTIALLY MEASURED.** Cold boot (RUN → Running) is ~2–3s incl.
-   image pull + CH boot + kata-agent handshake. A same-id teleport-restore is ~11s, dominated
-   by the DENSE memory-image download (see Q5) — NOT CH itself. The vsock CONNECT handshake
-   needs retrying until the guest agent listens (~4s into boot); a single early CONNECT gets
-   EOF (fixed in `DialAgentRetry`). Per-runtime `minIdle` sizing + fine virtio-fs prep cost
-   are still open (part of the deferred density tuning).
+3. **Cold-start budget — MEASURED + TUNED (`acpi=off`).** Cold boot (RUN → Running) is ~2–3s
+   incl. image pull + CH boot + kata-agent handshake. A same-id teleport-restore is ~11s,
+   dominated by the DENSE memory-image download (see Q5) — NOT CH itself. The vsock CONNECT
+   handshake needs retrying until the guest agent listens (~4s into boot); a single early
+   CONNECT gets EOF (fixed in `DialAgentRetry`).
+
+   **Cold-start lever found (`acpi=off`, amd64).** A timestamped serial-boot analysis showed
+   the two biggest pre-userspace gaps are ACPI table init (PM-Timer + Core-revision, ~0.2s).
+   Since CH direct-boots (no firmware), ACPI is dead weight for our FIXED-topology guest
+   (`boot_vcpus==max_vcpus`, no memory hotplug — the only things needing guest ACPI; teardown
+   kills the VMM, not the ACPI power button). Booting with `acpi=off` cut guest boot
+   (BootVM → agent ready) from **~1.93s to ~1.57s (~18%)**, measured via real `/run`s through
+   sandboxd on a nested-virt node. THE CATCH: with ACPI off x86 can't read the MCFG table, so
+   the guest sees only PCI segment 0 — kata's virtio-fs on segment 1 goes invisible and the
+   workload-rootfs mount fails EINVAL. Fix: on the `acpi=off` path put virtio-fs on segment 0
+   (single-segment); arm64 keeps ACPI + segment 1 (its GIC boot path depends on ACPI). The
+   segment placement is captured IN the snapshot, so restore inherits it via `vm.restore` (no
+   restore-side change; old snapshots stay compatible). Full teleport matrix re-verified under
+   `acpi=off`: cold boot, virtio-fs rootfs, ports/DNAT, DNS, egress, IAM cred-vendor,
+   suspend (41.5MiB sparse / 49.4×), and restore (`ready:true` post-restore).
+
+   **Negative result — agent-init initrd (parked, opt-in).** The kata `kata-ubuntu-noble.initrd`
+   (kata-agent as PID 1, no systemd, ~41MiB vs the 256MiB image) was A/B-tested as a faster
+   boot path and was ~0.35s SLOWER (~2.28s vs ~1.93s guest boot): the initrd decompress-to-tmpfs
+   outweighs the systemd target chain it removes, and both are dominated by the ~0.9–1.0s kernel
+   init that `acpi=off` actually targets. It is kept as an OPT-IN capability (`SANDBOXD_CH_INITRD`;
+   default stays image-disk) since it boots correctly and may help a future slimmer initrd, but
+   it is NOT the cold-start lever.
+
+   Per-runtime `minIdle` sizing + fine virtio-fs prep cost are still open (deferred density tuning).
 4. **Restore-dir lifetime — CONFIRMED + moot today.** With CH v53 (which prefaults OnDemand),
    restores use EAGER `Copy`, which reads the whole image up front and is self-contained — so
    the worker drops the staged memory image after restore and there is NO whole-lifetime

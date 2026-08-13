@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -47,9 +48,10 @@ func (d *chDriver) createStart(id, bundle string, ports []portMap) (retErr error
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), bootTimeout)
 	defer cancel()
+	tStart := time.Now() // whole-createStart clock (cold-start latency)
 
-	if d.kernel == "" || d.image() == "" {
-		return fmt.Errorf("microvm createStart: SANDBOXD_CH_KERNEL and SANDBOXD_CH_IMAGE (kata guest kernel + rootfs image) must be set")
+	if d.kernel == "" || (d.image() == "" && d.initrd() == "") {
+		return fmt.Errorf("microvm createStart: SANDBOXD_CH_KERNEL and one of SANDBOXD_CH_IMAGE / SANDBOXD_CH_INITRD (kata guest kernel + rootfs image or agent-init initrd) must be set")
 	}
 	rootfs := filepath.Join(bundle, "rootfs")
 	netnsPath := filepath.Join("/run/netns", microvmInteriorNetNSName)
@@ -143,7 +145,7 @@ func (d *chDriver) createStart(id, bundle string, ports []portMap) (retErr error
 	// 7) vm.create with the kata-compatible config (RO guest image on /dev/vda + the
 	//    virtio-fs RO lower on PCI segment 1; writable upper is a guest tmpfs).
 	serialLog := filepath.Join(kata.VMDir(id), "serial.log")
-	vmCfg := buildVMConfig(id, d.kernel, d.image(), kparams, serialLog, memMiB, vcpus)
+	vmCfg := buildVMConfig(id, d.kernel, d.image(), d.initrd(), kparams, serialLog, memMiB, vcpus)
 	if err := client.CreateVM(ctx, vmCfg); err != nil {
 		return fmt.Errorf("microvm vm.create: %w", err)
 	}
@@ -167,7 +169,9 @@ func (d *chDriver) createStart(id, bundle string, ports []portMap) (retErr error
 		return fmt.Errorf("microvm add-net: %w", err)
 	}
 
-	// 9) Boot.
+	// 9) Boot. Stamp tBoot so we can report guest boot time (BootVM -> agent ready) —
+	//    the phase the agent-init initrd vs image-disk choice most affects.
+	tBoot := time.Now()
 	if err := client.BootVM(ctx); err != nil {
 		return fmt.Errorf("microvm vm.boot: %w", err)
 	}
@@ -185,6 +189,13 @@ func (d *chDriver) createStart(id, bundle string, ports []portMap) (retErr error
 	if err != nil {
 		return fmt.Errorf("microvm dial agent: %w", err)
 	}
+	// Guest boot time: BootVM -> kata-agent answering. This is the metric to watch when
+	// A/B-ing the agent-init initrd (SANDBOXD_CH_INITRD) vs the image disk.
+	bootMode := "image"
+	if d.initrd() != "" {
+		bootMode = "initrd"
+	}
+	log.Printf("microvm %s: guest booted (%s) — agent ready %s after vm.boot", id, bootMode, time.Since(tBoot).Round(time.Millisecond))
 	defer func() {
 		if retErr != nil {
 			_ = ac.Close()
@@ -216,13 +227,26 @@ func (d *chDriver) createStart(id, bundle string, ports []portMap) (retErr error
 	if d.streamConsole {
 		d.forwardWorkloadLogs(id, ac) // relay WORKLOAD stdout/stderr → kubectl logs (opt-in)
 	}
+	log.Printf("microvm %s: createStart complete (%s) in %s", id, bootMode, time.Since(tStart).Round(time.Millisecond))
 	return nil
 }
 
-// image returns the kata guest rootfs image path (ext4, RO /dev/vda), from
-// SANDBOXD_CH_IMAGE.
+// image returns the kata guest rootfs IMAGE path (ext4, RO /dev/vda), from
+// SANDBOXD_CH_IMAGE. Empty when the initrd (agent-init) model is selected, so the
+// disk-image boot path is skipped in favor of initrd(). Defaults to the bundled kata
+// image ONLY when no initrd is configured.
 func (d *chDriver) image() string {
+	if d.initrd() != "" {
+		return envOr("SANDBOXD_CH_IMAGE", "") // initrd mode: no image disk unless explicitly set
+	}
 	return envOr("SANDBOXD_CH_IMAGE", "/usr/local/share/kata/kata-containers.img")
+}
+
+// initrd returns the kata AGENT-INIT initrd path (SANDBOXD_CH_INITRD). When set, the
+// guest boots from this initramfs (kata-agent as PID 1, tmpfs rootfs, no systemd) —
+// smaller + faster to the agent than the disk image. Empty = use the image disk.
+func (d *chDriver) initrd() string {
+	return envOr("SANDBOXD_CH_INITRD", "")
 }
 
 // guestConfig reads guest sizing + agent kernel params from the kata config,
@@ -268,35 +292,83 @@ func (d *chDriver) configureGuestNetwork(ctx context.Context, ac *kata.AgentClie
 }
 
 // buildVMConfig assembles the cloud-hypervisor VmConfig: kata-compatible cmdline,
-// RO kata guest image on /dev/vda + the virtio-fs RO lower on PCI segment 1, no
-// actor disks (the writable upper is a guest tmpfs).
-func buildVMConfig(id, kernel, image, kparams, serialLog string, memMiB, vcpus int) ch.VmConfig {
+// RO kata guest image on /dev/vda + the virtio-fs RO lower (PCI segment 1 with ACPI,
+// segment 0 on the acpi=off fast-boot path), no actor disks (writable upper = tmpfs).
+// buildVMConfig assembles the CH VmConfig for one of two guest-rootfs models:
+//   - initrd != "": the kata AGENT-INIT initrd is the rootfs (loaded as initramfs,
+//     runs on tmpfs, kata-agent is PID 1). No /dev/vda disk, no systemd — smaller and
+//     faster to the agent. `image` is ignored.
+//   - initrd == "": the kata guest IMAGE boots as a virtio-blk disk on /dev/vda1
+//     (root=…, systemd → kata-containers.target).
+// The virtio-fs RO lower (workload rootfs) is on PCI segment 1 when the guest has
+// ACPI, or segment 0 on the amd64 acpi=off fast-boot path (no MCFG to enumerate a
+// non-zero segment — see the acpiOff branch below); the writable overlay upper is a
+// guest tmpfs either way.
+func buildVMConfig(id, kernel, image, initrd, kparams, serialLog string, memMiB, vcpus int) ch.VmConfig {
 	console := "ttyS0"
 	if runtime.GOARCH == "arm64" {
 		console = "ttyAMA0"
 	}
-	cmdline := "root=/dev/vda1 rootflags=data=ordered,errors=remount-ro ro rootfstype=ext4 " +
-		"panic=1 no_timer_check noreplace-smp console=" + console + ",115200n8 " +
-		"systemd.unit=kata-containers.target systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket"
-	if kparams != "" {
-		cmdline += " " + kparams
+	// acpi=off shaves ~0.34s (~18%) off guest boot (BootVM→agent ready): CH
+	// direct-boots the guest, so ACPI table parsing + ACPI-driven device probing is
+	// dead weight. Safe here because we boot a FIXED topology (boot_vcpus==max_vcpus,
+	// no memory hotplug — the only things that need guest ACPI) and tear down by
+	// killing the VMM, not the ACPI power button. Live A/B (real /run through
+	// sandboxd, python-slim image): 1.93s→1.59s guest boot; still reaches a live agent
+	// + running container. arm64 keeps ACPI (its boot/GIC path depends on it).
+	//
+	// The catch: with ACPI off, x86 can't read the MCFG table, so the guest only sees
+	// PCI segment 0 (legacy config space) — a virtio-fs device on segment 1 becomes
+	// invisible and the workload-rootfs mount fails EINVAL. So when acpiOff we put
+	// virtio-fs on segment 0 alongside the disk (single-segment) instead of kata's
+	// segment-1 default. The virtio-blk image disk is on segment 0 either way.
+	acpiOff := runtime.GOARCH == "amd64"
+	common := "panic=1 no_timer_check noreplace-smp console=" + console + ",115200n8"
+	if acpiOff {
+		common += " acpi=off"
 	}
-	return ch.VmConfig{
-		Cpus:    ch.CpusConfig{BootVcpus: int32(vcpus), MaxVcpus: int32(vcpus)},
-		Memory:  ch.MemoryConfig{Size: int64(memMiB) * 1024 * 1024, Shared: true},
-		Payload: ch.PayloadConfig{Kernel: kernel, Cmdline: cmdline},
-		Disks: []ch.DiskConfig{
-			{Path: image, Readonly: true, ImageType: "Raw", NumQueues: int32(vcpus), QueueSize: 1024},
-		},
-		Fs: []ch.FsConfig{{
-			Tag: kata.FsTag, Socket: kata.VirtiofsdSocketPath(id),
-			NumQueues: 1, QueueSize: 1024, PciSegment: 1,
-		}},
-		Platform: &ch.PlatformConfig{NumPciSegments: 2},
+
+	fsSegment := int32(1) // kata default: virtio-fs on PCI segment 1 (needs ACPI MCFG)
+	var platform *ch.PlatformConfig = &ch.PlatformConfig{NumPciSegments: 2}
+	if acpiOff {
+		fsSegment = 0    // no MCFG without ACPI → keep virtio-fs on segment 0
+		platform = nil   // single segment; omit num_pci_segments
+	}
+
+	cfg := ch.VmConfig{
+		Cpus:     ch.CpusConfig{BootVcpus: int32(vcpus), MaxVcpus: int32(vcpus)},
+		Memory:   ch.MemoryConfig{Size: int64(memMiB) * 1024 * 1024, Shared: true},
+		Fs:       []ch.FsConfig{{Tag: kata.FsTag, Socket: kata.VirtiofsdSocketPath(id), NumQueues: 1, QueueSize: 1024, PciSegment: fsSegment}},
+		Platform: platform,
 		Rng:      &ch.RngConfig{Src: "/dev/urandom"},
 		Serial:   &ch.ConsoleConfig{Mode: "File", File: serialLog},
 		Vsock:    &ch.VsockConfig{Cid: 3, Socket: kata.VsockSocketPath(id)},
 	}
+
+	if initrd != "" {
+		// agent-init initrd: no root disk, no systemd unit; the initrd's /sbin/init IS
+		// the kata-agent (runs on tmpfs, PID 1). It needs to be told it's init and given
+		// the cgroup-v2 params kata's runtime normally injects, or it exits immediately
+		// (guest powers off right after "Run /init"). agent.log=debug surfaces the exit
+		// reason on the serial console.
+		cmdline := common +
+			" init=/sbin/init cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1 agent.log=debug"
+		if kparams != "" {
+			cmdline += " " + kparams
+		}
+		cfg.Payload = ch.PayloadConfig{Kernel: kernel, Cmdline: cmdline, Initramfs: initrd}
+		return cfg
+	}
+
+	// image disk: kata guest rootfs on /dev/vda1 (ext4), systemd -> kata-containers.target.
+	cmdline := "root=/dev/vda1 rootflags=data=ordered,errors=remount-ro ro rootfstype=ext4 " +
+		common + " systemd.unit=kata-containers.target systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket"
+	if kparams != "" {
+		cmdline += " " + kparams
+	}
+	cfg.Payload = ch.PayloadConfig{Kernel: kernel, Cmdline: cmdline}
+	cfg.Disks = []ch.DiskConfig{{Path: image, Readonly: true, ImageType: "Raw", NumQueues: int32(vcpus), QueueSize: 1024}}
+	return cfg
 }
 
 // ensureKataCompatibleSpec augments the bundle's config.json with the fields the
