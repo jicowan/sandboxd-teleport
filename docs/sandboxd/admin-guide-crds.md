@@ -58,7 +58,7 @@ subresource; no printer columns.
 | `workerImage` | string | No | empty ⇒ operator global default | Overrides the sandboxd **worker** image for this pool (NOT the workload image). The worker image carries the pinned `runsc` that checkpoint/restore depends on, so it's normally one global value (operator `--worker-image`); override only to canary a new worker build on one pool. Sessions can't teleport across workers with incompatible `runsc`. |
 | `streamConsole` | bool | No | `false` | Surfaces the nested workload's stdout/stderr to the worker's stdout (→ `kubectl logs`) by setting `SANDBOXD_STREAM_CONSOLE=1` on this pool's workers. The console is attacker‑controlled and multi‑tenant over a worker's lifetime, so it's opt‑in per pool. The session‑scoped `/logs` API stays the production path. |
 | `iam` | IAMSpec | No | — | Lets sandboxes in this pool assume an AWS IAM role (`iam.roleArn`); the worker vends per‑session temporary credentials. Off unless set. A `Session` may override per session. Requires the operator's `--cred-token-secret`. |
-| `resources` | corev1.ResourceRequirements | No | — | Worker sizing hint → the worker pod's resource requests/limits. **Setting `limits.memory` also enables agent OOM‑protection** (see the "Agent OOM‑protection" note below): the worker caps each sandbox below the pod limit so a runaway guest is OOM‑killed in its own cgroup instead of taking down the sandboxd agent. |
+| `resources` | corev1.ResourceRequirements | No | — | Worker sizing hint → the worker pod's resource requests/limits. **Setting `limits.memory` also enables agent OOM‑protection** (see the "Agent OOM‑protection" note below): the worker caps each sandbox below the pod limit so a runaway guest is OOM‑killed in its own cgroup instead of taking down the sandboxd agent. **On a microVM pool (`runtime: microvm`), `limits` also SIZE THE GUEST** (see "microVM guest sizing" below): `limits.cpu` → guest vCPUs (`ceil`, min 1), `limits.memory` → guest RAM (`limit − reserve`). gVisor pools are unaffected. |
 | `scheduling` | SchedulingSpec | No | — | Worker‑pod placement (nodeSelector/tolerations/affinity/spread). Applied verbatim; the operator injects no defaults. |
 
 ### `.status`
@@ -126,6 +126,28 @@ per-sandbox memory limit 1879048192 bytes (pod limit 2147483648, reserve 2684354
   the reserve is `max(floor, pct% × pod limit)`. Set both to `0` to disable.
 
 See [PRD‑worker‑memory‑reserve.md](PRD/PRD-worker-memory-reserve.md) for the full design.
+
+#### microVM guest sizing (`runtime: microvm` only)
+
+On a microVM pool, the guest VM's **vCPU count and memory** are sized from the same
+`resources.limits` — so a pool's guests match the shape you declare instead of a fixed
+default:
+
+- **vCPUs** = `ceil(limits.cpu)`, minimum 1 (a `1500m` limit → 2 vCPUs; `2` → 2).
+- **memory** = `limits.memory − reserve` (the same agent reserve as above, so the guest
+  can never allocate past its own cgroup and OOM‑kill the sandboxd agent).
+- If a limit is **unset**, that dimension falls back to the built‑in default
+  (2048 MiB / 1 vCPU).
+
+This is derived by the operator (which surfaces `limits.cpu`/`limits.memory` to the
+worker via the downward API) and applied at cold boot; a restore reuses the snapshot's
+baked‑in size. **Sizing is per‑pool** (a worker runs one sandbox, so a pool's workers
+share one size) — for different VM sizes, use different pools. gVisor pools are entirely
+unaffected: their pod template is byte‑identical to before (no `limits.cpu` env is added).
+
+Escape hatch (rare): explicit worker env `SANDBOXD_CH_VCPUS` / `SANDBOXD_CH_MEMORY_MIB`
+(or a full `SANDBOXD_KATA_CONFIG` with `default_vcpus`/`default_memory`) overrides the
+limit‑derived size. See [api‑reference‑sandboxd‑worker.md](api-reference-sandboxd-worker.md).
 
 ---
 
