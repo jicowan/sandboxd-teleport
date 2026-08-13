@@ -279,7 +279,18 @@ func (d *chDriver) guestConfig() (memMiB, vcpus int, kparams string, err error) 
 		envInt64("SANDBOXD_POD_CPU_LIMIT", 0),
 		loadMemReserveConfig(),
 	)
-	return memMiB, vcpus, kata.WithDebugConsole(cfg.KernelParams), nil
+	// The kata-agent debug console is a RAW ROOT SHELL in the guest, bound on vsock
+	// port 1026 (see kata.DebugConsoleDump). It's reachable by anything that can open
+	// the host-side hybrid-vsock socket (/run/vc/vm/<id>/clh.sock, 0700 root, in the
+	// worker's private mount ns — today only the sandboxd process). It grants no
+	// capability sandboxd doesn't already have over ttrpc, but it's gratuitous guest
+	// attack surface, so gate it behind SANDBOXD_DEBUG=1 (the same switch that arms
+	// verbose runsc debug + log streaming) rather than binding it unconditionally.
+	kparams = cfg.KernelParams
+	if os.Getenv("SANDBOXD_DEBUG") == "1" {
+		kparams = kata.WithDebugConsole(kparams)
+	}
+	return memMiB, vcpus, kparams, nil
 }
 
 // deriveGuestSize resolves the guest vCPU/memory per the precedence documented on
