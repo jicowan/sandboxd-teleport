@@ -137,7 +137,7 @@ func DialAgentRetry(ctx context.Context, vsockPath string, timeout time.Duration
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for {
-		attemptCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		attemptCtx, cancel := context.WithTimeout(ctx, agentDialAttemptTimeout)
 		ac, err := DialAgent(attemptCtx, vsockPath)
 		cancel()
 		if err == nil {
@@ -150,9 +150,23 @@ func DialAgentRetry(ctx context.Context, vsockPath string, timeout time.Duration
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("kata-agent not ready after %s: %w", timeout, lastErr)
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(agentDialInterval)
 	}
 }
+
+// Poll cadence for DialAgentRetry. What matters is the window between the guest
+// agent starting to listen and us noticing it: an attempt already in flight when the
+// agent comes up cannot succeed (CH has already answered that CONNECT for a
+// not-yet-listening port), so the wasted wait is one attempt + one interval. A
+// failed attempt is CHEAP — CH answers a CONNECT to a dead port immediately with
+// EOF/refused — so poll fast: a slow interval just adds itself to every cold boot for
+// nothing. The dominant cost of this phase is the guest not listening yet (~1s), not
+// the poll. (Tuning ported from substrate 8a24b9b7; the attempt timeout only bounds a
+// rare hung dial.)
+const (
+	agentDialAttemptTimeout = 300 * time.Millisecond
+	agentDialInterval       = 20 * time.Millisecond
+)
 
 // Close shuts the ttrpc client and underlying connection.
 func (a *AgentClient) Close() error {

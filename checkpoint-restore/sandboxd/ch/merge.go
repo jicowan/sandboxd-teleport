@@ -84,6 +84,17 @@ func MergeSparseOverlay(ctx context.Context, baseFile, deltaFile, outFile string
 	if err := o.Close(); err != nil {
 		return err
 	}
+	// Unlink the old outFile FIRST, then rename onto the now-free name. Renaming
+	// OVER an existing file makes ext4 (data=ordered) synchronously write back the
+	// renamed file's dirty pages — and `tmp` carries the whole merged memory image,
+	// so a rename-over pays a full flush of it (measured ~1140ms→~115ms upstream).
+	// Renaming to a non-existent name leaves the dirty pages in page cache for the
+	// S3 upload to ship. outFile need not exist (this is also called to write a
+	// merged image to a fresh path), so tolerate ENOENT. (Ported from substrate
+	// 7775584b; MergeDeltaIntoBase's final rename already did this.)
+	if err := os.Remove(outFile); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove old out: %w", err)
+	}
 	return os.Rename(tmp, outFile)
 }
 
