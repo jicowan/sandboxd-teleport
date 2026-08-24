@@ -169,3 +169,36 @@ func TestMergeDeltaIntoBaseSizeMismatch(t *testing.T) {
 		t.Errorf("base should be intact after a refused merge: %v", err)
 	}
 }
+
+// TestMergeSparseOverlayNewOutFile covers the copying merge writing to an outFile
+// that does NOT exist yet: the unlink before its final rename (added to skip the
+// ext4 rename-over-existing flush) must tolerate a missing destination rather than
+// fail the merge, and the merged bytes must still be correct. TestMergeDeltaIntoBase
+// above already covers the case where outFile does exist. (Ported from substrate
+// 7775584b alongside the merge.go fix.)
+func TestMergeSparseOverlayNewOutFile(t *testing.T) {
+	const size = 8 << 20 // 8 MiB logical
+	baseRegions := []region{{off: 0, data: fill(1, 4096)}}
+	deltaRegions := []region{{off: 4 << 20, data: fill(42, 12345)}}
+	want := make([]byte, size)
+	copy(want[baseRegions[0].off:], baseRegions[0].data)
+	copy(want[deltaRegions[0].off:], deltaRegions[0].data)
+
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base")
+	delta := filepath.Join(dir, "delta")
+	out := filepath.Join(dir, "out") // deliberately never created
+	writeSparse(t, base, size, baseRegions)
+	writeSparse(t, delta, size, deltaRegions)
+
+	if err := MergeSparseOverlay(context.Background(), base, delta, out); err != nil {
+		t.Fatalf("MergeSparseOverlay: %v", err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("merged result != expected (len got=%d want=%d)", len(got), len(want))
+	}
+}
