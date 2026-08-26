@@ -28,11 +28,24 @@ inherited directly from the pre-`c1339e5f` substrate design we ported:
    **memory snapshot** — so scratch files inflate the thing we ship to S3 on every
    suspend, working *against* our sparse-checkpoint codec.
 
-sandboxd almost certainly has all three (we ported the tmpfs-upper model verbatim). **To
-confirm before committing to this work:** reproduce the `ENOSPC` cliff on our build (write
->~264 MiB inside a 2 GiB-guest sandbox) and measure how much a scratch-heavy workload
-inflates our checkpoint. If the cliff and the bloat are real for us (expected), this is
-worth doing.
+sandboxd has all three — **CONFIRMED live on our build 2026-08-26** (standalone microVM
+sandbox on the current worker image, guest sized ~3.6 GiB via a 4 GiB `limits.memory`):
+
+- **Write cliff:** the writable rootfs is `overlay` on a **guest-RAM-backed tmpfs**
+  (`df /` → `overlay 691M`, ~19% of guest RAM); writing 16 MiB blocks to `/big` failed
+  with **`ENOSPC` (errno 28) at 672 MiB**. Write-heavy workloads crash.
+- **Checkpoint bloat (incompressible):** writing **304 MiB of `os.urandom`** to the upper
+  then `/suspend` inflated the S3 transfer from **~42 MiB (idle) → 362 MiB** — the scratch
+  rides the memory snapshot ~1:1.
+- **Nuance our sparse codec adds (substrate lacks it):** the *same* 304 MiB written as
+  **zeros** transferred only **42 MiB** — our sparse-extent + zstd codec crushes
+  compressible scratch, so it MASKS the S3-bloat for zero/compressible data. But the
+  write-cliff and the guest-RAM/density cost are unaffected (zeros still occupy tmpfs
+  pages in guest RAM and still count against the ENOSPC cap), and *incompressible* scratch
+  (the realistic case: databases, compiled artifacts, media) bloats S3 directly as shown.
+
+Conclusion: the problem is real and worth fixing; the codec only softens one of the three
+symptoms, and only for compressible data. Gate cleared — proceed to §5.
 
 ## 2. What substrate's `c1339e5f` changes
 
