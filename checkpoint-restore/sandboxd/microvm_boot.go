@@ -39,6 +39,25 @@ import (
 // bootTimeout bounds the whole cold-boot so a wedged guest can't hang /run forever.
 const bootTimeout = 120 * time.Second
 
+// mergedRootfsCache returns the virtiofsd --cache mode for the host-merged rootfs
+// share (env SANDBOXD_ROOTFS_CACHE, default "never"). It's a per-pool tradeoff with no
+// free lunch:
+//
+//   - "never" (default): rootfs READS are uncached (each is a virtio-fs round-trip, so
+//     slower module loads / execs), but writes are write-through — the paused-guest tar
+//     is coherent with NO pre-Pause sync, and scratch is NOT double-counted (it isn't in
+//     the guest page cache, so it rides only the tar, not the memory snapshot).
+//   - "auto": rootfs reads are CACHED in the guest (fast), but writes use guest writeback
+//     caching. checkpoint runs a guest `sync` before Pause (AgentClient.SyncGuest) to
+//     flush writeback to the host upper so the tar is coherent — HOWEVER sync leaves the
+//     pages clean-cached in guest RAM, so incompressible scratch is DOUBLE-COUNTED (once
+//     in the memory snapshot, once in the tar), inflating suspend/restore. Fully avoiding
+//     that needs drop_caches in the guest (CAP_SYS_ADMIN the workload lacks).
+//
+// Pick "never" when teleport size/latency matters most; "auto" for read-heavy workloads
+// that can absorb the larger checkpoint. (virtiofsd values: never|auto|always.)
+func mergedRootfsCache() string { return envOr("SANDBOXD_ROOTFS_CACHE", "never") }
+
 // createStart boots a microVM for sandbox id from the prepared OCI bundle and
 // starts its single container inside, via the kata-agent. Mirrors substrate's
 // coldBootActor, collapsed to sandboxd's one-container-per-sandbox model.
@@ -100,17 +119,25 @@ func (d *chDriver) createStart(id, bundle string, ports []portMap) (retErr error
 		return fmt.Errorf("microvm vm dir: %w", err)
 	}
 
-	// 5) Stage the overlay RO lower (bind the bundle rootfs into virtiofsd's
-	//    find-paths dir) + start the virtiofsd that serves it. CH demand-pages from
-	//    it for the sandbox lifetime, so we own the process (killed in delete).
-	if err := kata.ReconstructSharedDirFromImage(ctx, rootfs, id, id); err != nil {
-		return fmt.Errorf("microvm stage rootfs: %w", err)
+	// 5) Assemble the container rootfs overlay ON THE HOST (lower = bundle image,
+	//    upper/work = a per-sandbox dir on a NON-overlay emptyDir on node disk — see
+	//    rootfsUpperDir, NOT guest RAM) and serve the MERGED tree over virtiofsd. The
+	//    guest runs the container directly on it (no guest-side overlay), so rootfs
+	//    writes cost host disk, not guest RAM — no ~19%-of-RAM tmpfs write cliff
+	//    (PRD-microvm-rootfs-upper-on-host-disk). CH demand-pages from virtiofsd for the
+	//    sandbox lifetime, so we own the process (killed in delete).
+	if err := resetRootfsUpperDir(id); err != nil {
+		return fmt.Errorf("microvm rootfs upper: %w", err)
+	}
+	if err := kata.StageMergedRootfs(ctx, rootfs, rootfsUpperDir(id), id, id); err != nil {
+		return fmt.Errorf("microvm stage merged rootfs: %w", err)
 	}
 	vfsdLog, _ := os.OpenFile(filepath.Join(kata.VMDir(id), "virtiofsd.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	vfsdCmd, err := kata.StartVirtiofsd(ctx, kata.VirtiofsdOptions{
 		Binary:     d.virtiofsd,
 		SocketPath: kata.VirtiofsdSocketPath(id),
 		SharedDir:  kata.SharedDir(id),
+		Cache:      mergedRootfsCache(),
 		Log:        vfsdLog,
 	})
 	if err != nil {
@@ -202,18 +229,16 @@ func (d *chDriver) createStart(id, bundle string, ports []portMap) (retErr error
 		}
 	}()
 
-	// 11) Post-boot agent setup: sandbox, guest networking, then the container as
-	//     overlay(virtio-fs RO lower + guest-tmpfs upper).
+	// 11) Post-boot agent setup: sandbox, guest networking, then the container run
+	//     DIRECTLY on the host-merged rootfs (no carrier, no guest-side overlay — the
+	//     host already merged image+upper and virtiofsd serves the result).
 	if err := ac.CreateSandboxForActor(ctx, id, spec.Hostname, false); err != nil {
 		return fmt.Errorf("microvm create sandbox: %w", err)
 	}
 	if err := d.configureGuestNetwork(ctx, ac, uint64(d.actorVethMTU(ctx))); err != nil {
 		return fmt.Errorf("microvm guest network: %w", err)
 	}
-	if err := ac.CreateCarrier(ctx, id, spec); err != nil {
-		return fmt.Errorf("microvm carrier: %w", err)
-	}
-	if err := ac.StartOverlayWorkload(ctx, id, id+"_ovl", kata.OverlayUpperBase(id), spec); err != nil {
+	if err := ac.StartRootfsContainer(ctx, id, spec); err != nil {
 		return fmt.Errorf("microvm start workload: %w", err)
 	}
 
@@ -225,7 +250,8 @@ func (d *chDriver) createStart(id, bundle string, ports []portMap) (retErr error
 	d.mu.Unlock()
 	go d.watchOOM(id, ac, stopOOM) // observability parity: surface guest OOM-kills
 	if d.streamConsole {
-		d.forwardWorkloadLogs(id, ac) // relay WORKLOAD stdout/stderr → kubectl logs (opt-in)
+		// Host-merged workload: exec id == id (StartRootfsContainer), not <id>_ovl.
+		d.forwardWorkloadLogs(id, id, ac) // relay WORKLOAD stdout/stderr → kubectl logs (opt-in)
 	}
 	log.Printf("microvm %s: createStart complete (%s) in %s", id, bootMode, time.Since(tStart).Round(time.Millisecond))
 	return nil

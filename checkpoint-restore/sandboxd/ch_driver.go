@@ -234,6 +234,14 @@ func (d *chDriver) delete(id string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	kata.CleanupSandboxState(ctx, id)
 	cancel()
+	// Host-merged rootfs teardown: CleanupSandboxState's sweep of SharedDir(id) already
+	// unmounts a cold boot's merged overlay (id==baseID); a fork's merge lives under
+	// baseID, so drop that explicitly. Then remove the host upper dir on /work —
+	// CleanupSandboxState only touches /run, and the upper is deliberately on disk.
+	if vm != nil && vm.baseID != "" && vm.baseID != id {
+		kata.UnmountMergedRootfs(vm.baseID, vm.baseID)
+	}
+	removeRootfsUpperDir(id)
 	os.RemoveAll(d.vmDir(id))
 	return nil
 }
@@ -283,19 +291,20 @@ func (d *chDriver) recentLogs(maxBytes int64) string {
 	return string(b)
 }
 
-// overlayWorkloadExecID is the container/exec id of the single workload container a
-// microVM sandbox runs (createStart starts it as id+"_ovl"; kata sets ExecId==ContainerId).
+// overlayWorkloadExecID is the container/exec id of the workload container a LEGACY
+// (guest-overlay) microVM sandbox runs — id+"_ovl". Host-merged sandboxes run the
+// workload as id itself (StartRootfsContainer). kata sets ExecId==ContainerId.
 func overlayWorkloadExecID(id string) string { return id + "_ovl" }
 
 // forwardWorkloadLogs relays the workload container's stdout AND stderr to the
 // worker's stdout as prefixed, sanitized, byte-capped lines, by pumping the
-// kata-agent's ReadStdout/ReadStderr for exec id <id>_ovl (via NewStdioReader).
-// Started per VM at boot/restore only when streamConsole is set; each stream's
-// goroutine ends when the agent signals container-exit / the connection closes
-// (StreamReader returns io.EOF), so they never outlive the VM. ac is the open agent
-// client tracked on the chVM.
-func (d *chDriver) forwardWorkloadLogs(id string, ac *kata.AgentClient) {
-	execID := overlayWorkloadExecID(id)
+// kata-agent's ReadStdout/ReadStderr for the workload's exec id (via NewStdioReader).
+// execID is the workload container id: `id` for host-merged sandboxes, `id+"_ovl"`
+// for legacy guest-overlay ones. Started per VM at boot/restore only when
+// streamConsole is set; each stream's goroutine ends when the agent signals
+// container-exit / the connection closes (StreamReader returns io.EOF), so they never
+// outlive the VM. ac is the open agent client tracked on the chVM.
+func (d *chDriver) forwardWorkloadLogs(id, execID string, ac *kata.AgentClient) {
 	for _, stderr := range []bool{false, true} {
 		go d.pumpStream(id, kata.NewStdioReader(context.Background(), ac, execID, execID, stderr), stderr)
 	}

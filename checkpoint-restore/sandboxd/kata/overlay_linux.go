@@ -390,3 +390,31 @@ func (a *AgentClient) StartOverlayWorkload(ctx context.Context, cid, workloadID,
 	}
 	return nil
 }
+
+// StartRootfsContainer starts one container directly on its HOST-MERGED rootfs (phase
+// 3 of PRD-microvm-rootfs-upper-on-host-disk): the host already assembled
+// overlay(image + upper) and virtiofsd serves the merged tree, so the guest just runs
+// the container on GuestSharedRootfs(cid) — NO guest-side overlay, no upper storage,
+// no carrier. Replaces StartOverlayWorkload (guest tmpfs upper) for host-merged
+// sandboxes. Ported from substrate c1339e5f. ExecId == cid (was <id>_ovl for the
+// overlay path); callers that read the workload's stdout/OOM must key on cid.
+func (a *AgentClient) StartRootfsContainer(ctx context.Context, cid string, spec *specs.Spec) error {
+	pbSpec := SpecToAgentPB(spec)
+	pbSpec.Root = &agentpb.Root{Path: GuestSharedRootfs(cid), Readonly: false}
+	// Per-container cgroup: the shaped spec carries the actor-wide /ateomchv/<name>
+	// (collides across an actor's containers) — use the per-id path.
+	if pbSpec.Linux != nil {
+		pbSpec.Linux.CgroupsPath = "/ateomchv/" + cid
+	}
+	if err := a.CreateContainer(ctx, &agentpb.CreateContainerRequest{
+		ContainerId: cid,
+		ExecId:      cid,
+		OCI:         pbSpec,
+	}); err != nil {
+		return fmt.Errorf("creating rootfs container %q: %w", cid, err)
+	}
+	if err := a.StartContainer(ctx, cid); err != nil {
+		return fmt.Errorf("starting rootfs container %q: %w", cid, err)
+	}
+	return nil
+}

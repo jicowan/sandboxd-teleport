@@ -187,6 +187,36 @@ func (a *AgentClient) CreateContainer(ctx context.Context, req *agentpb.CreateCo
 	return nil
 }
 
+// SyncGuest runs `sync` inside the container and waits for it, forcing the guest to
+// flush its page-cache writeback through virtio-fs to the host. This is required
+// before a checkpoint tars the HOST rootfs upper when the merged share uses a
+// writeback-caching cache mode (cache=auto/always): a runtime write (e.g. a Python
+// .pyc) otherwise sits in the guest page cache, misses the paused-guest tar, and
+// virtiofsd's find-paths migration can't re-open it on restore. Best-effort by the
+// caller — a sync failure means the safe fallback is a write-through cache mode.
+func (a *AgentClient) SyncGuest(ctx context.Context, containerID string) error {
+	execID := containerID + "_sync"
+	req := &agentpb.ExecProcessRequest{
+		ContainerId: containerID,
+		ExecId:      execID,
+		Process: &agentpb.Process{
+			Args: []string{"/bin/sync"},
+			Cwd:  "/",
+			User: &agentpb.User{UID: 0, GID: 0},
+		},
+	}
+	if err := a.client.Call(ctx, "grpc.AgentService", "ExecProcess", req, &emptypb.Empty{}); err != nil {
+		return fmt.Errorf("agent ExecProcess sync: %w", err)
+	}
+	// WaitProcess blocks until sync exits, so the flush has completed on return.
+	if err := a.client.Call(ctx, "grpc.AgentService", "WaitProcess", &agentpb.WaitProcessRequest{
+		ContainerId: containerID, ExecId: execID,
+	}, &agentpb.WaitProcessResponse{}); err != nil {
+		return fmt.Errorf("agent WaitProcess sync: %w", err)
+	}
+	return nil
+}
+
 // StartContainer execs the container's init process (pivots into the rootfs the
 // storages assembled). Mirrors grpc.AgentService/StartContainer.
 func (a *AgentClient) StartContainer(ctx context.Context, containerID string) error {

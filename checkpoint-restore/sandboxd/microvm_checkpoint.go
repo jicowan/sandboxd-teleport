@@ -111,6 +111,22 @@ func (d *chDriver) checkpoint(id, imageDir string, leaveRunning, compress bool) 
 		return fmt.Errorf("microvm checkpoint: CH api-socket not ready: %w", err)
 	}
 
+	// Host-merged rootfs: flush the guest's writeback page cache to the host upper
+	// BEFORE pausing, so the upper the tar captures below is coherent (the merged share
+	// uses cache=auto, i.e. guest writeback — see mergedRootfsCache). Runs `sync` in the
+	// workload container (id = baseID, the id the guest created it with) and waits for
+	// it. Best-effort: a sync error is logged, not fatal — a stale .pyc only breaks THIS
+	// snapshot's restore, and the alternative (failing every checkpoint) is worse.
+	if vm.agent != nil && dirExists(rootfsUpperDir(id)) {
+		cid := vm.baseID
+		if cid == "" {
+			cid = id
+		}
+		if err := vm.agent.SyncGuest(ctx, cid); err != nil {
+			log.Printf("microvm checkpoint %s: WARN guest sync before pause failed (rootfs tar may be stale): %v", id, err)
+		}
+	}
+
 	// Pause the guest to quiesce it, then snapshot. On any failure after the pause,
 	// resume so a failed checkpoint leaves the sandbox running (matches gVisor,
 	// where a failed checkpoint is non-destructive), unless we're tearing down.
@@ -171,6 +187,19 @@ func (d *chDriver) checkpoint(id, imageDir string, leaveRunning, compress bool) 
 	}
 	if err := os.WriteFile(filepath.Join(imageDir, chBaseIDFile), []byte(baseID), 0o644); err != nil {
 		return fmt.Errorf("microvm checkpoint: writing base id: %w", err)
+	}
+
+	// Host-merged rootfs: the writable upper lives on HOST DISK, not guest RAM, so it
+	// does NOT ride the memory snapshot — archive it as rootfs-upper.tar (top-level, so
+	// the handler's S3 uploadDir ships it with the CH files) while the guest is still
+	// PAUSED (virtiofsd is write-through, so a paused guest's completed writes have
+	// reached the upper). The tar's PRESENCE is what makes restore self-describing. A
+	// LEGACY (guest-tmpfs-upper) sandbox has no host upper dir → no tar → its upper
+	// rides the memory image as before, and restore falls back to the bare-image path.
+	if upperDir := rootfsUpperDir(id); dirExists(upperDir) {
+		if err := tarRootfsUpper(ctx, upperDir, imageDir); err != nil {
+			return fmt.Errorf("microvm checkpoint: %w", err)
+		}
 	}
 
 	if leaveRunning {
@@ -277,13 +306,33 @@ func (d *chDriver) restore(id, bundle, imageDir string, ports []portMap) (retErr
 		return fmt.Errorf("microvm restore: vm dir: %w", err)
 	}
 
-	// Reconstruct the overlay RO lower at the FROZEN base path (SharedDir(baseID)/
-	// <baseID>/rootfs) — find-paths re-opens the guest's inodes by that exact path, so
-	// a fork under a new id must still lay the lower where the golden guest froze it.
-	// The writable upper is a guest tmpfs restored from the memory image. The virtiofsd
-	// SOCKET stays per-VMDir(id) (matches rewriteSnapshotSocketPaths), but the SHARED
-	// DIR it serves is the base's, so the guest's find-paths resolve.
-	if err := kata.ReconstructSharedDirFromImage(ctx, rootfs, baseID, baseID); err != nil {
+	// Stage the rootfs the guest's find-paths will re-open, at the FROZEN base path
+	// (SharedDir(baseID)/<baseID>/rootfs) — find-paths re-opens the guest's inodes by
+	// that exact path, so a fork under a new id must still lay the tree where the golden
+	// guest froze it (hence baseID). SELF-DESCRIBING by the snapshot's contents:
+	//   - host-merged (rootfs-upper.tar present): re-materialize the upper on HOST DISK
+	//     then re-mount the merged overlay there, served WRITABLE (cache=auto). The
+	//     workload runs as <baseID> (StartRootfsContainer).
+	//   - legacy (no tar): lay the bare image; the guest's own tmpfs-overlay upper rides
+	//     the memory image, served READ-ONLY (cache=always). Workload is <baseID>_ovl.
+	// The virtiofsd SOCKET stays per-VMDir(id) (matches rewriteSnapshotSocketPaths), but
+	// the SHARED DIR it serves is the base's, so find-paths resolve.
+	// NOTE: rootfs-upper.tar rides the snapshot's TOP-LEVEL files (downloadPrefix put it
+	// in imageDir), NOT the clh-restore subdir where only the CH files are hardlinked —
+	// so the self-describing check + untar source is imageDir, not restoreDir.
+	vfsdCache := ""                                 // "" => cache=always (legacy RO share)
+	workloadExecID := overlayWorkloadExecID(baseID) // legacy workload id: <baseID>_ovl
+	if snapshotHasRootfsUpper(imageDir) {
+		upperBase := rootfsUpperDir(id)
+		if err := untarRootfsUpper(upperBase, imageDir); err != nil {
+			return fmt.Errorf("microvm restore: %w", err)
+		}
+		if err := kata.StageMergedRootfs(ctx, rootfs, upperBase, baseID, baseID); err != nil {
+			return fmt.Errorf("microvm restore: stage merged rootfs: %w", err)
+		}
+		vfsdCache = mergedRootfsCache() // same cache mode as cold boot (see mergedRootfsCache)
+		workloadExecID = baseID       // host-merged workload runs as the container id itself
+	} else if err := kata.ReconstructSharedDirFromImage(ctx, rootfs, baseID, baseID); err != nil {
 		return fmt.Errorf("microvm restore: stage rootfs: %w", err)
 	}
 	vfsdLog, _ := os.OpenFile(filepath.Join(kata.VMDir(id), "virtiofsd.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
@@ -291,6 +340,7 @@ func (d *chDriver) restore(id, bundle, imageDir string, ports []portMap) (retErr
 		Binary:     d.virtiofsd,
 		SocketPath: kata.VirtiofsdSocketPath(id),
 		SharedDir:  kata.SharedDir(baseID),
+		Cache:      vfsdCache,
 		Log:        vfsdLog,
 	})
 	if err != nil {
@@ -410,7 +460,7 @@ func (d *chDriver) restore(id, bundle, imageDir string, ports []portMap) (retErr
 	if ac != nil {
 		go d.watchOOM(id, ac, stopOOM) // observability parity: surface guest OOM-kills
 		if d.streamConsole {
-			d.forwardWorkloadLogs(id, ac) // relay restored WORKLOAD stdout/stderr → kubectl logs
+			d.forwardWorkloadLogs(id, workloadExecID, ac) // relay restored WORKLOAD stdout/stderr → kubectl logs
 		}
 	}
 	return nil
