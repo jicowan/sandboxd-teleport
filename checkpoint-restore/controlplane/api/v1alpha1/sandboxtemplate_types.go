@@ -116,6 +116,13 @@ type SandboxTemplateSpec struct {
 	// +optional
 	Runtime string `json:"runtime,omitempty"`
 
+	// network optionally caps each sandbox's network bandwidth in this pool. The
+	// worker shapes the sandbox's interior veth host-side (tc: ingress qdisc +
+	// ifb/TBF), so the cap is enforced outside the guest and re-applied on teleport.
+	// Unset = uncapped. A microVM or gVisor sandbox is shaped identically.
+	// +optional
+	Network *NetworkSpec `json:"network,omitempty"`
+
 	// resources is a worker sizing hint informing the WarmPool pod resources.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`

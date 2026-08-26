@@ -24,35 +24,40 @@ const (
 // session:<sid>). The operator is the sole writer; the router reads it per
 // request. Version is the CAS token.
 type SessionEntry struct {
-	SID          string           `json:"sid"`
-	State        string           `json:"state"`
-	Pool         string           `json:"pool,omitempty"`
-	WorkerPodIP  string           `json:"workerPodIP,omitempty"`  // set while Running/Resuming
-	WorkerPod    string           `json:"workerPod,omitempty"`
-	Image        string           `json:"image,omitempty"`        // replayed on restore
-	SnapshotURI  string           `json:"snapshotURI,omitempty"`  // current checkpoint (one lineage)
+	SID         string `json:"sid"`
+	State       string `json:"state"`
+	Pool        string `json:"pool,omitempty"`
+	WorkerPodIP string `json:"workerPodIP,omitempty"` // set while Running/Resuming
+	WorkerPod   string `json:"workerPod,omitempty"`
+	Image       string `json:"image,omitempty"`       // replayed on restore
+	SnapshotURI string `json:"snapshotURI,omitempty"` // current checkpoint (one lineage)
 	// Runtime + EngineVersion identify the engine that produced SnapshotURI. Recorded
 	// from the worker's checkpoint/suspend response and replayed on the restore request
 	// so the worker's restore guard can refuse a cross-runtime or incompatible-version
 	// restore. Empty (older entries) => the worker treats it as "gvisor, no version
 	// check" for backward compatibility. See PRD-microvm-runtime-cloud-hypervisor.md §5.2.
-	Runtime       string          `json:"runtime,omitempty"`
-	EngineVersion string          `json:"engineVersion,omitempty"`
-	Ports        []sbxapi.PortMap `json:"ports,omitempty"`
-	Health       *sbxapi.Health   `json:"health,omitempty"`       // replayed on restore (probe config)
-	IAMRoleARN   string           `json:"iamRoleArn,omitempty"`   // session's assumable AWS role; replayed on restore
+	Runtime       string           `json:"runtime,omitempty"`
+	EngineVersion string           `json:"engineVersion,omitempty"`
+	Ports         []sbxapi.PortMap `json:"ports,omitempty"`
+	Health        *sbxapi.Health   `json:"health,omitempty"`     // replayed on restore (probe config)
+	IAMRoleARN    string           `json:"iamRoleArn,omitempty"` // session's assumable AWS role; replayed on restore
+	// EgressMbps/IngressMbps are the per-sandbox network bandwidth caps (Mbit/s,
+	// 0 = uncapped), recorded at bind so teleport re-applies the same tc shaping on
+	// the new worker (host-side tc state isn't part of the checkpoint).
+	EgressMbps  int `json:"egressMbps,omitempty"`
+	IngressMbps int `json:"ingressMbps,omitempty"`
 	// IdleTimeoutSeconds is the session's resolved idle-suspend timeout (from the
 	// template/session policy), recorded by the operator on resume so the router's
 	// StampActive can compute the suspend deadline (lastActiveAt + timeout) and
 	// maintain the suspend:due index WITHOUT a policy lookup on the hot path. 0 =
 	// never auto-suspend (not indexed).
-	IdleTimeoutSeconds int    `json:"idleTimeoutSeconds,omitempty"`
+	IdleTimeoutSeconds int `json:"idleTimeoutSeconds,omitempty"`
 	// CheckpointIntervalSeconds is the resolved periodic-checkpoint interval (0 =
 	// off), recorded so the checkpoint index can be maintained without a lookup.
-	CheckpointIntervalSeconds int `json:"checkpointIntervalSeconds,omitempty"`
-	Version          int64 `json:"version"`
-	LastActiveAt     int64 `json:"lastActiveAt,omitempty"`     // unix ms; stamped by router (O3)
-	LastCheckpointAt int64 `json:"lastCheckpointAt,omitempty"` // unix ms; periodic checkpoint (P5)
+	CheckpointIntervalSeconds int   `json:"checkpointIntervalSeconds,omitempty"`
+	Version                   int64 `json:"version"`
+	LastActiveAt              int64 `json:"lastActiveAt,omitempty"`     // unix ms; stamped by router (O3)
+	LastCheckpointAt          int64 `json:"lastCheckpointAt,omitempty"` // unix ms; periodic checkpoint (P5)
 }
 
 // WorkerEntry registers a worker in the assignment table (key worker:<pod>).

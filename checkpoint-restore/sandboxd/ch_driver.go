@@ -242,6 +242,9 @@ func (d *chDriver) delete(id string) error {
 		kata.UnmountMergedRootfs(vm.baseID, vm.baseID)
 	}
 	removeRootfsUpperDir(id)
+	// Bandwidth shaping's IFB device outlives the veth (CleanupActorNetwork only drops
+	// ateom0 + its qdiscs), so clear it explicitly. Best-effort/idempotent.
+	ateomnet.ClearBandwidth()
 	os.RemoveAll(d.vmDir(id))
 	return nil
 }

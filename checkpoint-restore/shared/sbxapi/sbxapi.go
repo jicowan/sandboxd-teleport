@@ -33,6 +33,12 @@ type RunRequest struct {
 	// role to the sandbox via a container-credentials endpoint on the interior
 	// gateway (the sandbox's AWS SDK auto-refreshes them). Empty = no AWS identity.
 	IAMRoleARN string `json:"iamRoleArn,omitempty"`
+	// EgressMbps/IngressMbps cap the sandbox's network bandwidth in Mbit/s (0 =
+	// uncapped for that direction), enforced host-side on the interior veth (tc token
+	// bucket). Per-session and re-established on restore. See
+	// PRD-sandbox-network-bandwidth-limits.md.
+	EgressMbps  int `json:"egressMbps,omitempty"`
+	IngressMbps int `json:"ingressMbps,omitempty"`
 }
 
 // RunResponse is the body of a successful POST /run.
@@ -84,6 +90,10 @@ type RestoreRequest struct {
 	// IAMRoleARN re-establishes the session's AWS credential vending after teleport
 	// (same role the session ran with). Travels with the session. See RunRequest.
 	IAMRoleARN string `json:"iamRoleArn,omitempty"`
+	// EgressMbps/IngressMbps re-establish the session's bandwidth caps after teleport
+	// (host-side tc state isn't in the checkpoint). Travels with the session. See RunRequest.
+	EgressMbps  int `json:"egressMbps,omitempty"`
+	IngressMbps int `json:"ingressMbps,omitempty"`
 }
 
 // RestoreResponse is the body of a successful POST /restore.

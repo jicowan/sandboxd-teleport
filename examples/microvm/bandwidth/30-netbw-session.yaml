@@ -1,0 +1,14 @@
+# netbw SESSION — poolRef-only (the workload is baked into the netbw SandboxTemplate,
+# so no appRef). A declaratively-created Session does NOT auto-start; it materializes
+# on first router contact (POST /_warm in the README). Once running, the client loops
+# and reports on its own — no per-step driving needed.
+apiVersion: core.sandboxd.io/v1alpha1
+kind: Session
+metadata: { name: netbw-1, namespace: default }
+spec:
+  poolRef: { name: netbw }
+  subject: netbw-tester
+  # suspendRequest is set later (README step 4) to teleport-test the cap: checkpoint +
+  # suspend, then warm again to restore onto a (typically different) worker and confirm
+  # the same cap is re-applied.
+  # suspendRequest: "netbw-teleport-1"

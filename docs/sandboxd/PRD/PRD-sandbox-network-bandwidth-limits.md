@@ -105,23 +105,29 @@ CH limiter as opt-in hardening for microVM once the `tc` path is proven.
 
 ### 4.3 API surface
 
-Per-pool, on the `SandboxTemplate` (consistent with `resources`), with an optional
-per-session override (consistent with `iam`):
+Per-pool, on the `SandboxTemplate` (consistent with `resources`), and on the
+`AppTemplate` for generic pools (bandwidth is a workload property, mirroring the
+workload subset those two CRDs share):
 
 ```yaml
 spec:
   network:
-    egressMbps: 100      # 0/unset ⇒ uncapped
-    ingressMbps: 100
-    burstKB: 256         # optional; default derived from rate
+    egressMbps: 100      # sandbox → outside (upload); 0/unset ⇒ uncapped
+    ingressMbps: 100     # outside → sandbox (download); 0/unset ⇒ uncapped
 ```
 
-The operator surfaces it to the worker exactly as the #38 sizing plumbing does — either
-worker env (`SANDBOXD_NET_EGRESS_BPS` / `SANDBOXD_NET_INGRESS_BPS` / `SANDBOXD_NET_BURST`)
-on the worker Deployment, **or** in the `/run` + `/restore` request body. Env is simplest
-and per-pool (a worker is 1:1 with its sandbox); the request-body form is needed only if
-per-session caps within one pool are required. Prefer **env, per-pool** for v1 (mirrors
-`SANDBOXD_POD_MEM_LIMIT`); note per-session as future work.
+**Transport = the `/run` + `/restore` request body (per-session), NOT worker env.**
+The caps thread the same way `iamRoleArn` and `ports` already do: the operator resolves
+the template (`toTemplateSpec` → `resume.TemplateSpec.{Egress,Ingress}Mbps`), the resume
+workflow carries them through `bindSpec`, and `startAndBind` sets `EgressMbps`/`IngressMbps`
+on the `sbxapi.RunRequest`/`RestoreRequest`. This was chosen over worker env
+(`SANDBOXD_NET_*` on the Deployment, the #38 sizing pattern) so the cap is a per-session
+value that needs no pod-template churn/rollout to change, and so a future per-session
+override drops in without a new transport. The worker converts Mbit/s → bytes/sec
+(`bandwidthFromMbps`) and applies `ateomnet.ApplyBandwidth` on the interior veth.
+
+The burst size is not an API knob; the worker derives it from the rate (default rate/8,
+min 32 KiB) inside `newTbf`.
 
 Values are Mbit/s at the API (operator-friendly), converted to bytes/sec at the worker.
 
@@ -138,9 +144,10 @@ Values are Mbit/s at the API (operator-friendly), converted to bytes/sec at the 
 ## 5. Backward compatibility
 
 - **Unset ⇒ uncapped**, byte-identical to today. The feature is opt-in per pool; existing
-  templates are unaffected and their worker Deployments do not change (no env added unless
-  `spec.network` is set — same gating discipline as #38's `SANDBOXD_POD_CPU_LIMIT`, so no
-  needless pod-template churn / rollout).
+  templates are unaffected and their worker Deployments do not change at all (the caps ride
+  the per-session `/run`+`/restore` request — omitted fields default to 0/uncapped — so
+  there is zero pod-template churn / rollout, and the worker only touches `tc` when a
+  non-zero cap arrives via `bw.Zero()`).
 - **Snapshot compatibility:** the shaper is host-side netns state, not part of the guest
   memory/rootfs checkpoint, so old snapshots restore fine; the new worker simply applies
   whatever cap its template/request specifies at restore time. (A snapshot taken under one

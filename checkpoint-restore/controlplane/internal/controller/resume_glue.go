@@ -476,7 +476,7 @@ func configPolicyForSession(ctx context.Context, c client.Client, ns string, s *
 // body — only the source object differs.
 func toTemplateSpec(image string, cmd, env []string, ports []corev1alpha1.PortMap,
 	iam *corev1alpha1.IAMSpec, idle corev1alpha1.IdlePolicy, ckptInterval int,
-	health *corev1alpha1.Health) *resume.TemplateSpec {
+	health *corev1alpha1.Health, network *corev1alpha1.NetworkSpec) *resume.TemplateSpec {
 	ts := &resume.TemplateSpec{
 		Image: image,
 		Cmd:   cmd,
@@ -485,6 +485,12 @@ func toTemplateSpec(image string, cmd, env []string, ports []corev1alpha1.PortMa
 	}
 	if iam != nil {
 		ts.IAMRoleARN = iam.RoleARN
+	}
+	// Per-sandbox network bandwidth caps (0 = uncapped); the worker shapes the
+	// interior veth from these on /run + /restore.
+	if network != nil {
+		ts.EgressMbps = network.EgressMbps
+		ts.IngressMbps = network.IngressMbps
 	}
 	// Record the resolved idle/checkpoint policy so the KV due-indexes are
 	// maintained without a hot-path lookup (PRD-control-plane-scalability).
@@ -507,7 +513,7 @@ func toTemplateSpec(image string, cmd, env []string, ports []corev1alpha1.PortMa
 
 func templateSpecFromCRD(t *corev1alpha1.SandboxTemplate) *resume.TemplateSpec {
 	return toTemplateSpec(t.Spec.Image, t.Spec.Cmd, t.Spec.Env, t.Spec.Ports,
-		t.Spec.IAM, t.Spec.Idle, t.Spec.CheckpointIntervalSeconds, t.Spec.Health)
+		t.Spec.IAM, t.Spec.Idle, t.Spec.CheckpointIntervalSeconds, t.Spec.Health, t.Spec.Network)
 }
 
 // appSpecFromCRD maps an AppTemplate onto the same resume.TemplateSpec the resolver
@@ -516,7 +522,7 @@ func templateSpecFromCRD(t *corev1alpha1.SandboxTemplate) *resume.TemplateSpec {
 // so only the workload subset is mapped.
 func appSpecFromCRD(a *corev1alpha1.AppTemplate) *resume.TemplateSpec {
 	return toTemplateSpec(a.Spec.Image, a.Spec.Cmd, a.Spec.Env, a.Spec.Ports,
-		a.Spec.IAM, a.Spec.Idle, a.Spec.CheckpointIntervalSeconds, a.Spec.Health)
+		a.Spec.IAM, a.Spec.Idle, a.Spec.CheckpointIntervalSeconds, a.Spec.Health, a.Spec.Network)
 }
 
 func portsFromCRD(in []corev1alpha1.PortMap) []sbxapi.PortMap {

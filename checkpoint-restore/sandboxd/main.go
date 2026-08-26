@@ -46,6 +46,10 @@ type sandbox struct {
 	Snapshot string    `json:"snapshot"` // s3 prefix of the latest checkpoint
 	Ports    []portMap `json:"ports"`    // podIP:host -> interior:container
 	Health   health    `json:"health"`   // restart policy + readiness probe + idle
+	// EgressMbps/IngressMbps are the per-sandbox network caps (Mbit/s, 0 = uncapped),
+	// recorded so the supervisor's auto-restart re-applies the same cap (like Ports).
+	EgressMbps  int `json:"egressMbps,omitempty"`
+	IngressMbps int `json:"ingressMbps,omitempty"`
 	// Runtime + EngineVersion identify the engine that produced this sandbox's
 	// snapshots (recorded so a restore can refuse a cross-runtime or incompatible-
 	// version image). RunscVer is retained for backward-compat with metadata written
@@ -252,13 +256,15 @@ func main() {
 // POST /run {image, cmd?, env?, sandboxId?}
 func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Image      string    `json:"image"`
-		Cmd        []string  `json:"cmd"`
-		Env        []string  `json:"env"`
-		SandboxID  string    `json:"sandboxId"`
-		Ports      []portMap `json:"ports"`
-		Health     health    `json:"health"`
-		IAMRoleARN string    `json:"iamRoleArn"`
+		Image       string    `json:"image"`
+		Cmd         []string  `json:"cmd"`
+		Env         []string  `json:"env"`
+		SandboxID   string    `json:"sandboxId"`
+		Ports       []portMap `json:"ports"`
+		Health      health    `json:"health"`
+		IAMRoleARN  string    `json:"iamRoleArn"`
+		EgressMbps  int       `json:"egressMbps"`
+		IngressMbps int       `json:"ingressMbps"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -332,7 +338,7 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lg("%s createStart", s.rt.runtimeName())
-	if err := s.rt.createStart(id, bundle, req.Ports); err != nil {
+	if err := s.rt.createStart(id, bundle, req.Ports, bandwidthFromMbps(req.EgressMbps, req.IngressMbps)); err != nil {
 		lg("runtime FAILED: %v", err)
 		s.rt.delete(id) // clear any partial runtime state
 		teardownSandboxNet()
@@ -347,7 +353,8 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 		Ports: req.Ports, Health: req.Health,
 		Runtime: s.rt.runtimeName(), EngineVersion: s.rt.version(), RunscVer: s.rt.version(),
 		IAMRoleARN: req.IAMRoleARN,
-		CreatedAt:  time.Now().UTC().Format(time.RFC3339)})
+		EgressMbps: req.EgressMbps, IngressMbps: req.IngressMbps,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339)})
 	writeJSON(w, 200, map[string]any{"sandboxId": id, "status": st, "image": req.Image, "ports": req.Ports})
 }
 
@@ -437,6 +444,8 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		Ports         []portMap `json:"ports"`
 		Health        health    `json:"health"`
 		IAMRoleARN    string    `json:"iamRoleArn"`
+		EgressMbps    int       `json:"egressMbps"`
+		IngressMbps   int       `json:"ingressMbps"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -547,7 +556,7 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		s.cred.register(id, req.IAMRoleARN)
 	}
 	tr := time.Now()
-	if err := s.rt.restore(id, bundle, imgDir, req.Ports); err != nil {
+	if err := s.rt.restore(id, bundle, imgDir, req.Ports, bandwidthFromMbps(req.EgressMbps, req.IngressMbps)); err != nil {
 		lg("restore FAILED: %v", err)
 		s.rt.delete(id)
 		teardownSandboxNet()
@@ -563,7 +572,8 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		Snapshot: req.Snapshot, Ports: req.Ports, Health: req.Health,
 		Runtime: s.rt.runtimeName(), EngineVersion: s.rt.version(), RunscVer: s.rt.version(),
 		IAMRoleARN: req.IAMRoleARN,
-		CreatedAt:  time.Now().UTC().Format(time.RFC3339)})
+		EgressMbps: req.EgressMbps, IngressMbps: req.IngressMbps,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339)})
 	writeJSON(w, 200, map[string]any{"sandboxId": id, "status": st, "restoredFrom": req.Snapshot, "ports": req.Ports})
 }
 

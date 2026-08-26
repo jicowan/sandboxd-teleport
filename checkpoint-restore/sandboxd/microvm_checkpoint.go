@@ -57,7 +57,7 @@ func reseedGuestEntropy(ctx context.Context, ac *kata.AgentClient) error {
 // writes config.json/state.json/memory-ranges into the destination dir; we stage
 // it into a private subdir, then move those three out under the clh- names.
 const (
-	chStageSubdir      = "clh-snap"      // private staging dir under imageDir for CH's raw output
+	chStageSubdir      = "clh-snap" // private staging dir under imageDir for CH's raw output
 	chConfigFile       = "clh-config.json"
 	chStateFile        = "clh-state.json"
 	chMemoryRangesFile = "clh-memory-ranges"
@@ -221,7 +221,7 @@ func (d *chDriver) checkpoint(id, imageDir string, leaveRunning, compress bool) 
 // fd-backed → fresh net_fds), relaunch CH with --restore, and resume. Guest RAM —
 // process state, the tmpfs rootfs upper (so rootfs writes persist), and the frozen
 // network config — comes back from the memory image.
-func (d *chDriver) restore(id, bundle, imageDir string, ports []portMap) (retErr error) {
+func (d *chDriver) restore(id, bundle, imageDir string, ports []portMap, bw ateomnet.BandwidthConfig) (retErr error) {
 	if d.interiorNetNS == 0 {
 		return fmt.Errorf("microvm restore: interior netns unavailable (networking disabled)")
 	}
@@ -298,6 +298,15 @@ func (d *chDriver) restore(id, bundle, imageDir string, ports []portMap) (retErr
 	if err := d.setupInboundPorts(ports); err != nil {
 		return fmt.Errorf("microvm restore: inbound ports: %w", err)
 	}
+	// Re-apply the per-sandbox bandwidth caps on the rebuilt host veth (they're host
+	// netns state, not in the checkpoint, so a restore onto a new worker must reinstall
+	// them). bw comes from the /restore request (travels with the session). Uncapped
+	// when zero. (PRD-sandbox-network-bandwidth-limits.)
+	if !bw.Zero() {
+		if err := ateomnet.ApplyBandwidth(bw); err != nil {
+			return fmt.Errorf("microvm restore: bandwidth limits: %w", err)
+		}
+	}
 
 	// Clean stale per-sandbox state + create the VM runtime dir for the sockets CH
 	// will reopen (vsock, serial, fs) at the paths rewritten above.
@@ -331,7 +340,7 @@ func (d *chDriver) restore(id, bundle, imageDir string, ports []portMap) (retErr
 			return fmt.Errorf("microvm restore: stage merged rootfs: %w", err)
 		}
 		vfsdCache = mergedRootfsCache() // same cache mode as cold boot (see mergedRootfsCache)
-		workloadExecID = baseID       // host-merged workload runs as the container id itself
+		workloadExecID = baseID         // host-merged workload runs as the container id itself
 	} else if err := kata.ReconstructSharedDirFromImage(ctx, rootfs, baseID, baseID); err != nil {
 		return fmt.Errorf("microvm restore: stage rootfs: %w", err)
 	}

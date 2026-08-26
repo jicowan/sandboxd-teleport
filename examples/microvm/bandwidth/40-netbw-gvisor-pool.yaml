@@ -1,0 +1,113 @@
+# netbw gVisor POOL + SESSION — the gVisor counterpart of 20-netbw-pool.yaml, proving
+# spec.network caps a gVisor sandbox identically to a microVM one. Same inline-python
+# bandwidth client; only the runtime, worker image, and node scheduling differ.
+#
+# The cap is enforced by the SAME host-side tc mechanism, just on gVisor's host veth
+# `sbx0` (vs microVM's `ateom0`): ingress qdisc + ifb/TBF for egress, root TBF for
+# ingress. Verified live: egress/ingress both ~48 Mbit/s at a 50 Mbit/s cap.
+#
+# BEFORE APPLY: set
+#   1. <GVISOR_WORKER_IMAGE> -> a gVisor worker image (sandboxd + pinned runsc) built
+#      from the branch that has the gVisor bandwidth wiring (ApplyBandwidthOn/sbx0).
+#      Use a UNIQUE tag — worker pods are imagePullPolicy:IfNotPresent, so a reused tag
+#      serves a stale cached binary on the node.
+#   2. SERVER_IP_HERE -> the netbw-server POD IP (see 10-netbw-server.yaml):
+#        kubectl get pod -n default -l app=netbw-server -o jsonpath='{.items[0].status.podIP}'
+apiVersion: core.sandboxd.io/v1alpha1
+kind: SandboxTemplate
+metadata: { name: netbw-gv, namespace: default }
+spec:
+  runtime: gvisor
+  workerImage: <GVISOR_WORKER_IMAGE>
+  image: 820537372947.dkr.ecr.us-west-2.amazonaws.com/python-mirror:3.12-slim
+  network:
+    egressMbps: 50      # sandbox -> outside (upload)
+    ingressMbps: 50     # outside -> sandbox (download)
+  env:
+    - NETBW_SERVER_HOST=SERVER_IP_HERE
+    - NETBW_SINK_PORT=5001
+    - NETBW_HTTP_PORT=5002
+    - NETBW_MB=64
+    - NETBW_PERIOD=15
+  cmd:
+    - python
+    - -c
+    - |
+      import os, socket, time, threading, json, http.server, urllib.request
+      HOST = os.environ.get("NETBW_SERVER_HOST", "")
+      SINK = int(os.environ.get("NETBW_SINK_PORT", "5001"))
+      HTTP = int(os.environ.get("NETBW_HTTP_PORT", "5002"))
+      MB   = int(os.environ.get("NETBW_MB", "64"))
+      PER  = int(os.environ.get("NETBW_PERIOD", "15"))
+
+      class Hz(http.server.BaseHTTPRequestHandler):
+          def log_message(self, *a): pass
+          def do_GET(self):
+              self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+      threading.Thread(
+          target=lambda: http.server.HTTPServer(("0.0.0.0", 8080), Hz).serve_forever(),
+          daemon=True).start()
+
+      def egress():
+          buf = b"\0" * (1 << 20)
+          s = socket.create_connection((HOST, SINK), timeout=20)
+          t0 = time.time()
+          for _ in range(MB): s.sendall(buf)
+          s.shutdown(socket.SHUT_WR)
+          try: s.recv(1)
+          except Exception: pass
+          s.close()
+          dt = time.time() - t0
+          return (MB << 20) * 8 / dt / 1e6, dt
+
+      def ingress():
+          got, t0 = 0, time.time()
+          with urllib.request.urlopen(f"http://{HOST}:{HTTP}/download?mb={MB}", timeout=120) as r:
+              while True:
+                  b = r.read(1 << 20)
+                  if not b: break
+                  got += len(b)
+          dt = time.time() - t0
+          return got * 8 / dt / 1e6, dt
+
+      def report(obj):
+          try:
+              data = json.dumps(obj).encode()
+              urllib.request.urlopen(urllib.request.Request(
+                  f"http://{HOST}:{HTTP}/report", data=data,
+                  headers={"Content-Type": "application/json"}), timeout=10).read()
+          except Exception as e:
+              print("report failed:", e, flush=True)
+
+      print(f"netbw-client(gvisor) -> {HOST} sink:{SINK} http:{HTTP} MB={MB}", flush=True)
+      while True:
+          try:
+              e, edt = egress(); i, idt = ingress()
+              msg = {"runtime": "gvisor", "egress_mbps": round(e, 1), "ingress_mbps": round(i, 1),
+                     "mb": MB, "egress_s": round(edt, 2), "ingress_s": round(idt, 2)}
+              print("NETBW " + json.dumps(msg), flush=True)
+              report(msg)
+          except Exception as ex:
+              print("NETBW error:", ex, flush=True)
+          time.sleep(PER)
+  ports: [{ container: 8080, host: 8080 }]
+  health: { probe: http, probePort: 8080, probePath: /healthz }
+  idle: { timeoutSeconds: 600, action: suspend }
+  streamConsole: true
+  resources:
+    requests: { cpu: "500m", memory: "1Gi" }
+  scheduling:
+    nodeSelector: { sandbox: gvisor }
+    tolerations: [{ key: sandbox, operator: Equal, value: gvisor, effect: NoSchedule }]
+---
+apiVersion: core.sandboxd.io/v1alpha1
+kind: WarmPool
+metadata: { name: netbw-gv, namespace: default }
+spec: { templateRef: { name: netbw-gv }, replicas: 2, minIdle: 1 }
+---
+apiVersion: core.sandboxd.io/v1alpha1
+kind: Session
+metadata: { name: netbw-gv-1, namespace: default }
+spec:
+  poolRef: { name: netbw-gv }
+  subject: netbw-tester-gvisor

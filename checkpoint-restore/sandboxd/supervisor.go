@@ -195,11 +195,11 @@ func (s *server) restartSandbox(sb *sandbox) {
 		}
 		// original spec is in the downloaded checkpoint dir
 		s.moveSpecFromImg(sb)
-		if err := s.rt.restore(sb.ID, sb.Bundle, imgDir, sb.Ports); err != nil {
+		if err := s.rt.restore(sb.ID, sb.Bundle, imgDir, sb.Ports, bandwidthFromMbps(sb.EgressMbps, sb.IngressMbps)); err != nil {
 			metrics.inc("restart_failures")
 		}
 	case "cold":
-		if err := s.rt.createStart(sb.ID, sb.Bundle, sb.Ports); err != nil {
+		if err := s.rt.createStart(sb.ID, sb.Bundle, sb.Ports, bandwidthFromMbps(sb.EgressMbps, sb.IngressMbps)); err != nil {
 			metrics.inc("restart_failures")
 		}
 	}
