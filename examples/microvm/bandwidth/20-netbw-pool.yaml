@@ -1,0 +1,116 @@
+# netbw microVM POOL — a DEDICATED pool whose sandbox workload is the bandwidth
+# CLIENT, capped by spec.network. Every sandbox created from this template inherits
+# the caps; the operator resolves spec.network -> resume.TemplateSpec and threads the
+# numbers onto the per-session /run + /restore request, and the worker applies them
+# host-side with tc on the sandbox's interior veth (ateom0): egress via an ifb+TBF,
+# ingress via a root TBF. The cap is re-applied identically on teleport (restore).
+#
+# The client (python, inline — no image to build) exposes /healthz on :8080 for the
+# readiness probe, then loops forever: blast NETBW_MB MiB at the server sink
+# (EGRESS), drain NETBW_MB MiB from the server (INGRESS), print `NETBW {...}` to
+# stdout, and POST the result to the server's /report so it is readable from the
+# stable netbw-server pod regardless of which worker the sandbox is on.
+#
+# BEFORE APPLY: set two things.
+#   1. <WORKER_IMAGE>   -> the freshly built microVM worker image that contains the
+#                          bandwidth code (ateomnet.ApplyBandwidth).
+#   2. SERVER_IP_HERE   -> the netbw-server POD IP:
+#        kubectl get pod -n default -l app=netbw-server \
+#          -o jsonpath='{.items[0].status.podIP}'
+#      (POD IP, not the Service ClusterIP — pod IPs are VPC-routable and avoid any
+#      kube-proxy-in-sandbox-netns question.)
+#
+# The caps below (50 Mbit/s each) are intentionally well under the ~multi-Gbit/s
+# in-VPC line rate so the throttle is unmistakable. To capture an UNCAPPED control,
+# re-apply with the whole `network:` block removed (or egress/ingress set to 0).
+apiVersion: core.sandboxd.io/v1alpha1
+kind: SandboxTemplate
+metadata: { name: netbw, namespace: default }
+spec:
+  runtime: microvm
+  workerImage: <WORKER_IMAGE>
+  image: 820537372947.dkr.ecr.us-west-2.amazonaws.com/python-mirror:3.12-slim
+  network:
+    egressMbps: 50      # sandbox -> outside (upload)
+    ingressMbps: 50     # outside -> sandbox (download)
+  env:
+    - NETBW_SERVER_HOST=SERVER_IP_HERE
+    - NETBW_SINK_PORT=5001
+    - NETBW_HTTP_PORT=5002
+    - NETBW_MB=64
+    - NETBW_PERIOD=15
+  cmd:
+    - python
+    - -c
+    - |
+      import os, socket, time, threading, json, http.server, urllib.request
+      HOST = os.environ.get("NETBW_SERVER_HOST", "")
+      SINK = int(os.environ.get("NETBW_SINK_PORT", "5001"))
+      HTTP = int(os.environ.get("NETBW_HTTP_PORT", "5002"))
+      MB   = int(os.environ.get("NETBW_MB", "64"))
+      PER  = int(os.environ.get("NETBW_PERIOD", "15"))
+
+      class Hz(http.server.BaseHTTPRequestHandler):
+          def log_message(self, *a): pass
+          def do_GET(self):
+              self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+      threading.Thread(
+          target=lambda: http.server.HTTPServer(("0.0.0.0", 8080), Hz).serve_forever(),
+          daemon=True).start()
+
+      def egress():
+          buf = b"\0" * (1 << 20)
+          s = socket.create_connection((HOST, SINK), timeout=20)
+          t0 = time.time()
+          for _ in range(MB): s.sendall(buf)
+          s.shutdown(socket.SHUT_WR)
+          try: s.recv(1)
+          except Exception: pass
+          s.close()
+          dt = time.time() - t0
+          return (MB << 20) * 8 / dt / 1e6, dt
+
+      def ingress():
+          got, t0 = 0, time.time()
+          with urllib.request.urlopen(f"http://{HOST}:{HTTP}/download?mb={MB}", timeout=120) as r:
+              while True:
+                  b = r.read(1 << 20)
+                  if not b: break
+                  got += len(b)
+          dt = time.time() - t0
+          return got * 8 / dt / 1e6, dt
+
+      def report(obj):
+          try:
+              data = json.dumps(obj).encode()
+              urllib.request.urlopen(urllib.request.Request(
+                  f"http://{HOST}:{HTTP}/report", data=data,
+                  headers={"Content-Type": "application/json"}), timeout=10).read()
+          except Exception as e:
+              print("report failed:", e, flush=True)
+
+      print(f"netbw-client -> {HOST} sink:{SINK} http:{HTTP} MB={MB}", flush=True)
+      while True:
+          try:
+              e, edt = egress(); i, idt = ingress()
+              msg = {"egress_mbps": round(e, 1), "ingress_mbps": round(i, 1),
+                     "mb": MB, "egress_s": round(edt, 2), "ingress_s": round(idt, 2)}
+              print("NETBW " + json.dumps(msg), flush=True)
+              report(msg)
+          except Exception as ex:
+              print("NETBW error:", ex, flush=True)
+          time.sleep(PER)
+  ports: [{ container: 8080, host: 8080 }]
+  health: { probe: http, probePort: 8080, probePath: /healthz }
+  idle: { timeoutSeconds: 600, action: suspend }   # suspend (not reset) so teleport keeps the client running
+  streamConsole: true                              # surface `NETBW {...}` on the worker's kubectl logs too
+  resources:
+    requests: { cpu: "500m", memory: "2560Mi" }
+  scheduling:
+    nodeSelector: { sandbox: microvm }
+    tolerations: [{ key: sandbox, operator: Equal, value: microvm, effect: NoSchedule }]
+---
+apiVersion: core.sandboxd.io/v1alpha1
+kind: WarmPool
+metadata: { name: netbw, namespace: default }
+spec: { templateRef: { name: netbw }, replicas: 2, minIdle: 1 }

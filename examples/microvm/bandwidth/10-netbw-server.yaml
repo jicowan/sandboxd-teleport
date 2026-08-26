@@ -1,0 +1,108 @@
+# netbw SERVER — a plain (non-sandbox) pod that is the far end of the bandwidth
+# test. It runs the SAME already-mirrored python image the microVM examples use, so
+# nothing new has to be built for the measurement itself (only the worker/operator
+# images carry the new bandwidth code).
+#
+# It offers three things to the sandbox client:
+#   - a TCP SINK on :5001 that recv()s and discards — the client blasts bytes at it
+#     to measure EGRESS (sandbox -> outside).
+#   - an HTTP file source on :5002 GET /download?mb=N that streams N MiB of zeros —
+#     the client drains it to measure INGRESS (outside -> sandbox).
+#   - a result collector on :5002 POST /report (stored + printed) and GET /results,
+#     so the measured rates are readable from THIS stable pod's logs / a curl,
+#     without having to find which worker the sandbox teleported onto.
+#
+# Reach it from the sandbox by POD IP (VPC-routable under the AWS VPC CNI); the
+# Service is a convenience for the toolbox/results curl.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netbw-server
+  namespace: default
+  labels: { app: netbw-server }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: netbw-server } }
+  template:
+    metadata: { labels: { app: netbw-server } }
+    spec:
+      containers:
+        - name: server
+          image: 820537372947.dkr.ecr.us-west-2.amazonaws.com/python-mirror:3.12-slim
+          ports:
+            - { containerPort: 5001, name: sink }
+            - { containerPort: 5002, name: http }
+          command:
+            - python
+            - -c
+            - |
+              import http.server, socketserver, socket, threading, json
+              from urllib.parse import urlparse, parse_qs
+              SINK_PORT, HTTP_PORT = 5001, 5002
+              RESULTS = []
+
+              def sink():
+                  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                  s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                  s.bind(("0.0.0.0", SINK_PORT)); s.listen(32)
+                  while True:
+                      c, _ = s.accept()
+                      threading.Thread(target=drain, args=(c,), daemon=True).start()
+
+              def drain(c):
+                  try:
+                      while c.recv(1 << 20):
+                          pass
+                  finally:
+                      c.close()
+
+              class H(http.server.BaseHTTPRequestHandler):
+                  def log_message(self, *a): pass
+                  def do_GET(self):
+                      if self.path.startswith("/download"):
+                          mb = int((parse_qs(urlparse(self.path).query).get("mb") or ["64"])[0])
+                          self.send_response(200)
+                          self.send_header("Content-Type", "application/octet-stream")
+                          self.send_header("Content-Length", str(mb << 20)); self.end_headers()
+                          buf = b"\0" * (1 << 20)
+                          for _ in range(mb):
+                              try: self.wfile.write(buf)
+                              except (BrokenPipeError, ConnectionResetError): break
+                          return
+                      if self.path == "/results":
+                          b = json.dumps(RESULTS).encode()
+                          self.send_response(200); self.send_header("Content-Type", "application/json")
+                          self.send_header("Content-Length", str(len(b))); self.end_headers()
+                          self.wfile.write(b); return
+                      if self.path == "/healthz":
+                          self.send_response(200); self.end_headers(); self.wfile.write(b"ok"); return
+                      self.send_response(404); self.end_headers()
+                  def do_POST(self):
+                      n = int(self.headers.get("Content-Length", 0) or 0)
+                      try: obj = json.loads(self.rfile.read(n) or b"{}")
+                      except Exception: obj = {"parse_error": True}
+                      RESULTS.append(obj)
+                      print("REPORT " + json.dumps(obj), flush=True)
+                      self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+
+              class TS(socketserver.ThreadingMixIn, http.server.HTTPServer):
+                  daemon_threads = True
+
+              threading.Thread(target=sink, daemon=True).start()
+              print(f"netbw-server up sink:{SINK_PORT} http:{HTTP_PORT}", flush=True)
+              TS(("0.0.0.0", HTTP_PORT), H).serve_forever()
+          readinessProbe:
+            httpGet: { path: /healthz, port: 5002 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: netbw-server
+  namespace: default
+spec:
+  selector: { app: netbw-server }
+  ports:
+    - { name: sink, port: 5001, targetPort: 5001 }
+    - { name: http, port: 5002, targetPort: 5002 }
