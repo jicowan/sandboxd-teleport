@@ -87,6 +87,22 @@ survives reconcile and is re-established on restore. On restore, the caller (the
 control plane) supplies the ports again — a fresh worker holds no prior metadata.
 `GET /status` and `GET /sandboxes` report the port mapping and interior IP.
 
+### Bandwidth shaping (tc)
+
+Per-sandbox bandwidth caps (`SandboxTemplate.spec.network`, sent to the worker on
+`/run` + `/restore`) are enforced host-side with Linux `tc` on the **host end of the
+veth** in the worker pod netns — `sbx0` for gVisor, `ateom0` for microVM. Because it
+lives in the pod netns, the guest can neither see nor remove it. Directions are from
+the sandbox's point of view, and the veth-peer inversion is the crux:
+
+- **egress** (sandbox → world) arrives at the host veth as *ingress*, which Linux
+  can't rate-limit directly — so an ingress qdisc + match-all `u32` filter
+  mirred-redirects it to an IFB device (`ateom-bwifb`) that carries a TBF at the cap.
+- **ingress** (world → sandbox) leaves the host veth as *egress* — a plain root TBF
+  on the veth at the cap.
+
+Uncapped (0/unset) installs nothing. The same mechanism serves both runtimes.
+
 ### DNS inside the sandbox
 
 The worker writes `/etc/resolv.conf` (copied from the worker pod's resolver)
@@ -101,7 +117,9 @@ Networking is **not** set up during checkpoint and is torn down afterward; it is
 **re-established fresh** on restore into the reused interior netns with the same
 fixed interior IP. gVisor's netstack is captured in the checkpoint; connected
 sockets are not — hence the reconnect model. The address a client dials is stable
-across a teleport.
+across a teleport. The `tc` bandwidth shaping is host-side pod-netns state (not part
+of the checkpoint), so it is **re-applied on restore** from the caps the caller
+re-supplies — the cap survives teleport.
 
 ---
 
@@ -202,8 +220,8 @@ dominates real teleport time:
 
 | Endpoint | Role in the model |
 |---|---|
-| `POST /run` | Start a sandbox; accepts `ports`, `readiness`, `restartPolicy`. |
-| `POST /restore` | Restore from an S3 checkpoint; caller re-supplies `ports`. |
+| `POST /run` | Start a sandbox; accepts `ports`, `readiness`, `restartPolicy`, and bandwidth caps (`egressMbps`/`ingressMbps`). |
+| `POST /restore` | Restore from an S3 checkpoint; caller re-supplies `ports` and bandwidth caps. |
 | `POST /checkpoint` | Checkpoint to S3, leave the sandbox running. |
 | `POST /suspend` | Checkpoint to S3, then free the worker. |
 | `POST /reset` | Free the worker without checkpointing. |

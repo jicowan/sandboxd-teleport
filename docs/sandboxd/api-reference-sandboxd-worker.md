@@ -37,7 +37,9 @@ engine is gVisor (`runsc`) or a Cloud Hypervisor microVM depending on its image 
   configured"}`.
 - **Networking gating.** Requests that declare `ports` require the sandbox network
   data path (`SANDBOXD_NETWORK=sandbox` + `SANDBOXD_POD_IP` set). Otherwise they
-  return `400` ("sandbox networking unavailable").
+  return `400` ("sandbox networking unavailable"). The `egressMbps`/`ingressMbps`
+  caps likewise depend on that data path — the `tc` shaping runs on the sandbox's
+  veth peer, which only exists on the sandbox network path.
 
 ## Endpoint summary
 
@@ -118,9 +120,19 @@ gVisor sandbox.
   "sandboxId": "sess-…",                             // optional; generated if empty
   "ports": [{ "container": 8080, "host": 8080 }],    // optional
   "health": { "probe": "http", "probePort": 8080, "probePath": "/v1/health" },
-  "iamRoleArn": "arn:aws:iam::…:role/…"              // optional; vend per-session AWS creds for this role
+  "iamRoleArn": "arn:aws:iam::…:role/…",             // optional; vend per-session AWS creds for this role
+  "egressMbps": 100,                                 // optional; 0/unset = uncapped (sandbox→world)
+  "ingressMbps": 200                                 // optional; 0/unset = uncapped (world→sandbox)
 }
 ```
+
+`egressMbps`/`ingressMbps` (optional): per-sandbox bandwidth caps in Mbit/s. When
+non-zero the worker applies host-side Linux `tc` shaping on the sandbox's veth peer in
+the worker netns (`ateom0` for microVM, `sbx0` for gVisor) — egress via an ingress
+qdisc + mirred-redirect to an IFB (`ateom-bwifb`) + TBF, ingress via a root TBF. The
+cap is outside the guest (guest-untamperable). Requires the sandbox network data path
+(see the networking note above); the operator sets these from the template's
+`spec.network`.
 
 `iamRoleArn` (optional): when set and the credential vendor is enabled
 (`SANDBOXD_CRED_TOKEN_KEY`), the worker registers the role and injects
@@ -211,13 +223,20 @@ and restores in one step — there is no separate `create`.
   "runscVersion": "release-20260622.0",  // optional; 409 on mismatch
   "ports": [{ "container": 8080, "host": 8080 }],
   "health": { "probe": "http", "probePort": 8080, "probePath": "/v1/health" },
-  "iamRoleArn": "arn:aws:iam::…:role/…"  // optional; re-establish per-session AWS creds after teleport
+  "iamRoleArn": "arn:aws:iam::…:role/…",  // optional; re-establish per-session AWS creds after teleport
+  "egressMbps": 100,                      // optional; re-apply the sandbox→world cap on the new worker
+  "ingressMbps": 200                      // optional; re-apply the world→sandbox cap on the new worker
 }
 ```
 
 `iamRoleArn` re-registers the session's role with the new worker's credential
 vendor on teleport (the AWS env already travels baked into the checkpoint; the
 per-session token is deterministic so it keeps matching).
+
+`egressMbps`/`ingressMbps` re-apply the per-sandbox bandwidth caps on the new worker.
+Host-side `tc` state is **not** part of the checkpoint, so the caller re-supplies the
+caps (the operator sources them from the recorded assignment entry) and the worker
+re-installs the shaping on the freshly rebuilt veth.
 
 **Response `200`**
 
@@ -423,10 +442,11 @@ ServiceAccount) — there are no static keys.
 For context, the resume/suspend workflows map onto these endpoints:
 
 - **Cold start** (new session): operator claims an idle worker → `POST /run` with
-  the template's image/ports/health → waits for `/status` ready → marks the session
-  Running.
+  the template's image/ports/health/network caps → waits for `/status` ready → marks
+  the session Running.
 - **Teleport / resume from snapshot:** operator claims an idle worker → `POST
-  /restore` with the snapshot URI → waits ready → marks Running.
+  /restore` with the snapshot URI (re-supplying ports + network caps) → waits ready →
+  marks Running.
 - **Idle suspend:** operator → `POST /suspend` → session Suspended, worker freed.
 - **Reclaim without saving:** `POST /reset`.
 - **Router** proxies user traffic to the sandbox's **workload port** (e.g. `:8080`

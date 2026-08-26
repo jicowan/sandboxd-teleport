@@ -52,6 +52,7 @@ subresource; no printer columns.
 | `cmd` | []string | No | — | Overrides the image entrypoint+cmd. |
 | `env` | []string | No | — | Added to the sandbox process environment. |
 | `ports` | []PortMap | No | — | Exposed via the worker's DNAT (`podIP:host → interiorIP:container`). |
+| `network` | NetworkSpec | No | — | Per‑sandbox network bandwidth caps (`network.egressMbps` / `network.ingressMbps`, Mbit/s; 0/unset ⇒ uncapped). Every sandbox created from this template inherits the caps. Enforced host‑side via Linux `tc` on the sandbox's veth peer in the worker pod netns (guest‑untamperable), and re‑applied on restore so it survives teleport. Works for **both** runtimes (microVM shapes `ateom0`, gVisor `sbx0`). See "Per‑sandbox bandwidth limits" below and [PRD-sandbox-network-bandwidth-limits.md](PRD/PRD-sandbox-network-bandwidth-limits.md). |
 | `health` | Health | No | — | Drives the worker readiness probe (and thus router health/idle detection). |
 | `idle` | IdlePolicy | No | (see IdlePolicy) | How long a sandbox may idle before checkpoint/reclaim. |
 | `checkpointIntervalSeconds` | int | No | `0` (disabled); min 0 | Periodic background checkpoints while Running (checkpoint to S3, leave running) every N seconds, bounding crash loss to ~N seconds. Opt‑in (adds S3 churn + brief pauses). |
@@ -78,6 +79,7 @@ spec:
   ports: [{ container: 8080, host: 8080 }]
   health: { probe: http, probePort: 8080, probePath: /v1/health }
   idle: { timeoutSeconds: 600, action: suspend }
+  network: { egressMbps: 100, ingressMbps: 200 }   # optional per-sandbox bandwidth caps (Mbit/s)
   streamConsole: true                     # surface workload console on this pool
   workerImage: <registry>/sandboxd:v42    # optional per-pool worker canary
   resources:
@@ -149,6 +151,26 @@ Escape hatch (rare): explicit worker env `SANDBOXD_CH_VCPUS` / `SANDBOXD_CH_MEMO
 (or a full `SANDBOXD_KATA_CONFIG` with `default_vcpus`/`default_memory`) overrides the
 limit‑derived size. See [api‑reference‑sandboxd‑worker.md](api-reference-sandboxd-worker.md).
 
+#### Per‑sandbox bandwidth limits (`spec.network`)
+
+`spec.network.{egressMbps,ingressMbps}` (Mbit/s; 0/unset ⇒ uncapped) caps each sandbox's
+network throughput. Every sandbox created from the template inherits the caps; a `Session`
+does not override them (they're a pool/workload property). The operator resolves the caps
+and sends them per‑session on the worker's `/run` + `/restore` requests; they're recorded
+on the KV assignment entry so they **re‑apply on restore** (teleport‑safe — host `tc` state
+is not part of the checkpoint).
+
+Enforcement is entirely **host‑side** on the sandbox's veth peer in the worker pod netns
+(`ateom0` for microVM, `sbx0` for gVisor), so the guest cannot see or remove it:
+
+- **egress** (sandbox → world): an ingress qdisc + a match‑all `u32` filter that
+  mirred‑redirects to an IFB device (`ateom‑bwifb`) carrying a TBF at the cap.
+- **ingress** (world → sandbox): a plain root TBF on the veth peer at the cap.
+
+Directions are from the sandbox's point of view. Works for both runtimes. See
+[PRD‑sandbox‑network‑bandwidth‑limits.md](PRD/PRD-sandbox-network-bandwidth-limits.md); a
+runnable e2e (both runtimes, incl. teleport) is under `examples/microvm/bandwidth/`.
+
 ---
 
 ## AppTemplate (`appt`)
@@ -170,6 +192,7 @@ AppTemplate is reusable across any generic pool (GPU, AZ‑pinned, standard). Ha
 | `cmd` | []string | No | — | Overrides the image entrypoint+cmd. |
 | `env` | []string | No | — | Added to the sandbox process environment. |
 | `ports` | []PortMap | No | — | Exposed via the worker's DNAT. |
+| `network` | NetworkSpec | No | — | Per‑sandbox bandwidth caps (`egressMbps`/`ingressMbps`, Mbit/s; 0/unset ⇒ uncapped) — a workload property, so it lives here for generic pools too. Same host‑side `tc` enforcement as SandboxTemplate; see "Per‑sandbox bandwidth limits" above. |
 | `health` | Health | No | — | Drives the worker readiness probe. |
 | `idle` | IdlePolicy | No | (see IdlePolicy) | Idle‑suspend behavior for sessions running this app. |
 | `checkpointIntervalSeconds` | int | No | `0` (disabled); min 0 | Periodic background checkpoints while Running. |
@@ -563,6 +586,13 @@ operator can hand them straight to `/run` and `/restore`.
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
 | `roleArn` | string | No | ARN of the IAM role the sandbox assumes (per‑session temporary credentials vended by the worker). Authorization for which sessions may use which role is a front‑door / control‑plane decision. Requires the operator's `--cred-token-secret` and the worker's role to be permitted to `sts:AssumeRole` it. |
+
+### NetworkSpec — per‑sandbox bandwidth caps
+
+| Field | Type | Required | Validation | Meaning |
+|-------|------|----------|------------|---------|
+| `egressMbps` | int | No | ≥0; 0/unset ⇒ uncapped | Cap on **sandbox → world** throughput (Mbit/s). Host‑side `tc`: ingress qdisc + `u32` mirred‑redirect to an IFB (`ateom‑bwifb`) + TBF. |
+| `ingressMbps` | int | No | ≥0; 0/unset ⇒ uncapped | Cap on **world → sandbox** throughput (Mbit/s). Host‑side `tc`: a root TBF on the sandbox's veth peer (`ateom0`/`sbx0`). |
 
 ### SchedulingSpec — worker‑pod placement (pass‑through)
 

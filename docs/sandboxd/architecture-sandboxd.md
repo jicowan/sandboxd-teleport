@@ -227,7 +227,7 @@ or orphan S3 checkpoints. Keys:
 
 | Key | Value | Writer |
 |-----|-------|--------|
-| `session:<sid>` | JSON `SessionEntry` (state, pool, workerPod, workerPodIP, snapshotURI, ports, health, version, lastActiveAt, idleTimeoutSeconds, checkpointIntervalSeconds) | operator (CAS); router does advisory `StampActive` |
+| `session:<sid>` | JSON `SessionEntry` (state, pool, workerPod, workerPodIP, snapshotURI, ports, health, egressMbps, ingressMbps, version, lastActiveAt, idleTimeoutSeconds, checkpointIntervalSeconds) | operator (CAS); router does advisory `StampActive` |
 | `worker:<pod>` | JSON `WorkerEntry` (pod, pool, podIP, state idle/busy, sid, version) | operator only |
 | `pool:<pool>:idle` | Redis SET of idle worker pod names (idle count = `SCARD`) | operator only |
 | `pool:<pool>:all` | Redis SET of all worker pod names in the pool (total count = `SCARD`, no scan) | operator only |

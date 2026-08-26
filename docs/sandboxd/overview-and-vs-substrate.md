@@ -82,7 +82,8 @@ capacity can host many workloads without a warm pool per image. See
 Teleport (RAM+FS), warm pools with `minIdle` autoscaling, graceful scale‑in
 (`pod-deletion-cost` ordering) + **checkpoint‑on‑terminate** (lossless eviction),
 on‑demand suspend, periodic background checkpoints, **ForkSet** fan‑out, **per‑session
-AWS IAM credentials** (teleport‑safe), session **garbage collection** (S3 + KV + CR),
+AWS IAM credentials** (teleport‑safe), **per‑sandbox network bandwidth limits** (host‑side
+`tc`, teleport‑safe, both runtimes), session **garbage collection** (S3 + KV + CR),
 **worker‑binding reclaim**, and optional **SPIFFE/SPIRE mTLS** on the control hops.
 
 ---
@@ -211,6 +212,7 @@ platform.)
 | Lossless eviction | **checkpoint‑on‑terminate** (drain‑wait within grace) | Not documented |
 | Fan‑out | **ForkSet** (N sessions from a snapshot or image) | Not documented |
 | Per‑session cloud identity | **Per‑session AWS IAM** (teleport‑safe) | Not documented |
+| Per‑sandbox bandwidth limits | **Host‑side `tc` egress/ingress caps** (teleport‑safe, both runtimes) | Not documented |
 | Control‑hop security | SPIFFE/SPIRE mTLS **opt‑in** (off by default) + opt‑in NetworkPolicy | Pod‑certificate mTLS **on by default** — the very thing that blocks EKS |
 | Scope / maturity | Narrow, production‑oriented, EKS‑hardened | Broad, framework‑agnostic, v0.0.0 |
 | Identity model | One durable session per user (broker‑keyed) | One durable actor per identity |

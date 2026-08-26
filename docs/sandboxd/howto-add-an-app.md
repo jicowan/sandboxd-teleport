@@ -57,6 +57,7 @@ spec:
   health: { probe: tcp, probePort: 8080 }   # or http + /healthz if the server has one
   idle: { timeoutSeconds: 600, action: suspend }
   # iam: { roleArn: "arn:aws:iam::<acct>:role/..." }   # optional per-session AWS role
+  # network: { egressMbps: 100, ingressMbps: 200 }     # optional per-sandbox bandwidth caps (Mbit/s; 0/unset = uncapped)
 ```
 
 ```sh
