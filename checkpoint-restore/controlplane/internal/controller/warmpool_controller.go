@@ -147,6 +147,17 @@ func workerReadinessProbe() *corev1.Probe {
 // kvmVolume is the name of the /dev/kvm device passthrough for microVM workers.
 const kvmVolume = "dev-kvm"
 
+// rootfsUpperVolume backs the microVM host-merged rootfs overlay UPPER
+// (PRD-microvm-rootfs-upper-on-host-disk). It MUST be a non-overlay filesystem:
+// overlayfs rejects an upperdir on another overlayfs, and the worker container's own
+// rootfs (incl /work) IS an overlay. An emptyDir is node-disk-backed ext4/xfs — a real
+// fs overlayfs accepts as an upper, and node-disk (not RAM) keeps rootfs writes off
+// guest memory. The worker reads it at SANDBOXD_ROOTFS_UPPER (matches this mountPath).
+const (
+	rootfsUpperVolume = "rootfs-upper"
+	rootfsUpperMount  = "/var/lib/sandboxd/rootfs-upper"
+)
+
 // workerVolumeMounts adds the SPIFFE socket mount (read-only) when mTLS is on, and
 // the /dev/kvm device when the pool runs the microVM runtime (Cloud Hypervisor
 // needs KVM; the worker already runs privileged, so this exposes the device node).
@@ -157,6 +168,7 @@ func workerVolumeMounts(mtls, microvm bool, propagation *corev1.MountPropagation
 	}
 	if microvm {
 		vm = append(vm, corev1.VolumeMount{Name: kvmVolume, MountPath: "/dev/kvm"})
+		vm = append(vm, corev1.VolumeMount{Name: rootfsUpperVolume, MountPath: rootfsUpperMount})
 	}
 	if mtls {
 		ro := true
@@ -180,6 +192,10 @@ func workerVolumes(mtls, microvm bool, hostPathSocket, hostPathDir *corev1.HostP
 		charDev := corev1.HostPathCharDev
 		vols = append(vols, corev1.Volume{Name: kvmVolume, VolumeSource: corev1.VolumeSource{
 			HostPath: &corev1.HostPathVolumeSource{Path: "/dev/kvm", Type: &charDev}}})
+		// emptyDir (node-disk ext4/xfs) for the host-merged rootfs overlay upper — a
+		// non-overlay fs overlayfs will accept as an upperdir (see rootfsUpperVolume).
+		vols = append(vols, corev1.Volume{Name: rootfsUpperVolume, VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{}}})
 	}
 	if mtls {
 		ro := true
