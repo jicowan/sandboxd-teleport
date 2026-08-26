@@ -39,17 +39,24 @@ import (
 // bootTimeout bounds the whole cold-boot so a wedged guest can't hang /run forever.
 const bootTimeout = 120 * time.Second
 
-// mergedRootfsCache is the virtiofsd --cache mode for the host-merged rootfs share.
-// It MUST be write-through so a paused guest's completed writes are already on the
-// host upper when checkpoint tars it (rootfs-upper.tar) — otherwise a runtime-written
-// file (e.g. a Python __pycache__ .pyc) sits in the guest's writeback page cache, the
-// tar misses it, and virtiofsd's find-paths migration fails to re-open it on restore
-// (VhostUserCheckDeviceState BackendInternalError). "never" gives write-through (no
-// guest file page cache): writes hit the host immediately AND the memory snapshot no
-// longer double-counts scratch that's also in the tar. "auto"/"always" enable guest
-// writeback caching on this kernel (6.18.35), which breaks the tar's coherence.
-// (virtiofsd's valid --cache values are never|auto|always; there is no "none".)
-const mergedRootfsCache = "never"
+// mergedRootfsCache returns the virtiofsd --cache mode for the host-merged rootfs
+// share (env SANDBOXD_ROOTFS_CACHE, default "never"). It's a per-pool tradeoff with no
+// free lunch:
+//
+//   - "never" (default): rootfs READS are uncached (each is a virtio-fs round-trip, so
+//     slower module loads / execs), but writes are write-through — the paused-guest tar
+//     is coherent with NO pre-Pause sync, and scratch is NOT double-counted (it isn't in
+//     the guest page cache, so it rides only the tar, not the memory snapshot).
+//   - "auto": rootfs reads are CACHED in the guest (fast), but writes use guest writeback
+//     caching. checkpoint runs a guest `sync` before Pause (AgentClient.SyncGuest) to
+//     flush writeback to the host upper so the tar is coherent — HOWEVER sync leaves the
+//     pages clean-cached in guest RAM, so incompressible scratch is DOUBLE-COUNTED (once
+//     in the memory snapshot, once in the tar), inflating suspend/restore. Fully avoiding
+//     that needs drop_caches in the guest (CAP_SYS_ADMIN the workload lacks).
+//
+// Pick "never" when teleport size/latency matters most; "auto" for read-heavy workloads
+// that can absorb the larger checkpoint. (virtiofsd values: never|auto|always.)
+func mergedRootfsCache() string { return envOr("SANDBOXD_ROOTFS_CACHE", "never") }
 
 // createStart boots a microVM for sandbox id from the prepared OCI bundle and
 // starts its single container inside, via the kata-agent. Mirrors substrate's
@@ -113,12 +120,12 @@ func (d *chDriver) createStart(id, bundle string, ports []portMap) (retErr error
 	}
 
 	// 5) Assemble the container rootfs overlay ON THE HOST (lower = bundle image,
-	//    upper/work = a per-sandbox dir on DISK — /work, not guest RAM) and serve the
-	//    MERGED tree over virtiofsd. The guest runs the container directly on it (no
-	//    guest-side overlay), so rootfs writes cost host disk, not guest RAM — no
-	//    ~19%-of-RAM tmpfs write cliff, and scratch no longer inflates the memory
-	//    snapshot (PRD-microvm-rootfs-upper-on-host-disk). CH demand-pages from
-	//    virtiofsd for the sandbox lifetime, so we own the process (killed in delete).
+	//    upper/work = a per-sandbox dir on a NON-overlay emptyDir on node disk — see
+	//    rootfsUpperDir, NOT guest RAM) and serve the MERGED tree over virtiofsd. The
+	//    guest runs the container directly on it (no guest-side overlay), so rootfs
+	//    writes cost host disk, not guest RAM — no ~19%-of-RAM tmpfs write cliff
+	//    (PRD-microvm-rootfs-upper-on-host-disk). CH demand-pages from virtiofsd for the
+	//    sandbox lifetime, so we own the process (killed in delete).
 	if err := resetRootfsUpperDir(id); err != nil {
 		return fmt.Errorf("microvm rootfs upper: %w", err)
 	}
@@ -130,7 +137,7 @@ func (d *chDriver) createStart(id, bundle string, ports []portMap) (retErr error
 		Binary:     d.virtiofsd,
 		SocketPath: kata.VirtiofsdSocketPath(id),
 		SharedDir:  kata.SharedDir(id),
-		Cache:      mergedRootfsCache,
+		Cache:      mergedRootfsCache(),
 		Log:        vfsdLog,
 	})
 	if err != nil {

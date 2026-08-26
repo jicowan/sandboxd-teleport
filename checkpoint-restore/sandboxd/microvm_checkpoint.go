@@ -111,6 +111,22 @@ func (d *chDriver) checkpoint(id, imageDir string, leaveRunning, compress bool) 
 		return fmt.Errorf("microvm checkpoint: CH api-socket not ready: %w", err)
 	}
 
+	// Host-merged rootfs: flush the guest's writeback page cache to the host upper
+	// BEFORE pausing, so the upper the tar captures below is coherent (the merged share
+	// uses cache=auto, i.e. guest writeback — see mergedRootfsCache). Runs `sync` in the
+	// workload container (id = baseID, the id the guest created it with) and waits for
+	// it. Best-effort: a sync error is logged, not fatal — a stale .pyc only breaks THIS
+	// snapshot's restore, and the alternative (failing every checkpoint) is worse.
+	if vm.agent != nil && dirExists(rootfsUpperDir(id)) {
+		cid := vm.baseID
+		if cid == "" {
+			cid = id
+		}
+		if err := vm.agent.SyncGuest(ctx, cid); err != nil {
+			log.Printf("microvm checkpoint %s: WARN guest sync before pause failed (rootfs tar may be stale): %v", id, err)
+		}
+	}
+
 	// Pause the guest to quiesce it, then snapshot. On any failure after the pause,
 	// resume so a failed checkpoint leaves the sandbox running (matches gVisor,
 	// where a failed checkpoint is non-destructive), unless we're tearing down.
@@ -314,7 +330,7 @@ func (d *chDriver) restore(id, bundle, imageDir string, ports []portMap) (retErr
 		if err := kata.StageMergedRootfs(ctx, rootfs, upperBase, baseID, baseID); err != nil {
 			return fmt.Errorf("microvm restore: stage merged rootfs: %w", err)
 		}
-		vfsdCache = mergedRootfsCache // write-through (see the const): coherent tar + no double-count
+		vfsdCache = mergedRootfsCache() // same cache mode as cold boot (see mergedRootfsCache)
 		workloadExecID = baseID       // host-merged workload runs as the container id itself
 	} else if err := kata.ReconstructSharedDirFromImage(ctx, rootfs, baseID, baseID); err != nil {
 		return fmt.Errorf("microvm restore: stage rootfs: %w", err)

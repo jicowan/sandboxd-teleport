@@ -180,14 +180,27 @@ Three findings, all fixed:
    `imageDir`), not the `clh-restore` subdir; the self-describing check + untar read
    `imageDir`.
 
-### 8.1 Known tradeoff / follow-up — `cache=never` read performance
+### 8.1 rootfs cache mode — an operator knob, no free lunch (`SANDBOXD_ROOTFS_CACHE`)
 
-`cache=never` gives write-through (correct tar + no double-count) but makes rootfs
-**reads uncached** — every file read is a virtio-fs round-trip, so module loads / execs
-are slower. Acceptable for correctness now (it's a one-line const, `mergedRootfsCache`),
-but the better answer is **`cache=auto` + an explicit guest `sync` before Pause** so the
-tar is coherent while reads stay cached. That needs a guest-sync path (a kata-agent
-`sync`/exec, which we don't wrap yet) — tracked as the phase-3 follow-up.
+Resolved as a per-pool env knob (`SANDBOXD_ROOTFS_CACHE`, `never|auto`, default
+`never`) — the two modes trade off in opposite directions and neither dominates:
+
+- **`never`** (default): rootfs **reads are uncached** (each a virtio-fs round-trip →
+  slower module loads / execs), but writes are write-through so the paused-guest tar is
+  coherent with no pre-Pause sync, and incompressible scratch is **not double-counted**
+  (304 MiB scratch → **370 MiB** suspend, live). Best when teleport size/latency matters.
+- **`auto`**: rootfs **reads are cached** (fast). Checkpoint runs a guest `sync` before
+  Pause (`AgentClient.SyncGuest`, via the agent's `ExecProcess`/`WaitProcess`) to flush
+  writeback to the host upper so the tar stays coherent — **validated: a 32 MiB file
+  round-trips with identical md5**. BUT `sync` leaves the pages clean-cached in guest
+  RAM, so incompressible scratch is **double-counted** — once in the memory snapshot,
+  once in the tar (304 MiB scratch → **671 MiB** suspend, live). Best for read-heavy
+  workloads that can absorb the larger checkpoint.
+
+Fully getting both (cached reads AND no double-count) would need `drop_caches` in the
+guest after the sync, which requires `CAP_SYS_ADMIN` the workload container lacks —
+not pursued. The default is `never` because teleport cost is the more architecturally
+important property; flip to `auto` per-pool for read-latency-sensitive workloads.
 
 ### 8.2 Remaining validation
 
