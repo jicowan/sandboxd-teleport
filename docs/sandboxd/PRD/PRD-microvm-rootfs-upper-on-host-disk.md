@@ -155,3 +155,45 @@ codec also lives in, so it must be re-plumbed onto our S3 layer and re-validated
 end. Sequence it **after** the low-risk substrate pulls (agent-poll, merge-unlink) and
 **alongside** the volume-bridge design, since they share the host-served-virtiofsd
 mechanism.
+
+## 8. Implementation status (2026-08-26)
+
+Landed in phases: **#41** tarutil, **#42** host-merge primitives (both merged), and
+**phase 3** (this feature) wires them into boot + checkpoint/restore. LIVE-VALIDATED on
+a nested-virt node: cold boot on the merged rootfs (`df /` = `virtiofs`, ~107 GB avail —
+the ~672 MiB guest-tmpfs write cliff is GONE), a 1 GiB write succeeds, writes land on
+the host upper immediately, 304 MiB of incompressible scratch suspends as **370 MiB**
+(vs **671 MiB** double-counted before the fix), restore succeeds (~0.6s) and a 32 MiB
+random file round-trips with an **identical md5**.
+
+Three findings, all fixed:
+1. **Upper must be on a non-overlay fs.** overlayfs rejects an upperdir on another
+   overlayfs, and the worker's own rootfs (`/work`) IS an overlay. Fix: the operator
+   mounts an **emptyDir** (node-disk ext4/xfs) at `/var/lib/sandboxd/rootfs-upper`
+   (`SANDBOXD_ROOTFS_UPPER`); the worker fails loudly at cold boot if it's absent.
+2. **The merged share must be virtiofsd `cache=never` (write-through).** With
+   `cache=auto` the guest writeback-caches runtime writes (e.g. Python `.pyc`), so they
+   miss the paused-guest tar and find-paths migration can't re-open them on restore
+   (`VhostUserCheckDeviceState BackendInternalError`). `never` also removes the
+   memory-image double-count of scratch that's also in the tar.
+3. **`rootfs-upper.tar` rides the snapshot's top-level files** (`downloadPrefix` →
+   `imageDir`), not the `clh-restore` subdir; the self-describing check + untar read
+   `imageDir`.
+
+### 8.1 Known tradeoff / follow-up — `cache=never` read performance
+
+`cache=never` gives write-through (correct tar + no double-count) but makes rootfs
+**reads uncached** — every file read is a virtio-fs round-trip, so module loads / execs
+are slower. Acceptable for correctness now (it's a one-line const, `mergedRootfsCache`),
+but the better answer is **`cache=auto` + an explicit guest `sync` before Pause** so the
+tar is coherent while reads stay cached. That needs a guest-sync path (a kata-agent
+`sync`/exec, which we don't wrap yet) — tracked as the phase-3 follow-up.
+
+### 8.2 Remaining validation
+
+- **Operator-managed e2e** (build operator+worker images, cycle a real microVM pool,
+  drive suspend/resume through the control plane) — the standalone-pod path is proven;
+  the emptyDir-via-operator path is unit-tested but not yet live-run.
+- **Legacy back-compat** — restore a pre-phase-3 (tmpfs-upper) snapshot and confirm the
+  self-describing legacy branch still works (code handles it; not yet live-run against a
+  real old snapshot).
