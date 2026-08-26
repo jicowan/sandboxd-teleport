@@ -95,6 +95,24 @@ type IAMSpec struct {
 	RoleARN string `json:"roleArn,omitempty"`
 }
 
+// NetworkSpec caps a sandbox's network bandwidth. The worker enforces the caps
+// host-side on the sandbox's interior veth peer (tc: an ingress qdisc + ifb/TBF
+// for egress, a root TBF for ingress), so they hold outside the guest and are
+// re-applied on teleport. Directions are from the sandbox's point of view:
+// egress = sandbox → outside, ingress = outside → sandbox. 0/unset = uncapped.
+// See docs/sandboxd/PRD/PRD-sandbox-network-bandwidth-limits.md.
+type NetworkSpec struct {
+	// egressMbps caps sandbox-originated traffic (upload), in Mbit/s. 0 = uncapped.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	EgressMbps int `json:"egressMbps,omitempty"`
+
+	// ingressMbps caps traffic INTO the sandbox (download), in Mbit/s. 0 = uncapped.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	IngressMbps int `json:"ingressMbps,omitempty"`
+}
+
 // SchedulingSpec controls how the pool's worker pods are placed. It is a
 // pass-through of the standard Kubernetes scheduling primitives — the operator
 // injects NO defaults. Whatever you set here is applied verbatim to the worker

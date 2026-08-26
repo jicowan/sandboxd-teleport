@@ -124,6 +124,23 @@ spec:
                 description: image is the OCI image run AS THE SANDBOX (nested gVisor
                   workload).
                 type: string
+              network:
+                description: |-
+                  network optionally caps the sandbox's network bandwidth (egress/ingress
+                  Mbit/s). Enforced host-side on the interior veth by the worker, so it holds
+                  outside the guest and survives teleport. Unset = uncapped.
+                properties:
+                  egressMbps:
+                    description: egressMbps caps sandbox-originated traffic (upload),
+                      in Mbit/s. 0 = uncapped.
+                    minimum: 0
+                    type: integer
+                  ingressMbps:
+                    description: ingressMbps caps traffic INTO the sandbox (download),
+                      in Mbit/s. 0 = uncapped.
+                    minimum: 0
+                    type: integer
+                type: object
               ports:
                 description: ports are exposed via the worker's DNAT (podIP:host ->
                   interiorIP:container).

@@ -79,6 +79,12 @@ type AppTemplateSpec struct {
 	// override this per session.
 	// +optional
 	IAM *IAMSpec `json:"iam,omitempty"`
+
+	// network optionally caps the sandbox's network bandwidth (egress/ingress
+	// Mbit/s). Enforced host-side on the interior veth by the worker, so it holds
+	// outside the guest and survives teleport. Unset = uncapped.
+	// +optional
+	Network *NetworkSpec `json:"network,omitempty"`
 }
 
 // AppTemplateStatus defines the observed state of AppTemplate.

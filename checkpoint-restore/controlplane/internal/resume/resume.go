@@ -47,6 +47,11 @@ type TemplateSpec struct {
 	Ports      []sbxapi.PortMap
 	Health     *sbxapi.Health
 	IAMRoleARN string
+	// EgressMbps/IngressMbps are the per-sandbox network bandwidth caps (Mbit/s,
+	// 0 = uncapped) from the template's spec.network; passed on the /run + /restore
+	// request so the worker shapes the interior veth.
+	EgressMbps  int
+	IngressMbps int
 	// IdleTimeoutSeconds / CheckpointIntervalSeconds are recorded on the session
 	// entry at resume so the KV due-indexes (suspend/checkpoint) can be maintained
 	// without a policy lookup on the router hot path or the sweep.
@@ -65,6 +70,11 @@ type SessionPlan struct {
 	Env          []string
 	Ports        []sbxapi.PortMap
 	IAMRoleARN   string // session's assumable AWS role (from template or session)
+	// EgressMbps/IngressMbps are per-sandbox network bandwidth caps (Mbit/s, 0 =
+	// uncapped). A session may override the template's caps; 0 falls back to the
+	// template value (resolved in resume()).
+	EgressMbps  int
+	IngressMbps int
 	// IdleTimeoutOverride is the session's spec.lifecycle.idleTimeoutSeconds (0 = none).
 	// When >0 it overrides the template's idle timeout for THIS session, so the value
 	// written into the KV entry (and thus the suspend:due deadline that schedules the
@@ -297,6 +307,7 @@ func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint, appHint 
 	cmd, env, ports := plan.Cmd, plan.Env, plan.Ports
 	var health *sbxapi.Health // set from the resolved template below (no per-plan override)
 	roleARN := plan.IAMRoleARN
+	egressMbps, ingressMbps := plan.EgressMbps, plan.IngressMbps
 	idleTimeout, ckptInterval := 0, 0
 	// Resolve the config template: a SandboxTemplate (dedicated pool, plan.TemplateName)
 	// OR an AppTemplate (generic pool via appRef, plan.AppName). At most one is set
@@ -328,6 +339,12 @@ func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint, appHint 
 		if roleARN == "" {
 			roleARN = tmpl.IAMRoleARN // session override else template default
 		}
+		if egressMbps == 0 {
+			egressMbps = tmpl.EgressMbps // template default (no per-session override today)
+		}
+		if ingressMbps == 0 {
+			ingressMbps = tmpl.IngressMbps
+		}
 		idleTimeout = tmpl.IdleTimeoutSeconds
 		ckptInterval = tmpl.CheckpointIntervalSeconds
 	}
@@ -355,6 +372,7 @@ func (wf *Workflow) resume(ctx context.Context, sid, subject, poolHint, appHint 
 	}
 	ip, err := wf.startAndBind(ctx, sid, w, bindSpec{
 		img: img, cmd: cmd, env: env, ports: ports, health: health, roleARN: roleARN,
+		egressMbps: egressMbps, ingressMbps: ingressMbps,
 		idleTimeoutSeconds: idleTimeout, checkpointIntervalSeconds: ckptInterval,
 		seed: coldSeed, // the entry resume() already read (nil if it was absent)
 	})
@@ -382,6 +400,7 @@ func (wf *Workflow) resumeFromSnapshot(ctx context.Context, cur *resumeapi.Sessi
 		restore: true, img: cur.Image, ports: cur.Ports, health: cur.Health,
 		snapshot: cur.SnapshotURI, roleARN: cur.IAMRoleARN,
 		runtime: cur.Runtime, engineVersion: cur.EngineVersion,
+		egressMbps: cur.EgressMbps, ingressMbps: cur.IngressMbps,
 		idleTimeoutSeconds: cur.IdleTimeoutSeconds, checkpointIntervalSeconds: cur.CheckpointIntervalSeconds,
 		seed: cur, // resume() already read this entry; seed the Resuming CAS
 	})
@@ -418,17 +437,18 @@ func (wf *Workflow) rollbackToSuspended(ctx context.Context, sid string) {
 // signature manageable). Cold start fills all fields from the plan/template; resume
 // fills them from the recorded session entry.
 type bindSpec struct {
-	restore                   bool
-	img                       string
-	cmd, env                  []string
-	ports                     []sbxapi.PortMap
-	health                    *sbxapi.Health
-	snapshot, roleARN         string
+	restore           bool
+	img               string
+	cmd, env          []string
+	ports             []sbxapi.PortMap
+	health            *sbxapi.Health
+	snapshot, roleARN string
 	// runtime/engineVersion identify the engine that produced the snapshot; sent on
 	// /restore so the worker refuses a cross-runtime or incompatible-version resume.
 	// Empty on cold start (no snapshot) and for pre-existing entries (worker then
 	// skips the check — backward compatible).
 	runtime, engineVersion    string
+	egressMbps, ingressMbps   int // per-sandbox network caps (Mbit/s, 0 = uncapped)
 	idleTimeoutSeconds        int
 	checkpointIntervalSeconds int
 	// seed is the SessionEntry the resume path already loaded (cur). When non-nil it
@@ -457,6 +477,9 @@ func (wf *Workflow) startAndBind(ctx context.Context, sid string, w *resumeapi.W
 		if b.roleARN != "" {
 			e.IAMRoleARN = b.roleARN // record so teleport re-establishes cred vending
 		}
+		// Record the bandwidth caps so teleport re-applies them on the new worker.
+		e.EgressMbps = b.egressMbps
+		e.IngressMbps = b.ingressMbps
 		// Record the resolved policy so the KV due-indexes (suspend/checkpoint) are
 		// maintained without a policy lookup on the hot path.
 		e.IdleTimeoutSeconds = b.idleTimeoutSeconds
@@ -470,12 +493,14 @@ func (wf *Workflow) startAndBind(ctx context.Context, sid string, w *resumeapi.W
 		if _, err := cl.Restore(ctx, sbxapi.RestoreRequest{
 			SandboxID: sid, Image: b.img, Snapshot: b.snapshot, Ports: b.ports, Health: b.health, IAMRoleARN: b.roleARN,
 			Runtime: b.runtime, EngineVersion: b.engineVersion,
+			EgressMbps: b.egressMbps, IngressMbps: b.ingressMbps,
 		}); err != nil {
 			return "", fmt.Errorf("worker /restore: %w", err)
 		}
 	} else {
 		if _, err := cl.Run(ctx, sbxapi.RunRequest{
 			SandboxID: sid, Image: b.img, Cmd: b.cmd, Env: b.env, Ports: b.ports, Health: b.health, IAMRoleARN: b.roleARN,
+			EgressMbps: b.egressMbps, IngressMbps: b.ingressMbps,
 		}); err != nil {
 			return "", fmt.Errorf("worker /run: %w", err)
 		}

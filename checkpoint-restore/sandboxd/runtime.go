@@ -3,6 +3,8 @@ package main
 import (
 	"log"
 	"path/filepath"
+
+	"github.com/jicowan/aio-sandbox/sandboxd/ateomnet"
 )
 
 // runtimeDriver is the sandbox-runtime seam. The worker's HTTP handlers, the
@@ -26,15 +28,18 @@ type runtimeDriver interface {
 	// inbound DNAT + credential-vendor routing over its veth (see setupInboundPorts).
 	// A driver whose network is built by the handler ahead of the call (gVisor)
 	// ignores them here — they were already applied by setupSandboxNet.
-	createStart(id, bundle string, ports []portMap) error
+	// bw is the per-sandbox network bandwidth cap (0 = uncapped); a driver that owns
+	// its interior network applies it host-side on its veth (microVM). gVisor ignores it.
+	createStart(id, bundle string, ports []portMap, bw ateomnet.BandwidthConfig) error
 	// checkpoint writes an atomic snapshot of the sandbox into imageDir. When
 	// leaveRunning is set the sandbox keeps running (periodic checkpoint); compress
 	// trades restore speed for on-disk/S3 size.
 	checkpoint(id, imageDir string, leaveRunning, compress bool) error
 	// restore establishes AND resumes the sandbox from imageDir in one step. ports
 	// carries the same inbound mappings as createStart (re-established on the new
-	// worker so the restored sandbox is reachable at the same podIP:hostPort).
-	restore(id, bundle, imageDir string, ports []portMap) error
+	// worker so the restored sandbox is reachable at the same podIP:hostPort). bw is
+	// the bandwidth cap, re-applied on the new worker (host-side tc isn't checkpointed).
+	restore(id, bundle, imageDir string, ports []portMap, bw ateomnet.BandwidthConfig) error
 
 	// buildsOwnNetwork reports whether the driver constructs its own interior
 	// network (veth/netns) inside createStart/restore (microVM), rather than relying

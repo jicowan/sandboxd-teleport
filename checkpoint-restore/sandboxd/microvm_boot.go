@@ -58,10 +58,28 @@ const bootTimeout = 120 * time.Second
 // that can absorb the larger checkpoint. (virtiofsd values: never|auto|always.)
 func mergedRootfsCache() string { return envOr("SANDBOXD_ROOTFS_CACHE", "never") }
 
+// bandwidthFromMbps builds the tc token-bucket config (bytes/sec) from the per-session
+// caps carried on the /run + /restore request in Mbit/s (0 = uncapped). The operator
+// sets these from SandboxTemplate.spec.network; the worker applies them host-side on the
+// interior veth (see ateomnet.ApplyBandwidth). Per-session (not a worker env) so one
+// pool can serve differently-capped sessions.
+func bandwidthFromMbps(egressMbps, ingressMbps int) ateomnet.BandwidthConfig {
+	mbitToBPS := func(mbit int) uint64 {
+		if mbit <= 0 {
+			return 0
+		}
+		return uint64(mbit) * 1_000_000 / 8 // Mbit/s → bytes/s
+	}
+	return ateomnet.BandwidthConfig{
+		EgressBPS:  mbitToBPS(egressMbps),
+		IngressBPS: mbitToBPS(ingressMbps),
+	}
+}
+
 // createStart boots a microVM for sandbox id from the prepared OCI bundle and
 // starts its single container inside, via the kata-agent. Mirrors substrate's
 // coldBootActor, collapsed to sandboxd's one-container-per-sandbox model.
-func (d *chDriver) createStart(id, bundle string, ports []portMap) (retErr error) {
+func (d *chDriver) createStart(id, bundle string, ports []portMap, bw ateomnet.BandwidthConfig) (retErr error) {
 	if d.interiorNetNS == 0 {
 		return fmt.Errorf("microvm createStart: interior netns unavailable (networking disabled)")
 	}
@@ -105,6 +123,14 @@ func (d *chDriver) createStart(id, bundle string, ports []portMap) (retErr error
 	// built. Retains gVisor's routing model (see setupInboundPorts).
 	if err := d.setupInboundPorts(ports); err != nil {
 		return fmt.Errorf("microvm inbound ports: %w", err)
+	}
+	// Per-sandbox network bandwidth caps on the host veth (PRD-sandbox-network-bandwidth-
+	// limits). Host-side + guest-untamperable; re-applied on restore too. bw comes from
+	// the /run request (SandboxTemplate.spec.network via the operator). Uncapped when zero.
+	if !bw.Zero() {
+		if err := ateomnet.ApplyBandwidth(bw); err != nil {
+			return fmt.Errorf("microvm bandwidth limits: %w", err)
+		}
 	}
 
 	// 3) Guest sizing + agent kernel params from the kata config.
@@ -286,6 +312,7 @@ func (d *chDriver) initrd() string {
 //     reserve (sandboxMemLimit) so the guest can never allocate past its own cgroup and
 //     OOM-kill the sandboxd agent; vCPUs is ceil(cpu limit), min 1.
 //  3. the built-in default (2048 MiB / 1 vCPU).
+//
 // This is a chDriver method, so it is microVM-ONLY: the gVisor (runsc) driver never
 // calls it and its worker pods are unaffected.
 func (d *chDriver) guestConfig() (memMiB, vcpus int, kparams string, err error) {
@@ -407,6 +434,7 @@ func (d *chDriver) configureGuestNetwork(ctx context.Context, ac *kata.AgentClie
 //     faster to the agent. `image` is ignored.
 //   - initrd == "": the kata guest IMAGE boots as a virtio-blk disk on /dev/vda1
 //     (root=…, systemd → kata-containers.target).
+//
 // The virtio-fs RO lower (workload rootfs) is on PCI segment 1 when the guest has
 // ACPI, or segment 0 on the amd64 acpi=off fast-boot path (no MCFG to enumerate a
 // non-zero segment — see the acpiOff branch below); the writable overlay upper is a
@@ -438,8 +466,8 @@ func buildVMConfig(id, kernel, image, initrd, kparams, serialLog string, memMiB,
 	fsSegment := int32(1) // kata default: virtio-fs on PCI segment 1 (needs ACPI MCFG)
 	var platform *ch.PlatformConfig = &ch.PlatformConfig{NumPciSegments: 2}
 	if acpiOff {
-		fsSegment = 0    // no MCFG without ACPI → keep virtio-fs on segment 0
-		platform = nil   // single segment; omit num_pci_segments
+		fsSegment = 0  // no MCFG without ACPI → keep virtio-fs on segment 0
+		platform = nil // single segment; omit num_pci_segments
 	}
 
 	cfg := ch.VmConfig{
