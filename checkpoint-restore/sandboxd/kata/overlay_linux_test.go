@@ -63,3 +63,38 @@ func TestVirtiofsdArgs(t *testing.T) {
 		})
 	}
 }
+
+// TestUpperWorkDirs pins the host overlay upper/work layout: sibling <cid>/fs and
+// <cid>/work under the actor's upper base. This layout is load-bearing twice over —
+// the kernel requires upperdir and workdir on the same fs with workdir NOT nested
+// under upperdir, and it's also the snapshot tar's entry layout — so a change here
+// breaks both every overlay mount and every existing snapshot.
+func TestUpperWorkDirs(t *testing.T) {
+	upper, work := UpperWorkDirs("/work/rootfs-upper/sbx1", "ctr9")
+	if want := "/work/rootfs-upper/sbx1/ctr9/fs"; upper != want {
+		t.Errorf("upper = %q, want %q", upper, want)
+	}
+	if want := "/work/rootfs-upper/sbx1/ctr9/work"; work != want {
+		t.Errorf("work = %q, want %q", work, want)
+	}
+	// workdir must be a SIBLING of upperdir, not nested inside it (the kernel rejects
+	// a workdir under upperdir).
+	if filepathDir(upper) != filepathDir(work) {
+		t.Errorf("upper and work must share a parent: %q vs %q", upper, work)
+	}
+	if hasPrefixPath(work, upper) {
+		t.Errorf("workdir %q must not be nested under upperdir %q", work, upper)
+	}
+}
+
+func filepathDir(p string) string {
+	for i := len(p) - 1; i >= 0; i-- {
+		if p[i] == '/' {
+			return p[:i]
+		}
+	}
+	return p
+}
+func hasPrefixPath(p, prefix string) bool {
+	return len(p) > len(prefix) && p[:len(prefix)] == prefix && p[len(prefix)] == '/'
+}

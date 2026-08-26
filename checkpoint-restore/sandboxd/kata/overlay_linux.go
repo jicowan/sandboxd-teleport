@@ -83,6 +83,81 @@ func OverlayUpperBase(containerID string) string { return "/run/ateom-upper/" + 
 // uses as its lowerdir.
 func GuestSharedRootfs(containerID string) string { return guestSharedDir + containerID + "/rootfs" }
 
+// --- Host-merged rootfs (phase 2 of PRD-microvm-rootfs-upper-on-host-disk) ----------
+//
+// These are the "host-side overlay assembly" primitives, ported from Agent Substrate
+// c1339e5f (Apache-2.0, Google LLC). They are NOT wired into createStart yet — the
+// wiring (replacing ReconstructSharedDirFromImage, running the guest directly on the
+// merged tree, virtiofsd cache=auto, and the checkpoint/restore upper tar) lands
+// together in phase 3, since staging the merge without those would regress teleport.
+// Kept unwired here so the primitives can be reviewed + unit-tested in isolation.
+
+// UpperWorkDirs returns the HOST overlay upperdir and workdir for one container under
+// the actor's rootfs-upper base dir: SIBLING directories, <cid>/fs and <cid>/work. Both
+// properties are load-bearing — the kernel requires upperdir and workdir on the same
+// filesystem and rejects a nested workdir — and the layout is also the snapshot tar's
+// entry layout, so a change here breaks both every overlay mount and every existing
+// snapshot. Pure (unit-tested).
+func UpperWorkDirs(upperBase, containerID string) (upper, work string) {
+	return filepath.Join(upperBase, containerID, "fs"), filepath.Join(upperBase, containerID, "work")
+}
+
+// StageMergedRootfs mounts overlay(lower = the OCI image bundle rootfs, upper/work =
+// the actor's host rootfs-upper dirs for cid) at SharedDir(restoreID)/<cid>/rootfs —
+// the merged tree the ONE virtiofsd serves and the guest runs the container on
+// directly (no guest-side overlay). The host kernel owns the overlay (the canonical
+// ext4-upper case: whiteouts/opaque markers are ordinary trusted.overlay.* metadata in
+// the upper), and the lower stays pristine (overlayfs never writes below).
+//
+// metacopy=off,index=off are PINNED (not inherited from the host module defaults):
+// both record file-handle references to LOWER inodes in the upper, and the snapshot tar
+// preserves trusted.overlay.* verbatim — but restore rebuilds the lower from the OCI
+// bundle with fresh inodes, so a preserved handle goes stale and the file turns silently
+// unreadable after resume. With both off, every copy-up is a full data copy and the
+// upper is self-contained (the portability find-paths migration needs).
+func StageMergedRootfs(ctx context.Context, bundleRootfs, upperBase, restoreID, cid string) error {
+	if cid == "" {
+		return fmt.Errorf("StageMergedRootfs: empty container id")
+	}
+	dst := filepath.Join(SharedDir(restoreID), cid, "rootfs")
+	upper, work := UpperWorkDirs(upperBase, cid)
+	// Drop any stale mount first (lazy if busy), then ensure clean mountpoints.
+	if err := reaper.Run(exec.Command("umount", dst)); err != nil {
+		_ = reaper.Run(exec.Command("umount", "-l", dst))
+	}
+	for _, d := range []string{dst, upper, work} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return fmt.Errorf("creating %q: %w", d, err)
+		}
+	}
+	opts := "lowerdir=" + bundleRootfs + ",upperdir=" + upper + ",workdir=" + work +
+		",metacopy=off,index=off"
+	cmd := exec.CommandContext(ctx, "mount", "-t", "overlay", "overlay", "-o", opts, dst)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := reaper.Run(cmd); err != nil {
+		return fmt.Errorf("mounting merged rootfs overlay at %q: %w (%s)", dst, err, strings.TrimSpace(stderr.String()))
+	}
+	// Ensure the standard OCI mountpoints exist even for minimal images: the container
+	// mounts /proc,/sys,/dev over them, and find-paths re-opens the tree by path on
+	// restore, so the layout must match on every node. Created in the MERGED tree, so
+	// they land in the upper (and ride the snapshot tar) rather than dirtying the image.
+	for _, d := range []string{"proc", "sys", "dev"} {
+		_ = os.MkdirAll(filepath.Join(dst, d), 0o755)
+	}
+	return nil
+}
+
+// UnmountMergedRootfs drops one container's merged overlay mount (teardown and failure
+// paths; lazy fallback if busy). Best-effort like the rest of teardown —
+// CleanupSandboxState's sweep catches stragglers on the next boot.
+func UnmountMergedRootfs(restoreID, cid string) {
+	dst := filepath.Join(SharedDir(restoreID), cid, "rootfs")
+	if err := reaper.Run(exec.Command("umount", dst)); err != nil {
+		_ = reaper.Run(exec.Command("umount", "-l", dst))
+	}
+}
+
 // VirtiofsdOptions configures StartVirtiofsd.
 type VirtiofsdOptions struct {
 	Binary     string // virtiofsd executable; defaults to "virtiofsd"
