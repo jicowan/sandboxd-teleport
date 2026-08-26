@@ -28,8 +28,9 @@ type runtimeDriver interface {
 	// inbound DNAT + credential-vendor routing over its veth (see setupInboundPorts).
 	// A driver whose network is built by the handler ahead of the call (gVisor)
 	// ignores them here — they were already applied by setupSandboxNet.
-	// bw is the per-sandbox network bandwidth cap (0 = uncapped); a driver that owns
-	// its interior network applies it host-side on its veth (microVM). gVisor ignores it.
+	// bw is the per-sandbox network bandwidth cap (0 = uncapped). Both drivers apply it
+	// host-side (tc) on the sandbox's interior host veth in the pod netns — microVM on
+	// ateom0, gVisor on sbx0 — so it is enforced outside the guest either way.
 	createStart(id, bundle string, ports []portMap, bw ateomnet.BandwidthConfig) error
 	// checkpoint writes an atomic snapshot of the sandbox into imageDir. When
 	// leaveRunning is set the sandbox keeps running (periodic checkpoint); compress
@@ -38,7 +39,8 @@ type runtimeDriver interface {
 	// restore establishes AND resumes the sandbox from imageDir in one step. ports
 	// carries the same inbound mappings as createStart (re-established on the new
 	// worker so the restored sandbox is reachable at the same podIP:hostPort). bw is
-	// the bandwidth cap, re-applied on the new worker (host-side tc isn't checkpointed).
+	// the bandwidth cap, re-applied on the new worker's host veth (host-side tc isn't
+	// checkpointed) — for both runtimes, so the cap survives teleport.
 	restore(id, bundle, imageDir string, ports []portMap, bw ateomnet.BandwidthConfig) error
 
 	// buildsOwnNetwork reports whether the driver constructs its own interior

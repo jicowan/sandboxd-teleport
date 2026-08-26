@@ -163,6 +163,9 @@ kubectl delete pod toolbox -n default --ignore-not-found
 - **Idle action is `suspend`** (not `reset`) so the idle sweep produces a teleport rather
   than discarding the client; the client also keeps traffic flowing, so bump
   `idle.timeoutSeconds` if you want it to sit longer before auto-suspend.
-- **gVisor:** the same `spec.network` field is accepted on a gVisor pool, but the gVisor
-  data path is built by the handler and is **not** shaped today — this harness targets the
-  microVM runtime. gVisor parity is a follow-up.
+- **gVisor parity:** the same `spec.network` caps a gVisor pool too — the driver applies
+  the identical tc mechanism on gVisor's host veth `sbx0` (vs microVM's `ateom0`). To run
+  the gVisor variant, point a pool at the gVisor worker image with `runtime: gvisor` and
+  gVisor-node scheduling (`sandbox: gvisor`); everything else in this harness is unchanged.
+  Verified live: egress/ingress both ~48 Mbit/s, and `tc qdisc show dev sbx0` shows the
+  same 50Mbit TBF + ifb redirect as `ateom0`.

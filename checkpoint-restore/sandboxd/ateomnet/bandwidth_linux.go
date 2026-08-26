@@ -55,14 +55,19 @@ type BandwidthConfig struct {
 // Zero reports whether no cap is set (both directions uncapped).
 func (b BandwidthConfig) Zero() bool { return b.EgressBPS == 0 && b.IngressBPS == 0 }
 
-// ApplyBandwidth installs (or clears) the sandbox's bandwidth caps on ateom0. Must run
-// in the worker POD netns (where ateom0 lives). Idempotent: it removes any prior
-// shaping first, so cold boot and restore both call it safely. A zero config just
-// clears shaping.
-func ApplyBandwidth(cfg BandwidthConfig) error {
-	host, err := netlink.LinkByName(HostVethName)
+// ApplyBandwidth installs (or clears) the sandbox's bandwidth caps on the microVM
+// host veth (ateom0). See ApplyBandwidthOn — this is the microVM-flavored wrapper.
+func ApplyBandwidth(cfg BandwidthConfig) error { return ApplyBandwidthOn(HostVethName, cfg) }
+
+// ApplyBandwidthOn installs (or clears) the sandbox's bandwidth caps on the named host
+// veth (ateom0 for microVM, sbx0 for gVisor — both the pod-netns peer of the sandbox's
+// interior veth, so the direction inversion documented above holds identically). Must
+// run in the worker POD netns (where the veth lives). Idempotent: it removes any prior
+// shaping first, so cold boot and restore both call it safely. A zero config just clears.
+func ApplyBandwidthOn(hostVeth string, cfg BandwidthConfig) error {
+	host, err := netlink.LinkByName(hostVeth)
 	if err != nil {
-		return fmt.Errorf("bandwidth: host veth %q: %w", HostVethName, err)
+		return fmt.Errorf("bandwidth: host veth %q: %w", hostVeth, err)
 	}
 	// Always start clean (re-setup / restore / clear).
 	clearBandwidth(host)
@@ -73,7 +78,7 @@ func ApplyBandwidth(cfg BandwidthConfig) error {
 	// INGRESS cap (world → sandbox): TBF on ateom0's root (egress toward the sandbox).
 	if cfg.IngressBPS > 0 {
 		if err := netlink.QdiscAdd(newTbf(host.Attrs().Index, netlink.HANDLE_ROOT, cfg.IngressBPS, cfg.BurstBytes)); err != nil {
-			return fmt.Errorf("bandwidth: ingress TBF on %s: %w", HostVethName, err)
+			return fmt.Errorf("bandwidth: ingress TBF on %s: %w", hostVeth, err)
 		}
 	}
 
@@ -94,7 +99,7 @@ func ApplyBandwidth(cfg BandwidthConfig) error {
 			Handle:    netlink.MakeHandle(0xffff, 0),
 		}}
 		if err := netlink.QdiscReplace(ingress); err != nil {
-			return fmt.Errorf("bandwidth: ingress qdisc on %s: %w", HostVethName, err)
+			return fmt.Errorf("bandwidth: ingress qdisc on %s: %w", hostVeth, err)
 		}
 		redir := &netlink.U32{
 			FilterAttrs: netlink.FilterAttrs{
@@ -119,9 +124,13 @@ func ApplyBandwidth(cfg BandwidthConfig) error {
 	return nil
 }
 
-// ClearBandwidth removes any bandwidth shaping (best-effort; teardown/failure paths).
-func ClearBandwidth() {
-	if host, err := netlink.LinkByName(HostVethName); err == nil {
+// ClearBandwidth removes any bandwidth shaping on the microVM host veth (ateom0).
+func ClearBandwidth() { ClearBandwidthOn(HostVethName) }
+
+// ClearBandwidthOn removes any bandwidth shaping on the named host veth (best-effort;
+// teardown/failure paths). The IFB outlives the veth, so delete callers clear it here.
+func ClearBandwidthOn(hostVeth string) {
+	if host, err := netlink.LinkByName(hostVeth); err == nil {
 		clearBandwidth(host)
 	}
 }

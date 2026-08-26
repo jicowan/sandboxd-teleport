@@ -334,7 +334,15 @@ func (r *runscDriver) tailGvisorLogs(maxBytes int64) string {
 // createStart ignores ports: the gVisor network (veth + DNAT) is built by the
 // handler's setupSandboxNet BEFORE this call, so runsc joins the ready interior
 // netns via the spec's netnsPath. (buildsOwnNetwork() returns false.)
-func (r *runscDriver) createStart(id, bundle string, _ []portMap, _ ateomnet.BandwidthConfig) error {
+func (r *runscDriver) createStart(id, bundle string, _ []portMap, bw ateomnet.BandwidthConfig) error {
+	// Per-sandbox bandwidth caps on the gVisor host veth (sbx0, the pod-netns peer of
+	// the sandbox's interior veth — built by the handler's setupSandboxNet before this
+	// call). Same host-side tc mechanism as microVM, just on sbx0 instead of ateom0.
+	if !bw.Zero() {
+		if err := ateomnet.ApplyBandwidthOn(hostVethName, bw); err != nil {
+			return fmt.Errorf("gvisor bandwidth limits: %w", err)
+		}
+	}
 	pid := filepath.Join(bundle, id+".pid")
 	log := filepath.Join(bundle, id+".run.log")
 	return r.runDetached(id, log, "run", "-bundle", bundle, "-pid-file", pid, "-detach", id)
@@ -366,7 +374,14 @@ func (r *runscDriver) checkpoint(id, imageDir string, leaveRunning, compress boo
 // boots a DIFFERENT sandbox that waits for `start` — its watchdog logs
 // "Watchdog.Start() not called within 30s" and the container hangs at "created"
 // because the restore never targets it. So: NO separate create; restore -detach.
-func (r *runscDriver) restore(id, bundle, imageDir string, _ []portMap, _ ateomnet.BandwidthConfig) error {
+func (r *runscDriver) restore(id, bundle, imageDir string, _ []portMap, bw ateomnet.BandwidthConfig) error {
+	// Re-apply the caps on the new worker (host-side tc isn't part of the checkpoint),
+	// exactly as cold start does — so the cap survives teleport for gVisor too.
+	if !bw.Zero() {
+		if err := ateomnet.ApplyBandwidthOn(hostVethName, bw); err != nil {
+			return fmt.Errorf("gvisor bandwidth limits: %w", err)
+		}
+	}
 	pid := filepath.Join(bundle, id+".pid")
 	log := filepath.Join(bundle, id+".restore.log")
 	return r.runDetached(id, log, "restore", "-bundle", bundle, "-image-path", imageDir,
@@ -411,7 +426,8 @@ func (r *runscDriver) delete(id string) error {
 	t0 := time.Now()
 	r.run(id, "state", id) // best-effort state sync before delete (substrate pattern)
 	_, se, err := r.run(id, "delete", "-force", id)
-	os.RemoveAll(r.overlayDir(id)) // drop the per-sandbox overlay upper dir
+	ateomnet.ClearBandwidthOn(hostVethName) // drop tc shaping + the ifb (outlives sbx0)
+	os.RemoveAll(r.overlayDir(id))          // drop the per-sandbox overlay upper dir
 	if err != nil {
 		return fmt.Errorf("delete: %v: %s", err, se)
 	}
