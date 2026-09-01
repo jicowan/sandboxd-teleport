@@ -20,7 +20,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -605,16 +607,39 @@ func defaultKataResources() *specs.LinuxResources {
 
 // writeGuestResolvConf copies the worker's /etc/resolv.conf into the bundle rootfs
 // (the overlay RO lower) so the guest gets cluster DNS.
+//
+// The bundle rootfs comes from an UNTRUSTED workload image, so the write goes through
+// os.Root and unlinks-then-creates rather than truncating: an image that plants /etc
+// or /etc/resolv.conf as a symlink to a worker-pod path would otherwise have us (root)
+// follow it and clobber that path outside the rootfs.
 func writeGuestResolvConf(rootfs string) error {
 	src, err := os.ReadFile("/etc/resolv.conf")
 	if err != nil {
 		return nil // best-effort; no host resolv.conf => skip
 	}
-	etc := filepath.Join(rootfs, "etc")
-	if err := os.MkdirAll(etc, 0o755); err != nil {
-		return err
+	root, err := os.OpenRoot(rootfs)
+	if err != nil {
+		return fmt.Errorf("opening rootfs %q: %w", rootfs, err)
 	}
-	return os.WriteFile(filepath.Join(etc, "resolv.conf"), src, 0o644)
+	defer root.Close()
+	if err := root.Mkdir("etc", 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("creating %q: %w", filepath.Join(rootfs, "etc"), err)
+	}
+	if err := root.Remove("etc/resolv.conf"); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("removing existing guest resolv.conf: %w", err)
+	}
+	f, err := root.OpenFile("etc/resolv.conf", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return fmt.Errorf("creating guest resolv.conf: %w", err)
+	}
+	_, werr := f.Write(src)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return fmt.Errorf("writing guest resolv.conf: %w", werr)
+	}
+	return nil
 }
 
 // waitForFileMV polls for path to exist, up to d (the kata-agent hybrid-vsock

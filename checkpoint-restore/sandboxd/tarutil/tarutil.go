@@ -32,11 +32,13 @@
 // Extraction is confined to the destination with os.Root, so a crafted archive
 // cannot write outside it via "..", an absolute path, or a symlink.
 //
-// PROVENANCE: ported verbatim (owner_linux.go, fifo_linux.go, tarutil.go, and the
-// tests) from Agent Substrate's cmd/ateom-microvm/internal/tarutil at commit c1339e5f
-// (Apache-2.0, Copyright 2026 Google LLC); only the roottest import path is repointed
-// to sandboxd's module. It is phase 1 of adopting substrate's "rootfs upper on host
-// disk" change — see docs/sandboxd/PRD/PRD-microvm-rootfs-upper-on-host-disk.md.
+// PROVENANCE: ported from Agent Substrate's cmd/ateom-microvm/internal/tarutil at
+// commit c1339e5f (Apache-2.0, Copyright 2026 Google LLC); only the import paths are
+// repointed to sandboxd's module. Phase 1 of adopting substrate's "rootfs upper on host
+// disk" change — see docs/sandboxd/PRD/PRD-microvm-rootfs-upper-on-host-disk.md. Later
+// pulled from substrate: ad830889 (CreateFiltered/SkipFunc — exclude overlay workdirs
+// from snapshots) and 71df8c96 (buffered tar streams + a pooled copy buffer, cutting
+// per-entry write(2)s and the 32 KiB/entry io.Copy allocation on the frozen suspend path).
 // NOTE: TestRoundTripDeviceNode needs a host that permits userspace mknod of a device
 // node to build its fixture; Docker Desktop's VM and stock privileged k8s pods deny it
 // (EPERM), so that one case runs only on a permissive host / CI. In production the
@@ -46,6 +48,7 @@ package tarutil
 
 import (
 	"archive/tar"
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -56,33 +59,92 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"golang.org/x/sys/unix"
 )
+
+// streamBufSize batches tar headers and padding into fewer file operations.
+// It must be smaller than copyBufSize so file contents bypass the buffer.
+const streamBufSize = 64 << 10
+
+// copyBufSize is the scratch buffer io.CopyBuffer streams file contents
+// through, in place of the fresh 32 KiB buffer io.Copy allocates per call.
+const copyBufSize = 128 << 10
+
+// File contents must bypass the stream buffer (compile-time assertion).
+const _ = uint(copyBufSize - streamBufSize - 1)
+
+// Stream buffers are Reset(nil) before pooling so they don't retain the file.
+var (
+	tarWriterPool = sync.Pool{New: func() any { return bufio.NewWriterSize(nil, streamBufSize) }}
+	tarReaderPool = sync.Pool{New: func() any { return bufio.NewReaderSize(nil, streamBufSize) }}
+)
+
+var copyBufPool = sync.Pool{New: func() any {
+	b := make([]byte, copyBufSize)
+	return &b
+}}
+
+// copyPooled masks the io.WriterTo/ReaderFrom fast paths (which *os.File
+// implements but can't complete against a tar stream, so they each allocate a
+// fresh 32 KiB buffer per call) so io.CopyBuffer uses the pooled buffer instead.
+func copyPooled(dst io.Writer, src io.Reader) (int64, error) {
+	bp := copyBufPool.Get().(*[]byte)
+	defer copyBufPool.Put(bp)
+	return io.CopyBuffer(writerOnly{dst}, readerOnly{src}, *bp)
+}
+
+type writerOnly struct{ io.Writer }
+type readerOnly struct{ io.Reader }
 
 // Create writes a tar archive of srcDir's contents to tarPath. Entry names are
 // relative to srcDir, so extracting into another directory reproduces the tree.
 // srcDir itself is not an entry.
 //
 // Regular files, directories, symlinks, FIFOs, and device nodes are archived
-// with their mode, ownership, modification time, and user.* xattrs. A file
-// with multiple links inside srcDir is archived once and referenced as a
-// hardlink thereafter. Sockets are skipped (see writeTree).
+// with their mode, ownership, modification time, and user.* / trusted.overlay.*
+// xattrs. A file with multiple links inside srcDir is archived once and
+// referenced as a hardlink thereafter. Sockets are skipped (see writeTree).
 func Create(ctx context.Context, tarPath, srcDir string) error {
+	return CreateFiltered(ctx, tarPath, srcDir, nil)
+}
+
+// SkipFunc reports whether an archive entry should be omitted, given its
+// slash-separated path relative to the archive root. Returning true for a
+// directory omits its entire subtree.
+type SkipFunc func(rel string) bool
+
+// CreateFiltered is Create with entries omitted where skip returns true. A nil
+// skip archives everything.
+func CreateFiltered(ctx context.Context, tarPath, srcDir string, skip SkipFunc) error {
 	f, err := os.Create(tarPath)
 	if err != nil {
 		return fmt.Errorf("creating tar %q: %w", tarPath, err)
 	}
 	defer f.Close()
 
-	tw := tar.NewWriter(f)
-	if err := writeTree(ctx, tw, srcDir); err != nil {
+	// Buffer the writer: most of an archive is 512-byte headers + padding, each
+	// of which would otherwise be its own write(2).
+	bw := tarWriterPool.Get().(*bufio.Writer)
+	bw.Reset(f)
+	defer func() {
+		bw.Reset(nil)
+		tarWriterPool.Put(bw)
+	}()
+	tw := tar.NewWriter(bw)
+	if err := writeTree(ctx, tw, srcDir, skip); err != nil {
 		return err
 	}
 	if err := tw.Close(); err != nil {
 		return fmt.Errorf("closing tar %q: %w", tarPath, err)
 	}
-	// Durable-dir tars are handed to atelet for upload as soon as we return, so
+	// The buffer has to reach the file before the sync below, or the sync
+	// durably persists a truncated archive.
+	if err := bw.Flush(); err != nil {
+		return fmt.Errorf("flushing tar %q: %w", tarPath, err)
+	}
+	// Durable-dir tars are handed off for upload as soon as we return, so
 	// flush to disk rather than trusting the page cache to outlive us.
 	if err := f.Sync(); err != nil {
 		return fmt.Errorf("syncing tar %q: %w", tarPath, err)
@@ -91,9 +153,10 @@ func Create(ctx context.Context, tarPath, srcDir string) error {
 }
 
 // writeTree walks srcDir in lexical order (filepath.WalkDir) and writes one
-// entry per path. The deterministic order keeps archives of identical trees
+// entry per path, omitting entries (and, for directories, subtrees) that skip
+// selects. The deterministic order keeps archives of identical trees
 // byte-comparable, which makes snapshot diffs meaningful.
-func writeTree(ctx context.Context, tw *tar.Writer, srcDir string) error {
+func writeTree(ctx context.Context, tw *tar.Writer, srcDir string, skip SkipFunc) error {
 	// Maps an already-archived multi-link inode to the name it was archived
 	// under, so later links become tar hardlink entries instead of copies.
 	linked := map[inodeKey]string{}
@@ -107,6 +170,12 @@ func writeTree(ctx context.Context, tw *tar.Writer, srcDir string) error {
 			return err
 		}
 		if rel == "." {
+			return nil
+		}
+		if skip != nil && skip(filepath.ToSlash(rel)) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
@@ -204,7 +273,7 @@ func copyFileInto(tw *tar.Writer, path string) error {
 		return fmt.Errorf("opening %q: %w", path, err)
 	}
 	defer in.Close()
-	if _, err := io.Copy(tw, in); err != nil {
+	if _, err := copyPooled(tw, in); err != nil {
 		return fmt.Errorf("archiving contents of %q: %w", path, err)
 	}
 	return nil
@@ -236,7 +305,15 @@ func Extract(tarPath, dstDir string) error {
 	// are applied after every child exists (see restoreDirMeta).
 	dirs := map[string]*tar.Header{}
 
-	tr := tar.NewReader(f)
+	// Buffered like the writer: most of an archive is 512-byte headers, each of
+	// which would otherwise be a read(2) of its own.
+	br := tarReaderPool.Get().(*bufio.Reader)
+	br.Reset(f)
+	defer func() {
+		br.Reset(nil)
+		tarReaderPool.Put(br)
+	}()
+	tr := tar.NewReader(br)
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -279,7 +356,7 @@ func extractEntry(root *os.Root, tr *tar.Reader, hdr *tar.Header, name string, d
 		if err != nil {
 			return fmt.Errorf("creating file %q: %w", name, err)
 		}
-		_, copyErr := io.Copy(out, tr)
+		_, copyErr := copyPooled(out, tr)
 		closeErr := out.Close()
 		if copyErr != nil {
 			return fmt.Errorf("writing contents of %q: %w", name, copyErr)

@@ -47,6 +47,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/jicowan/aio-sandbox/sandboxd/tarutil"
 )
@@ -108,8 +109,17 @@ func snapshotHasRootfsUpper(snapshotDir string) bool {
 // rootfsUpperTarFile. The caller MUST have paused the guest first: virtiofsd is
 // write-through, so a completed guest write has reached the host overlay's upper by
 // then, but a running guest could still add more after the walk.
+//
+// The overlay workdir (<cid>/work, sibling of the <cid>/fs upper — see
+// kata.UpperWorkDirs) is EXCLUDED: with index=off pinned on the merged mount a restored
+// workdir is inert (overlayfs wipes and rebuilds it at mount, and staging recreates it),
+// so archiving it is dead weight and can capture copy-up temp files in flight at pause.
 func tarRootfsUpper(ctx context.Context, dir, checkpointDir string) error {
-	if err := tarutil.Create(ctx, filepath.Join(checkpointDir, rootfsUpperTarFile), dir); err != nil {
+	skipWorkdir := func(rel string) bool {
+		parts := strings.Split(rel, "/")
+		return len(parts) == 2 && parts[1] == "work" // <cid>/work
+	}
+	if err := tarutil.CreateFiltered(ctx, filepath.Join(checkpointDir, rootfsUpperTarFile), dir, skipWorkdir); err != nil {
 		return fmt.Errorf("archiving rootfs upper from %q: %w", dir, err)
 	}
 	return nil
